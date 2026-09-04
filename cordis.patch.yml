@@ -1,0 +1,13 @@
+# dsh-cloudcode-link bundle patch — inserts the Cloud Code PA API provider
+# plugin entry into the composition. Users install via:
+#   dsh plugin --profile web add dsh-cloudcode-link
+- insert:
+    - id: cloudcode-link
+      name: 'dsh-cloudcode-link'
+      config:
+        enabled: !!js "process.env.DSH_CLOUDCODE_ENABLED ?? process.env.DSH_AGY_ENABLED ?? 'true'"
+        baseUrl: !!js "process.env.ANTIGRAVITY_BASE_URL ?? ''"
+        defaultModel: !!js "process.env.DSH_CLOUDCODE_DEFAULT_MODEL ?? process.env.DSH_AGY_DEFAULT_MODEL ?? ''"
+        defaultEffort: !!js "process.env.DSH_CLOUDCODE_DEFAULT_EFFORT ?? process.env.DSH_AGY_DEFAULT_EFFORT ?? ''"
+        heartbeatEnabled: !!js "process.env.DSH_CLOUDCODE_HEARTBEAT_ENABLED ?? process.env.DSH_AGY_HEARTBEAT_ENABLED ?? 'true'"
+        heartbeatIntervalMs: !!js "process.env.DSH_CLOUDCODE_HEARTBEAT_INTERVAL_MS ?? process.env.DSH_AGY_HEARTBEAT_INTERVAL_MS ?? '180000'"
