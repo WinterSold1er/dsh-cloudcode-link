@@ -10,7 +10,7 @@ import { join } from 'node:path'
 export interface OverridesFile { [key: string]: unknown }
 
 export function dshHome(): string {
-  return process.env.DSH_HOME ?? join(homedir(), '.dsh')
+  return process.env.DSH_HOME ?? process.env.DSH_STATE_DIR ?? join(homedir(), '.dsh')
 }
 
 export function stateDir(): string {

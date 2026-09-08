@@ -1,6 +1,6 @@
 // AccountPoolManager: multi-profile credential isolation, family-scoped cooldown,
 // and sticky sequential drain scheduling for Google Antigravity accounts.
-import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { homedir } from 'node:os'
 import {
@@ -14,10 +14,10 @@ import {
   type ModelFamily,
 } from '../common/pool-types.ts'
 import { parseResetDurationMs } from '../common/types.ts'
+import { dshHome } from '../common/config.ts'
 
 export function defaultPoolDir(): string {
-  const dshState = process.env.DSH_STATE_DIR || join(homedir(), '.dsh')
-  return join(dshState, 'agy-accounts')
+  return join(dshHome(), 'agy-accounts')
 }
 
 export class Semaphore {
@@ -52,42 +52,72 @@ export class AccountPoolManager {
   private readonly file: string
   private readonly activeMemoryTokens = new Map<string, { token: string; expiresAt: number }>()
   private readonly accountSemaphores = new Map<string, Semaphore>()
+  private readonly runtimeActiveAccountIds = new Map<ModelFamily, string>()
+  private writeQueue: Promise<void> = Promise.resolve()
 
   constructor(baseDir = defaultPoolDir()) {
     this.baseDir = baseDir
     this.file = join(baseDir, 'pool.json')
+    try {
+      chmodSync(this.baseDir, 0o700)
+    } catch {}
     this.data = this.load()
     this.bootstrapDefaultAccount()
     this.normalizeLegacyPrimary()
   }
 
   private load(): AccountPoolData {
+    if (!existsSync(this.file)) {
+      return defaultPoolData()
+    }
+    const raw = readFileSync(this.file, 'utf8')
     try {
-      if (existsSync(this.file)) {
-        const raw = readFileSync(this.file, 'utf8')
-        const parsed = JSON.parse(raw) as AccountPoolData
-        if (parsed && Array.isArray(parsed.accounts)) {
-          return {
-            ...defaultPoolData(),
-            ...parsed,
-          }
+      const parsed = JSON.parse(raw) as AccountPoolData
+      if (parsed && Array.isArray(parsed.accounts)) {
+        return {
+          ...defaultPoolData(),
+          ...parsed,
         }
       }
-    } catch {
-      // Corrupt file recovery
+      throw new Error('Missing or invalid accounts array')
+    } catch (err: unknown) {
+      const corruptBackup = `${this.file}.corrupted.${Date.now()}`
+      try {
+        renameSync(this.file, corruptBackup)
+      } catch {
+        // Best-effort backup
+      }
+      const msg = err instanceof Error ? err.message : String(err)
+      throw new Error(`Failed to load account pool from ${this.file}: ${msg}. Corrupted file backed up to ${corruptBackup}`)
     }
-    return defaultPoolData()
   }
 
   private persist(): void {
-    try {
-      mkdirSync(dirname(this.file), { recursive: true })
-      const tmp = join(dirname(this.file), '.pool.json.tmp')
-      writeFileSync(tmp, JSON.stringify(this.data, null, 2), 'utf8')
-      renameSync(tmp, this.file)
-    } catch {
-      // Best-effort persistence
+    const doWrite = () => {
+      try {
+        const dir = dirname(this.file)
+        mkdirSync(dir, { recursive: true })
+        try {
+          chmodSync(dir, 0o700)
+        } catch {}
+        const tmp = join(
+          dir,
+          `.pool.json.tmp.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}`,
+        )
+        writeFileSync(tmp, JSON.stringify(this.data, null, 2), { encoding: 'utf8', mode: 0o600 })
+        try {
+          chmodSync(tmp, 0o600)
+        } catch {}
+        renameSync(tmp, this.file)
+      } catch {
+        // Best-effort persistence
+      }
     }
+
+    // Queue writes to serialize concurrent async persist calls
+    this.writeQueue = this.writeQueue.then(doWrite, doWrite)
+    // Synchronously write immediately to satisfy synchronous callers and tests
+    doWrite()
   }
 
   /**
@@ -192,6 +222,9 @@ export class AccountPoolManager {
     const id = `acc_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`
     const dir = join(this.baseDir, `staging_${id}`)
     mkdirSync(join(dir, '.gemini', 'antigravity-cli'), { recursive: true })
+    try {
+      chmodSync(dir, 0o700)
+    } catch {}
     return { id, dir }
   }
 
@@ -203,6 +236,9 @@ export class AccountPoolManager {
     try {
       if (existsSync(dir)) {
         renameSync(dir, finalDir)
+        try {
+          chmodSync(finalDir, 0o700)
+        } catch {}
       }
     } catch {
       // If rename fails, keep dir
@@ -305,6 +341,9 @@ export class AccountPoolManager {
     const id = `acc_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`
     const dir = join(this.baseDir, id)
     mkdirSync(join(dir, '.gemini', 'antigravity-cli'), { recursive: true })
+    try {
+      chmodSync(dir, 0o700)
+    } catch {}
 
     const count = this.data.accounts.length + 1
     const newAccount: ManagedAccount = {
@@ -340,6 +379,12 @@ export class AccountPoolManager {
       // reserved for the system-HOME login and is re-bootstrapped on load.
       this.data.primaryAccountId = undefined
     }
+    if (this.data.pinnedAccountId === id) {
+      this.data.pinnedAccountId = undefined
+    }
+    for (const [fam, accId] of this.runtimeActiveAccountIds.entries()) {
+      if (accId === id) this.runtimeActiveAccountIds.delete(fam as ModelFamily)
+    }
     if (this.data.activeAccountIds) {
       for (const [fam, accId] of Object.entries(this.data.activeAccountIds)) {
         if (accId === id) delete this.data.activeAccountIds[fam as ModelFamily]
@@ -369,10 +414,19 @@ export class AccountPoolManager {
     const acc = this.getAccount(id)
     if (!acc) return false
     acc.enabled = enabled
-    if (!enabled && this.data.activeAccountIds) {
-      for (const [fam, accId] of Object.entries(this.data.activeAccountIds)) {
-        if (accId === id) delete this.data.activeAccountIds[fam as ModelFamily]
+    if (!enabled) {
+      for (const [fam, accId] of this.runtimeActiveAccountIds.entries()) {
+        if (accId === id) this.runtimeActiveAccountIds.delete(fam as ModelFamily)
       }
+      if (this.data.activeAccountIds) {
+        for (const [fam, accId] of Object.entries(this.data.activeAccountIds)) {
+          if (accId === id) delete this.data.activeAccountIds[fam as ModelFamily]
+        }
+      }
+      if (this.data.pinnedAccountId === id) {
+        this.data.pinnedAccountId = undefined
+      }
+      delete acc.pinned
     }
     this.persist()
     return true
@@ -383,6 +437,9 @@ export class AccountPoolManager {
     if (!acc) return
     acc.authRequired = true
     acc.authError = reason || 'Authentication expired or revoked (invalid_grant)'
+    for (const [fam, accId] of this.runtimeActiveAccountIds.entries()) {
+      if (accId === id) this.runtimeActiveAccountIds.delete(fam as ModelFamily)
+    }
     if (this.data.activeAccountIds) {
       for (const [fam, accId] of Object.entries(this.data.activeAccountIds)) {
         if (accId === id) delete this.data.activeAccountIds[fam as ModelFamily]
@@ -423,14 +480,58 @@ export class AccountPoolManager {
     // Move to front of accounts list
     const [acc] = this.data.accounts.splice(idx, 1)
     if (acc) this.data.accounts.unshift(acc)
-    // Make primary immediately active for all families
+    // Make primary immediately active for all families in persistent configuration
     this.data.activeAccountIds = {
       google: id,
       anthropic: id,
       openai: id,
     }
+    // Also synchronize runtime active account IDs
+    this.runtimeActiveAccountIds.set('google', id)
+    this.runtimeActiveAccountIds.set('anthropic', id)
+    this.runtimeActiveAccountIds.set('openai', id)
     this.persist()
     return true
+  }
+
+  /**
+   * Pins an account as the user-locked preferred account.
+   * A healthy pinned account always takes precedence over sequential drain or round-robin.
+   */
+  pinAccount(id: string | null): boolean {
+    if (!id) {
+      this.data.pinnedAccountId = undefined
+      for (const acc of this.data.accounts) {
+        delete acc.pinned
+      }
+      this.persist()
+      return true
+    }
+    const acc = this.getAccount(id)
+    if (!acc || !acc.enabled) return false
+    this.data.pinnedAccountId = id
+    for (const a of this.data.accounts) {
+      if (a.id === id) {
+        a.pinned = true
+      } else {
+        delete a.pinned
+      }
+    }
+    this.runtimeActiveAccountIds.set('google', id)
+    this.runtimeActiveAccountIds.set('anthropic', id)
+    this.runtimeActiveAccountIds.set('openai', id)
+    this.persist()
+    return true
+  }
+
+  /**
+   * Retrieves the currently pinned account if configured.
+   */
+  getPinnedAccount(): ManagedAccount | null {
+    if (this.data.pinnedAccountId) {
+      return this.getAccount(this.data.pinnedAccountId) ?? null
+    }
+    return this.data.accounts.find((a) => a.pinned) ?? null
   }
 
   reorderAccounts(ids: string[]): boolean {
@@ -536,48 +637,64 @@ export class AccountPoolManager {
   }
 
   /**
+   * Checks whether an account is healthy and available for use with the specified model family.
+   * Centralizes checks for enabled, authRequired, cooldown, and 5h/weekly quota exhaustion.
+   */
+  isAccountHealthy(account: ManagedAccount, family: ModelFamily): boolean {
+    if (!account.enabled || account.authRequired) return false
+    const now = Date.now()
+    const cd = account.cooldowns[family]
+    if (cd && cd.cooldownUntil > now) return false
+    const quota = account.quotas[family]
+    if (quota && typeof quota.remainingFraction === 'number' && quota.remainingFraction <= 0.02) {
+      if (quota.resetTime) {
+        const resetMs = Date.parse(quota.resetTime)
+        if (!Number.isNaN(resetMs) && resetMs > now) return false
+      }
+    }
+    if (quota && typeof quota.weeklyFraction === 'number' && quota.weeklyFraction <= 0.01) {
+      if (quota.weeklyResetTime) {
+        const resetMs = Date.parse(quota.weeklyResetTime)
+        if (!Number.isNaN(resetMs) && resetMs > now) return false
+      }
+    }
+    return true
+  }
+
+  /**
    * Core scheduling algorithm: Sticky Sequential Drain.
    * Sticks to the current active account until it runs out of quota/rate-limited,
    * then smoothly advances to the next available account in cyclic order.
    */
   selectAccount(family: ModelFamily): ManagedAccount | null {
-    const now = Date.now()
-    const candidates = this.data.accounts.filter((acc) => {
-      if (!acc.enabled || acc.authRequired) return false
-      const cd = acc.cooldowns[family]
-      if (cd && cd.cooldownUntil > now) return false
-      // If 5h quota remaining is <= 2% and reset time is in future, treat as in cooldown
-      const quota = acc.quotas[family]
-      if (quota && typeof quota.remainingFraction === 'number' && quota.remainingFraction <= 0.02) {
-        if (quota.resetTime) {
-          const resetMs = Date.parse(quota.resetTime)
-          if (!Number.isNaN(resetMs) && resetMs > now) return false
-        }
-      }
-      // If weekly quota remaining is <= 1% and weekly reset time is in future, treat as in cooldown
-      if (quota && typeof quota.weeklyFraction === 'number' && quota.weeklyFraction <= 0.01) {
-        if (quota.weeklyResetTime) {
-          const resetMs = Date.parse(quota.weeklyResetTime)
-          if (!Number.isNaN(resetMs) && resetMs > now) return false
-        }
-      }
-      return true
-    })
+    const candidates = this.data.accounts.filter((acc) => this.isAccountHealthy(acc, family))
 
     if (candidates.length === 0) return null
+
+    // 0. Pin check: if a pinned account is configured and healthy, ALWAYS prefer it!
+    const pinned = this.getPinnedAccount()
+    if (pinned && candidates.some((c) => c.id === pinned.id)) {
+      this.runtimeActiveAccountIds.set(family, pinned.id)
+      return pinned
+    }
 
     if (this.data.mode === 'round-robin' && candidates.length > 1) {
       // Pick least recently used candidate
       const sorted = candidates.slice().sort((a, b) => (a.lastUsedAt ?? 0) - (b.lastUsedAt ?? 0))
-      return sorted[0] ?? null
+      const chosen = sorted[0] ?? null
+      if (chosen) {
+        this.runtimeActiveAccountIds.set(family, chosen.id)
+      }
+      return chosen
     }
 
     // Default 'sequential' (Sticky Sequential Drain):
     // 1. If currently active account for this family is still healthy and has quota, STICK WITH IT!
-    const activeId = this.data.activeAccountIds?.[family]
+    const activeId = this.runtimeActiveAccountIds.get(family) ?? this.data.activeAccountIds?.[family]
     if (activeId) {
       const activeCandidate = candidates.find((a) => a.id === activeId)
       if (activeCandidate) {
+        this.runtimeActiveAccountIds.set(family, activeCandidate.id)
         return activeCandidate
       }
     }
@@ -598,9 +715,9 @@ export class AccountPoolManager {
       }
     }
 
-    if (!this.data.activeAccountIds) this.data.activeAccountIds = {}
-    this.data.activeAccountIds[family] = nextAccount.id
-    this.persist()
+    // CRITICAL: Update runtime in-memory active account ONLY.
+    // NEVER mutate this.data.activeAccountIds and NEVER call this.persist() during read-only selectAccount!
+    this.runtimeActiveAccountIds.set(family, nextAccount.id)
     return nextAccount
   }
 

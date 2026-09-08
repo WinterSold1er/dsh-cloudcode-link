@@ -152,7 +152,7 @@ function formatDuration(ms) {
 //#endregion
 //#region src/common/config.ts
 function dshHome() {
-	return process.env.DSH_HOME ?? join(homedir(), ".dsh");
+	return process.env.DSH_HOME ?? process.env.DSH_STATE_DIR ?? join(homedir(), ".dsh");
 }
 function stateDir() {
 	const newDir = join(dshHome(), "cloudcode-link");
@@ -24384,10 +24384,162 @@ function agentFor(proxyUrl) {
 }
 /** fetch() honoring env proxies, or an explicit per-account proxy URL. */
 function agyFetch(url, init = {}, proxyUrl) {
+	const signal = init.signal ?? AbortSignal.timeout(3e4);
 	return (0, import_undici.fetch)(url, {
 		...init,
+		signal,
 		dispatcher: agentFor(proxyUrl)
 	});
+}
+//#endregion
+//#region src/host/sessions.ts
+/**
+* Deterministic FNV-1a 64-bit hash algorithm producing a signed 64-bit integer string.
+* Meets Google CloudCode / Gemini wireSessionId 64-bit signed integer protocol requirement.
+*
+* Algorithm:
+* - FNV_OFFSET_BASIS_64 = 0xcbf29ce484222325n
+* - FNV_PRIME_64 = 0x100000001b3n
+* - hash = (hash ^ byte) * prime (mod 2^64)
+* - Result coerced to signed 64-bit BigInt via BigInt.asIntN(64, hash).toString()
+*/
+function fnv1a64Signed(str) {
+	const FNV_OFFSET_BASIS_64 = 14695981039346656037n;
+	const FNV_PRIME_64 = 1099511628211n;
+	const bytes = Buffer.from(str, "utf8");
+	let hash = FNV_OFFSET_BASIS_64;
+	for (const byte of bytes) hash = (hash ^ BigInt(byte)) * FNV_PRIME_64 & 18446744073709551615n;
+	return BigInt.asIntN(64, hash).toString();
+}
+var SessionStore = class {
+	data = {};
+	file;
+	constructor(file) {
+		this.file = file;
+		this.load();
+	}
+	load() {
+		try {
+			if (!existsSync(this.file)) return;
+			const v = JSON.parse(readFileSync(this.file, "utf8"));
+			if (v && typeof v === "object") this.data = v;
+		} catch {}
+	}
+	get(key) {
+		return this.data[key];
+	}
+	set(key, b) {
+		this.data[key] = b;
+		this.persist();
+	}
+	delete(key) {
+		delete this.data[key];
+		this.persist();
+	}
+	clear() {
+		this.data = {};
+		this.persist();
+	}
+	all() {
+		return this.data;
+	}
+	/**
+	* Retrieves an existing session or initializes a new one with deterministic wireSessionId
+	* and stable trajectoryId.
+	*/
+	getOrCreate(sessionId, preferredAccountId) {
+		const existing = this.data[sessionId];
+		if (existing) {
+			let modified = false;
+			if (!existing.wireSessionId) {
+				existing.wireSessionId = fnv1a64Signed(sessionId);
+				modified = true;
+			}
+			if (!existing.trajectoryId) {
+				existing.trajectoryId = randomUUID();
+				modified = true;
+			}
+			if (existing.lastStepIndex === void 0) {
+				existing.lastStepIndex = 0;
+				modified = true;
+			}
+			if (!existing.accountId && preferredAccountId) {
+				existing.accountId = preferredAccountId;
+				modified = true;
+			}
+			if (modified) {
+				existing.updatedAt = Date.now();
+				this.persist();
+			}
+			return existing;
+		}
+		const created = {
+			wireSessionId: fnv1a64Signed(sessionId),
+			trajectoryId: randomUUID(),
+			lastStepIndex: 0,
+			accountId: preferredAccountId,
+			updatedAt: Date.now()
+		};
+		this.data[sessionId] = created;
+		this.persist();
+		return created;
+	}
+	/**
+	* Monotonically advances step counter (1, 2, 3...) for the given session.
+	* Returns the updated step, stable trajectoryId, and deterministic wireSessionId.
+	*/
+	nextStep(sessionId) {
+		const session = this.getOrCreate(sessionId);
+		const nextStep = (session.lastStepIndex ?? 0) + 1;
+		session.lastStepIndex = nextStep;
+		session.updatedAt = Date.now();
+		this.persist();
+		return {
+			step: nextStep,
+			trajectoryId: session.trajectoryId,
+			wireSessionId: session.wireSessionId
+		};
+	}
+	/**
+	* Binds an account to a session for session affinity.
+	*/
+	bindAccount(sessionId, accountId) {
+		const session = this.getOrCreate(sessionId);
+		if (session.accountId !== accountId) {
+			session.accountId = accountId;
+			session.updatedAt = Date.now();
+			this.persist();
+		}
+	}
+	/**
+	* Gets the account ID bound to a session if any.
+	*/
+	getBoundAccount(sessionId) {
+		return this.data[sessionId]?.accountId;
+	}
+	/** Atomic write: tmp file + rename, then merge on next load. */
+	persist() {
+		try {
+			mkdirSync(dirname(this.file), { recursive: true });
+			const randomSuffix = Math.random().toString(36).slice(2);
+			const tmp = join(dirname(this.file), `.${require$$basename(this.file)}.tmp.${process.pid}.${Date.now()}.${randomSuffix}`);
+			writeFileSync(tmp, JSON.stringify(this.data, null, 2), {
+				encoding: "utf8",
+				mode: 384
+			});
+			try {
+				chmodSync(tmp, 384);
+			} catch {}
+			renameSync(tmp, this.file);
+			try {
+				chmodSync(this.file, 384);
+			} catch {}
+		} catch {}
+	}
+};
+function require$$basename(p) {
+	const i = Math.max(p.lastIndexOf("/"), p.lastIndexOf("\\"));
+	return i >= 0 ? p.slice(i + 1) : p;
 }
 const ENDPOINT_FALLBACKS = [
 	"https://daily-cloudcode-pa.googleapis.com",
@@ -24598,15 +24750,13 @@ async function ensureProject(token, seedOrEmail = "antigravity-default", proxyUr
 	});
 	return fallback;
 }
-function antigravityRequestEnvelope(wireModelId, isClaude) {
-	const agentId = randomUUID();
-	const trajectoryId = randomUUID();
-	const step = 2;
-	const bytes = randomBytes(8);
-	const sessionId = String(new DataView(bytes.buffer, bytes.byteOffset, 8).getBigInt64(0, true));
+function antigravityRequestEnvelope(wireModelId, isClaude, options) {
+	const trajectoryId = options?.trajectoryId ?? randomUUID();
+	const step = options?.step ?? 1;
+	const wireSessionId = options?.sessionId ? fnv1a64Signed(options.sessionId) : fnv1a64Signed(trajectoryId);
 	const usageLabel = isClaude ? "true" : "false";
 	const labels = {
-		last_step_index: String(1),
+		last_step_index: String(step),
 		trajectory_id: trajectoryId,
 		used_claude: usageLabel,
 		used_claude_conservative: usageLabel
@@ -24614,8 +24764,8 @@ function antigravityRequestEnvelope(wireModelId, isClaude) {
 	const modelEnum = ANTIGRAVITY_MODEL_ENUM[wireModelId];
 	if (modelEnum) labels.model_enum = modelEnum;
 	return {
-		requestId: `agent/${agentId}/${Date.now()}/${trajectoryId}/${step}`,
-		sessionId,
+		requestId: `agent/${trajectoryId}/${step}`,
+		sessionId: wireSessionId,
 		labels
 	};
 }
@@ -24890,7 +25040,6 @@ async function convertMessages(messages, readImage, runtimeModel = "gemini-3.7-f
 					text: sanitizeText(reasoning),
 					thoughtSignature: sig
 				});
-				else parts.push({ text: sanitizeText(reasoning) });
 			}
 		} else if (block.type === "tool-call") {
 			const tc = block;
@@ -24905,6 +25054,7 @@ async function convertMessages(messages, readImage, runtimeModel = "gemini-3.7-f
 				...isValidThoughtSignature(sig) ? { thoughtSignature: sig } : {}
 			});
 		}
+		if (parts.length === 0) parts.push({ text: "(thought omitted)" });
 		appendTurn(contents, "model", parts);
 	}
 	if (contents.length > 0 && contents[0]?.role === "model") contents.unshift({
@@ -24913,10 +25063,21 @@ async function convertMessages(messages, readImage, runtimeModel = "gemini-3.7-f
 	});
 	return sanitizeTopology(contents);
 }
+function hasMatchingFunctionCall(modelTurn, fr) {
+	if (!modelTurn || modelTurn.role !== "model") return false;
+	return modelTurn.parts.some((p) => {
+		if (!("functionCall" in p) || !p.functionCall) return false;
+		const fc = p.functionCall;
+		if (fr.id && fc.id) return fc.id === fr.id;
+		return fc.name === fr.name;
+	});
+}
 /**
 * Topologically sanitizes conversation turns:
 * 1. History model messages: strip thought:true if signature is missing or invalid.
-* 2. Filter orphan functionResponse: each functionResponse MUST follow a model turn with matching functionCall.
+*    If all thoughts in a model turn are stripped, insert placeholder '(thought omitted)'.
+* 2. Unpaired / orphan functionResponse: only retain structured functionResponse if preceding
+*    turn is 'model' with matching functionCall; otherwise degrade to text observation block.
 */
 function sanitizeTopology(contents) {
 	const result = [];
@@ -24926,28 +25087,20 @@ function sanitizeTopology(contents) {
 			const cleanParts = [];
 			for (const part of turn.parts) if ("thought" in part && part.thought) {
 				if (isValidThoughtSignature(part.thoughtSignature)) cleanParts.push(part);
-				else cleanParts.push({ text: sanitizeText(part.text) });
 			} else cleanParts.push(part);
-			if (cleanParts.length > 0) result.push({
+			if (cleanParts.length === 0) cleanParts.push({ text: "(thought omitted)" });
+			result.push({
 				role: "model",
 				parts: cleanParts
 			});
 		} else {
 			const prevTurn = result[result.length - 1];
-			const validCallNames = /* @__PURE__ */ new Set();
-			const validCallIds = /* @__PURE__ */ new Set();
-			if (prevTurn && prevTurn.role === "model") {
-				for (const p of prevTurn.parts) if ("functionCall" in p && p.functionCall) {
-					if (p.functionCall.name) validCallNames.add(p.functionCall.name);
-					if (p.functionCall.id) validCallIds.add(p.functionCall.id);
-				}
-			}
 			const cleanParts = [];
 			for (const part of turn.parts) if ("functionResponse" in part && part.functionResponse) {
 				const fr = part.functionResponse;
-				if (fr.id && validCallIds.has(fr.id) || fr.name && validCallNames.has(fr.name)) cleanParts.push(part);
+				if (hasMatchingFunctionCall(prevTurn, fr)) cleanParts.push(part);
 				else {
-					const output = "output" in fr.response ? fr.response.output : fr.response.error;
+					const output = typeof fr.response === "object" && fr.response !== null ? "output" in fr.response && typeof fr.response.output === "string" ? fr.response.output : "error" in fr.response && typeof fr.response.error === "string" ? fr.response.error : JSON.stringify(fr.response) : String(fr.response ?? "");
 					cleanParts.push({ text: `[Observation from \`${fr.name}\`:\n${output}]` });
 				}
 			} else cleanParts.push(part);
@@ -25289,6 +25442,16 @@ var AgyAdapter = class extends LlmAdapter {
 			const thinkingConfig = getThinkingConfig(options.model, options.reasoningEffort);
 			const convertedTools = convertTools(options.tools, isClaude || isGptOss);
 			const contents = await convertMessages(options.messages, this.deps.readImage, wireModel);
+			const rawSessionId = options.sessionId ? String(options.sessionId) : void 0;
+			let trajectoryId;
+			let step;
+			let boundAccountId;
+			if (rawSessionId && this.deps.sessionStore) {
+				const next = this.deps.sessionStore.nextStep(rawSessionId);
+				step = next.step;
+				trajectoryId = next.trajectoryId;
+				boundAccountId = this.deps.sessionStore.getBoundAccount(rawSessionId);
+			}
 			let hasEmitted = false;
 			const maxAttempts = Math.max(1, this.deps.pool ? this.deps.pool.getAccounts().length : 1);
 			let attempt = 0;
@@ -25297,21 +25460,16 @@ var AgyAdapter = class extends LlmAdapter {
 				attempt++;
 				let account = null;
 				if (this.deps.pool) {
-					account = this.deps.pool.selectAccount(family);
-					if (account && triedAccountIds.has(account.id)) account = this.deps.pool.getAccounts().find((a) => {
-						if (!a.enabled || a.authRequired || triedAccountIds.has(a.id)) return false;
-						const cd = a.cooldowns[family];
-						if (cd && cd.cooldownUntil > Date.now()) return false;
-						const q = a.quotas[family];
-						if (q && typeof q.remainingFraction === "number" && q.remainingFraction <= .02) {
-							if (q.resetTime && Date.parse(q.resetTime) > Date.now()) return false;
-						}
-						if (q && typeof q.weeklyFraction === "number" && q.weeklyFraction <= .01) {
-							if (q.weeklyResetTime && Date.parse(q.weeklyResetTime) > Date.now()) return false;
-						}
-						return true;
-					}) ?? null;
+					const pinned = this.deps.pool.getPinnedAccount();
+					if (pinned && !triedAccountIds.has(pinned.id) && this.deps.pool.isAccountHealthy(pinned, family)) account = pinned;
+					if (!account && boundAccountId && !triedAccountIds.has(boundAccountId)) {
+						const boundAcc = this.deps.pool.getAccount(boundAccountId);
+						if (boundAcc && this.deps.pool.isAccountHealthy(boundAcc, family)) account = boundAcc;
+					}
+					if (!account) account = this.deps.pool.selectAccount(family);
+					if (account && triedAccountIds.has(account.id)) account = this.deps.pool.getAccounts().find((a) => !triedAccountIds.has(a.id) && this.deps.pool.isAccountHealthy(a, family)) ?? null;
 				}
+				if (rawSessionId && this.deps.sessionStore && account) this.deps.sessionStore.bindAccount(rawSessionId, account.id);
 				if (!account && this.deps.pool && !process.env.ANTIGRAVITY_TOKEN?.trim()) {
 					const status = this.deps.pool.getFamilyStatus(family);
 					if (status.suppressed) {
@@ -25368,16 +25526,17 @@ var AgyAdapter = class extends LlmAdapter {
 					}
 					const proxyUrl = account?.proxyUrl;
 					const customEndpoints = this.deps.endpointCandidates;
-					const envelope = antigravityRequestEnvelope(wireModel, isClaude);
+					const envelope = antigravityRequestEnvelope(wireModel, isClaude, {
+						sessionId: rawSessionId,
+						trajectoryId,
+						step
+					});
 					const requestBody = {
 						project: await ensureProject(token, account?.alias || account?.id || "antigravity-default", proxyUrl, customEndpoints),
 						model: wireModel,
 						request: {
 							contents,
-							...options.system ? { systemInstruction: {
-								role: "user",
-								parts: [{ text: options.system }]
-							} } : {},
+							...options.system ? { systemInstruction: { parts: [{ text: options.system }] } } : {},
 							generationConfig: {
 								...typeof options.temperature === "number" ? { temperature: options.temperature } : {},
 								...maxTokens ? { maxOutputTokens: maxTokens } : {},
@@ -25990,8 +26149,7 @@ function writeDoctorReport(deps) {
 //#endregion
 //#region src/host/pool.ts
 function defaultPoolDir() {
-	const dshState = process.env.DSH_STATE_DIR || join(homedir(), ".dsh");
-	return join(dshState, "agy-accounts");
+	return join(dshHome(), "agy-accounts");
 }
 var Semaphore$1 = class {
 	active = 0;
@@ -26024,33 +26182,58 @@ var AccountPoolManager = class {
 	file;
 	activeMemoryTokens = /* @__PURE__ */ new Map();
 	accountSemaphores = /* @__PURE__ */ new Map();
+	runtimeActiveAccountIds = /* @__PURE__ */ new Map();
+	writeQueue = Promise.resolve();
 	constructor(baseDir = defaultPoolDir()) {
 		this.baseDir = baseDir;
 		this.file = join(baseDir, "pool.json");
+		try {
+			chmodSync(this.baseDir, 448);
+		} catch {}
 		this.data = this.load();
 		this.bootstrapDefaultAccount();
 		this.normalizeLegacyPrimary();
 	}
 	load() {
+		if (!existsSync(this.file)) return defaultPoolData();
+		const raw = readFileSync(this.file, "utf8");
 		try {
-			if (existsSync(this.file)) {
-				const raw = readFileSync(this.file, "utf8");
-				const parsed = JSON.parse(raw);
-				if (parsed && Array.isArray(parsed.accounts)) return {
-					...defaultPoolData(),
-					...parsed
-				};
-			}
-		} catch {}
-		return defaultPoolData();
+			const parsed = JSON.parse(raw);
+			if (parsed && Array.isArray(parsed.accounts)) return {
+				...defaultPoolData(),
+				...parsed
+			};
+			throw new Error("Missing or invalid accounts array");
+		} catch (err) {
+			const corruptBackup = `${this.file}.corrupted.${Date.now()}`;
+			try {
+				renameSync(this.file, corruptBackup);
+			} catch {}
+			const msg = err instanceof Error ? err.message : String(err);
+			throw new Error(`Failed to load account pool from ${this.file}: ${msg}. Corrupted file backed up to ${corruptBackup}`);
+		}
 	}
 	persist() {
-		try {
-			mkdirSync(dirname(this.file), { recursive: true });
-			const tmp = join(dirname(this.file), ".pool.json.tmp");
-			writeFileSync(tmp, JSON.stringify(this.data, null, 2), "utf8");
-			renameSync(tmp, this.file);
-		} catch {}
+		const doWrite = () => {
+			try {
+				const dir = dirname(this.file);
+				mkdirSync(dir, { recursive: true });
+				try {
+					chmodSync(dir, 448);
+				} catch {}
+				const tmp = join(dir, `.pool.json.tmp.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}`);
+				writeFileSync(tmp, JSON.stringify(this.data, null, 2), {
+					encoding: "utf8",
+					mode: 384
+				});
+				try {
+					chmodSync(tmp, 384);
+				} catch {}
+				renameSync(tmp, this.file);
+			} catch {}
+		};
+		this.writeQueue = this.writeQueue.then(doWrite, doWrite);
+		doWrite();
 	}
 	/**
 	* Bootstraps the primary account on first start.
@@ -26136,6 +26319,9 @@ var AccountPoolManager = class {
 		const id = `acc_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
 		const dir = join(this.baseDir, `staging_${id}`);
 		mkdirSync(join(dir, ".gemini", "antigravity-cli"), { recursive: true });
+		try {
+			chmodSync(dir, 448);
+		} catch {}
 		return {
 			id,
 			dir
@@ -26147,7 +26333,12 @@ var AccountPoolManager = class {
 	commitStagingAccount(id, dir, alias, email, proxyUrl) {
 		const finalDir = join(this.baseDir, id);
 		try {
-			if (existsSync(dir)) renameSync(dir, finalDir);
+			if (existsSync(dir)) {
+				renameSync(dir, finalDir);
+				try {
+					chmodSync(finalDir, 448);
+				} catch {}
+			}
 		} catch {}
 		const count = this.data.accounts.length + 1;
 		const newAccount = {
@@ -26227,6 +26418,9 @@ var AccountPoolManager = class {
 		const id = `acc_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
 		const dir = join(this.baseDir, id);
 		mkdirSync(join(dir, ".gemini", "antigravity-cli"), { recursive: true });
+		try {
+			chmodSync(dir, 448);
+		} catch {}
 		const count = this.data.accounts.length + 1;
 		const newAccount = {
 			id,
@@ -26252,6 +26446,8 @@ var AccountPoolManager = class {
 			});
 		} catch {}
 		if (this.data.primaryAccountId === id) this.data.primaryAccountId = void 0;
+		if (this.data.pinnedAccountId === id) this.data.pinnedAccountId = void 0;
+		for (const [fam, accId] of this.runtimeActiveAccountIds.entries()) if (accId === id) this.runtimeActiveAccountIds.delete(fam);
 		if (this.data.activeAccountIds) {
 			for (const [fam, accId] of Object.entries(this.data.activeAccountIds)) if (accId === id) delete this.data.activeAccountIds[fam];
 		}
@@ -26276,8 +26472,13 @@ var AccountPoolManager = class {
 		const acc = this.getAccount(id);
 		if (!acc) return false;
 		acc.enabled = enabled;
-		if (!enabled && this.data.activeAccountIds) {
-			for (const [fam, accId] of Object.entries(this.data.activeAccountIds)) if (accId === id) delete this.data.activeAccountIds[fam];
+		if (!enabled) {
+			for (const [fam, accId] of this.runtimeActiveAccountIds.entries()) if (accId === id) this.runtimeActiveAccountIds.delete(fam);
+			if (this.data.activeAccountIds) {
+				for (const [fam, accId] of Object.entries(this.data.activeAccountIds)) if (accId === id) delete this.data.activeAccountIds[fam];
+			}
+			if (this.data.pinnedAccountId === id) this.data.pinnedAccountId = void 0;
+			delete acc.pinned;
 		}
 		this.persist();
 		return true;
@@ -26287,6 +26488,7 @@ var AccountPoolManager = class {
 		if (!acc) return;
 		acc.authRequired = true;
 		acc.authError = reason || "Authentication expired or revoked (invalid_grant)";
+		for (const [fam, accId] of this.runtimeActiveAccountIds.entries()) if (accId === id) this.runtimeActiveAccountIds.delete(fam);
 		if (this.data.activeAccountIds) {
 			for (const [fam, accId] of Object.entries(this.data.activeAccountIds)) if (accId === id) delete this.data.activeAccountIds[fam];
 		}
@@ -26326,8 +26528,40 @@ var AccountPoolManager = class {
 			anthropic: id,
 			openai: id
 		};
+		this.runtimeActiveAccountIds.set("google", id);
+		this.runtimeActiveAccountIds.set("anthropic", id);
+		this.runtimeActiveAccountIds.set("openai", id);
 		this.persist();
 		return true;
+	}
+	/**
+	* Pins an account as the user-locked preferred account.
+	* A healthy pinned account always takes precedence over sequential drain or round-robin.
+	*/
+	pinAccount(id) {
+		if (!id) {
+			this.data.pinnedAccountId = void 0;
+			for (const acc of this.data.accounts) delete acc.pinned;
+			this.persist();
+			return true;
+		}
+		const acc = this.getAccount(id);
+		if (!acc || !acc.enabled) return false;
+		this.data.pinnedAccountId = id;
+		for (const a of this.data.accounts) if (a.id === id) a.pinned = true;
+		else delete a.pinned;
+		this.runtimeActiveAccountIds.set("google", id);
+		this.runtimeActiveAccountIds.set("anthropic", id);
+		this.runtimeActiveAccountIds.set("openai", id);
+		this.persist();
+		return true;
+	}
+	/**
+	* Retrieves the currently pinned account if configured.
+	*/
+	getPinnedAccount() {
+		if (this.data.pinnedAccountId) return this.getAccount(this.data.pinnedAccountId) ?? null;
+		return this.data.accounts.find((a) => a.pinned) ?? null;
 	}
 	reorderAccounts(ids) {
 		const map = new Map(this.data.accounts.map((a) => [a.id, a]));
@@ -26405,37 +26639,54 @@ var AccountPoolManager = class {
 		this.persist();
 	}
 	/**
+	* Checks whether an account is healthy and available for use with the specified model family.
+	* Centralizes checks for enabled, authRequired, cooldown, and 5h/weekly quota exhaustion.
+	*/
+	isAccountHealthy(account, family) {
+		if (!account.enabled || account.authRequired) return false;
+		const now = Date.now();
+		const cd = account.cooldowns[family];
+		if (cd && cd.cooldownUntil > now) return false;
+		const quota = account.quotas[family];
+		if (quota && typeof quota.remainingFraction === "number" && quota.remainingFraction <= .02) {
+			if (quota.resetTime) {
+				const resetMs = Date.parse(quota.resetTime);
+				if (!Number.isNaN(resetMs) && resetMs > now) return false;
+			}
+		}
+		if (quota && typeof quota.weeklyFraction === "number" && quota.weeklyFraction <= .01) {
+			if (quota.weeklyResetTime) {
+				const resetMs = Date.parse(quota.weeklyResetTime);
+				if (!Number.isNaN(resetMs) && resetMs > now) return false;
+			}
+		}
+		return true;
+	}
+	/**
 	* Core scheduling algorithm: Sticky Sequential Drain.
 	* Sticks to the current active account until it runs out of quota/rate-limited,
 	* then smoothly advances to the next available account in cyclic order.
 	*/
 	selectAccount(family) {
-		const now = Date.now();
-		const candidates = this.data.accounts.filter((acc) => {
-			if (!acc.enabled || acc.authRequired) return false;
-			const cd = acc.cooldowns[family];
-			if (cd && cd.cooldownUntil > now) return false;
-			const quota = acc.quotas[family];
-			if (quota && typeof quota.remainingFraction === "number" && quota.remainingFraction <= .02) {
-				if (quota.resetTime) {
-					const resetMs = Date.parse(quota.resetTime);
-					if (!Number.isNaN(resetMs) && resetMs > now) return false;
-				}
-			}
-			if (quota && typeof quota.weeklyFraction === "number" && quota.weeklyFraction <= .01) {
-				if (quota.weeklyResetTime) {
-					const resetMs = Date.parse(quota.weeklyResetTime);
-					if (!Number.isNaN(resetMs) && resetMs > now) return false;
-				}
-			}
-			return true;
-		});
+		const candidates = this.data.accounts.filter((acc) => this.isAccountHealthy(acc, family));
 		if (candidates.length === 0) return null;
-		if (this.data.mode === "round-robin" && candidates.length > 1) return candidates.slice().sort((a, b) => (a.lastUsedAt ?? 0) - (b.lastUsedAt ?? 0))[0] ?? null;
-		const activeId = this.data.activeAccountIds?.[family];
+		const pinned = this.getPinnedAccount();
+		if (pinned && candidates.some((c) => c.id === pinned.id)) {
+			this.runtimeActiveAccountIds.set(family, pinned.id);
+			return pinned;
+		}
+		if (this.data.mode === "round-robin" && candidates.length > 1) {
+			const chosen = candidates.slice().sort((a, b) => (a.lastUsedAt ?? 0) - (b.lastUsedAt ?? 0))[0] ?? null;
+			if (chosen) this.runtimeActiveAccountIds.set(family, chosen.id);
+			return chosen;
+		}
+		const activeId = this.runtimeActiveAccountIds.get(family) ?? this.data.activeAccountIds?.[family];
 		if (activeId) {
 			const activeCandidate = candidates.find((a) => a.id === activeId);
-			if (activeCandidate) return activeCandidate;
+			if (activeCandidate) {
+				this.runtimeActiveAccountIds.set(family, activeCandidate.id);
+				return activeCandidate;
+			}
 		}
 		let nextAccount = candidates[0];
 		if (activeId) {
@@ -26451,9 +26702,7 @@ var AccountPoolManager = class {
 				}
 			}
 		}
-		if (!this.data.activeAccountIds) this.data.activeAccountIds = {};
-		this.data.activeAccountIds[family] = nextAccount.id;
-		this.persist();
+		this.runtimeActiveAccountIds.set(family, nextAccount.id);
 		return nextAccount;
 	}
 	/**
@@ -27054,9 +27303,9 @@ function normalizeStoredToken(raw) {
 	const accessToken = stringField(source, "access_token", "accessToken");
 	const refreshToken = stringField(source, "refresh_token", "refreshToken") ?? (source === raw ? void 0 : stringField(raw, "refresh_token", "refreshToken"));
 	const expiryMs = parseExpiryMs(source.expiry) ?? parseExpiryMs(source.expiresAt) ?? parseExpiryMs(source.expires_in ? Date.now() / 1e3 + Number(source.expires_in) : void 0) ?? parseExpiryMs(raw.expiry);
-	if (!accessToken) return null;
+	if (!accessToken && !refreshToken) return null;
 	return {
-		accessToken,
+		accessToken: accessToken ?? "",
 		refreshToken,
 		expiryMs
 	};
@@ -27099,12 +27348,19 @@ function readMacKeychainToken() {
 var QuotaService = class {
 	preferredEndpointIndex = 0;
 	pool;
+	refreshLocks = /* @__PURE__ */ new Map();
 	constructor(pool) {
 		this.pool = pool;
 	}
 	getTokenFilePath(account) {
 		const home = account.systemHome || !account.dir ? homedir() : account.dir;
 		return join(home, ".gemini", "antigravity-cli", "antigravity-oauth-token");
+	}
+	/**
+	* Refresh token via Google OAuth endpoint. Protected for testability.
+	*/
+	doRefreshToken(refreshToken, proxyUrl) {
+		return refreshTokens(refreshToken, proxyUrl);
 	}
 	/**
 	* Read the system-HOME Keychain credential. Protected so tests (and future
@@ -27162,7 +27418,13 @@ var QuotaService = class {
 				raw.access_token = tokens.access_token;
 				if (tokens.expiryMs) raw.expiry = tokens.expiryMs;
 			}
-			writeFileSync(file, JSON.stringify(raw), "utf8");
+			writeFileSync(file, JSON.stringify(raw), {
+				encoding: "utf8",
+				mode: 384
+			});
+			try {
+				chmodSync(file, 384);
+			} catch {}
 		} catch {}
 	}
 	/**
@@ -27178,21 +27440,33 @@ var QuotaService = class {
 		if (!tok) return null;
 		if (tok.accessToken && (!tok.expiryMs || tok.expiryMs > Date.now() + 6e4)) {
 			this.pool.setMemoryToken(account.id, tok.accessToken, tok.expiryMs);
+			if (account.authRequired) this.pool.clearAuthRequired(account.id);
 			return tok.accessToken;
 		}
-		if (tok.refreshToken) try {
-			const refreshed = await refreshTokens(tok.refreshToken, account.proxyUrl);
-			if (refreshed?.access_token) {
-				this.persistRefreshedToken(account, {
-					access_token: refreshed.access_token,
-					expiryMs: refreshed.expiryMs
-				});
-				if (account.authRequired) this.pool.clearAuthRequired(account.id);
-				return refreshed.access_token;
-			}
-		} catch (err) {
-			const errMsg = String(err);
-			if (/invalid_grant|revoked|disabled|unauthorized_client|token endpoint 400/i.test(errMsg)) this.pool.markAuthRequired(account.id, errMsg);
+		if (tok.refreshToken) {
+			const existing = this.refreshLocks.get(account.id);
+			if (existing) return existing;
+			const refreshPromise = (async () => {
+				try {
+					const refreshed = await this.doRefreshToken(tok.refreshToken, account.proxyUrl);
+					if (refreshed?.access_token) {
+						this.persistRefreshedToken(account, {
+							access_token: refreshed.access_token,
+							expiryMs: refreshed.expiryMs
+						});
+						if (account.authRequired) this.pool.clearAuthRequired(account.id);
+						return refreshed.access_token;
+					}
+				} catch (err) {
+					const errMsg = String(err);
+					if (/invalid_grant|revoked|disabled|unauthorized_client|token endpoint 400/i.test(errMsg)) this.pool.markAuthRequired(account.id, errMsg);
+				}
+				return tok.accessToken || null;
+			})().finally(() => {
+				this.refreshLocks.delete(account.id);
+			});
+			this.refreshLocks.set(account.id, refreshPromise);
+			return refreshPromise;
 		}
 		return tok.accessToken || null;
 	}
@@ -27379,6 +27653,25 @@ var QuotaService = class {
 		return familyQuotas;
 	}
 	/**
+	* Self-heal quarantined accounts that possess a valid refresh_token or still-fresh access_token.
+	*/
+	async selfHealQuarantinedAccounts() {
+		let healed = 0;
+		for (const acc of this.pool.getAccounts()) {
+			if (!acc.enabled || !acc.authRequired) continue;
+			const tok = this.getStoredToken(acc);
+			if (!tok) continue;
+			if (!tok.refreshToken && (!tok.accessToken || tok.expiryMs && tok.expiryMs <= Date.now() + 6e4)) continue;
+			try {
+				if (await this.getValidAccessToken(acc)) {
+					this.pool.clearAuthRequired(acc.id);
+					healed++;
+				}
+			} catch {}
+		}
+		return healed;
+	}
+	/**
 	* Refresh quota statistics for all accounts in the pool.
 	* Automatic polling (force=false) skips restricted accounts (disabled /
 	* auth-quarantined / in cooldown) so the poller never keeps knocking on
@@ -27392,17 +27685,18 @@ var QuotaService = class {
 	* Google is made for this check (risk-control neutral).
 	*/
 	async refreshAllQuotas(force = false) {
-		let accounts = this.pool.getAccounts();
 		if (!force) {
 			const now = Date.now();
-			for (const acc of accounts) {
+			for (const acc of this.pool.getAccounts()) {
 				const flagged = acc.authRequired || Object.values(acc.cooldowns).some((cd) => cd && cd.cooldownUntil > now);
 				if (!acc.systemHome || !flagged) continue;
 				const detected = detectEmailFromAgyLogs(acc.systemHome || !acc.dir ? homedir() : acc.dir);
 				if (detected && detected !== acc.email) this.pool.resetAccountIdentity(acc.id, detected);
 			}
-			accounts = accounts.filter(shouldPollAccount);
+			await this.selfHealQuarantinedAccounts();
 		}
+		let accounts = this.pool.getAccounts();
+		if (!force) accounts = accounts.filter(shouldPollAccount);
 		await Promise.allSettled(accounts.map((acc) => this.refreshAccountQuota(acc, force)));
 	}
 };
@@ -27535,6 +27829,8 @@ function apply(ctx, entryConfig = {}) {
 	const getConfig = () => resolveConfig(entryConfig);
 	const pool = new AccountPoolManager();
 	const quota = new QuotaService(pool);
+	quota.selfHealQuarantinedAccounts().catch(() => void 0);
+	const sessionStore = new SessionStore(join(stateDir(), "sessions.json"));
 	const heartbeat = new HeartbeatManager({
 		getConfig,
 		quota,
@@ -27581,6 +27877,7 @@ function apply(ctx, entryConfig = {}) {
 		catalog,
 		pool,
 		quota,
+		sessionStore,
 		acquire: () => semaphore.acquire(),
 		log,
 		readImage,
@@ -27609,6 +27906,7 @@ function apply(ctx, entryConfig = {}) {
 		cfg: getConfig,
 		auth: () => auth,
 		catalog: () => catalog,
+		store: () => sessionStore,
 		pool: () => pool,
 		poolAuth: () => poolAuth,
 		quota: () => quota,
@@ -27704,6 +28002,19 @@ function apply(ctx, entryConfig = {}) {
 						lastRun
 					});
 				})();
+			}
+		});
+		reg({
+			kind: "exact",
+			path: "/plugins/agy-link/catalog",
+			handler: (_req, res) => {
+				const current = catalog.get();
+				sendJson(res, 200, {
+					ok: true,
+					source: current.source,
+					count: current.models.length,
+					models: current.models
+				});
 			}
 		});
 		reg({

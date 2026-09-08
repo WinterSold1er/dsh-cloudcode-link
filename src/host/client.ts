@@ -1,6 +1,7 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import { agyFetch } from './net.ts'
 import { ANTIGRAVITY_MODEL_ENUM } from './models.ts'
+import { fnv1a64Signed } from './sessions.ts'
 
 export const DEFAULT_ENDPOINT = 'https://daily-cloudcode-pa.googleapis.com'
 export const ENDPOINT_FALLBACKS: readonly string[] = [
@@ -81,7 +82,6 @@ export interface GeminiGenerationConfig {
 export interface GeminiRequestBody {
   contents: GeminiContent[]
   systemInstruction?: {
-    role: 'user'
     parts: GeminiTextPart[]
   }
   generationConfig?: GeminiGenerationConfig
@@ -408,18 +408,23 @@ export function clearModelCache(): void {
   modelCache.clear()
 }
 
+export interface EnvelopeOptions {
+  sessionId?: string
+  trajectoryId?: string
+  step?: number
+}
+
 export function antigravityRequestEnvelope(
   wireModelId: string,
   isClaude: boolean,
+  options?: EnvelopeOptions,
 ): { requestId: string; sessionId: string; labels: Record<string, string> } {
-  const agentId = randomUUID()
-  const trajectoryId = randomUUID()
-  const step = 2
-  const bytes = randomBytes(8)
-  const sessionId = String(new DataView(bytes.buffer, bytes.byteOffset, 8).getBigInt64(0, true))
+  const trajectoryId = options?.trajectoryId ?? randomUUID()
+  const step = options?.step ?? 1
+  const wireSessionId = options?.sessionId ? fnv1a64Signed(options.sessionId) : fnv1a64Signed(trajectoryId)
   const usageLabel = isClaude ? 'true' : 'false'
   const labels: Record<string, string> = {
-    last_step_index: String(step - 1),
+    last_step_index: String(step),
     trajectory_id: trajectoryId,
     used_claude: usageLabel,
     used_claude_conservative: usageLabel,
@@ -427,8 +432,8 @@ export function antigravityRequestEnvelope(
   const modelEnum = ANTIGRAVITY_MODEL_ENUM[wireModelId]
   if (modelEnum) labels.model_enum = modelEnum
   return {
-    requestId: `agent/${agentId}/${Date.now()}/${trajectoryId}/${step}`,
-    sessionId,
+    requestId: `agent/${trajectoryId}/${step}`,
+    sessionId: wireSessionId,
     labels,
   }
 }

@@ -65,6 +65,8 @@ export interface ManagedAccount {
   /** Optional custom proxy URL override (e.g. "socks5://127.0.0.1:7890"). */
   proxyUrl?: string
   enabled: boolean
+  /** Whether this account is pinned by user as the locked preferred account. */
+  pinned?: boolean
   createdAt: number
   lastUsedAt?: number
   /** Set to true when OAuth token refresh fails with invalid_grant or authentication is rejected. */
@@ -130,6 +132,8 @@ export interface AccountPoolData {
   defaultCooldownMs: number
   maxCooldownMs: number
   primaryAccountId?: string
+  /** User-pinned account ID with absolute selection priority. */
+  pinnedAccountId?: string
   /** Currently active account id per model family for sticky sequential drain */
   activeAccountIds?: Partial<Record<ModelFamily, string>>
   accounts: ManagedAccount[]

@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, readFileSync, writeFileSync, existsSync, mkdirSync, utimesSync } from 'node:fs'
+import { mkdtempSync, readFileSync, writeFileSync, existsSync, mkdirSync, utimesSync, readdirSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { modelFamilyOf, shouldPollAccount } from '../src/common/pool-types.ts'
@@ -57,6 +57,36 @@ test('AccountPoolManager bootstraps and manages isolated account slots', () => {
   pool2.deleteAccount(acc2.id)
   assert.equal(pool2.getAccounts().length, 1)
   assert.ok(!existsSync(acc2.dir))
+})
+
+test('AccountPoolManager enforces 0o700 directory and 0o600 file permissions (TC-14)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'agy-pool-perms-'))
+  const pool = new AccountPoolManager(dir)
+
+  // baseDir permissions: 0o700
+  const baseStat = statSync(dir)
+  assert.equal(baseStat.mode & 0o777, 0o700)
+
+  // pool.json permissions: 0o600
+  const poolFile = join(dir, 'pool.json')
+  assert.ok(existsSync(poolFile))
+  const fileStat = statSync(poolFile)
+  assert.equal(fileStat.mode & 0o777, 0o600)
+
+  // Sub-account directory: 0o700
+  const acc = pool.createAccountSlot('Slot Perms')
+  const accStat = statSync(acc.dir)
+  assert.equal(accStat.mode & 0o777, 0o700)
+
+  // Staging directory: 0o700
+  const staging = pool.createStagingSlot()
+  const stagingStat = statSync(staging.dir)
+  assert.equal(stagingStat.mode & 0o777, 0o700)
+
+  // Committed staging directory: 0o700
+  const committed = pool.commitStagingAccount(staging.id, staging.dir, 'Committed')
+  const committedStat = statSync(committed.dir)
+  assert.equal(committedStat.mode & 0o777, 0o700)
 })
 
 test('Sequential Drain: family-scoped rate limit fallback', () => {
@@ -131,12 +161,17 @@ test('Sticky Sequential Drain: stays on current active account until it runs out
   assert.equal(pool.selectAccount('google')?.id, accA.id)
 })
 
-test('Corrupt pool.json recovers gracefully', () => {
+test('Corrupt pool.json backs up to .corrupted and throws readable error', () => {
   const dir = mkdtempSync(join(tmpdir(), 'agy-pool-corrupt-'))
-  writeFileSync(join(dir, 'pool.json'), '{ broken json', 'utf8')
-  const pool = new AccountPoolManager(dir)
-  assert.equal(pool.getAccounts().length, 1)
-  assert.equal(pool.getAccounts()[0]?.id, 'acc_primary')
+  const poolFile = join(dir, 'pool.json')
+  writeFileSync(poolFile, '{ broken json', 'utf8')
+  assert.throws(
+    () => new AccountPoolManager(dir),
+    /Failed to load account pool from/,
+  )
+  assert.equal(existsSync(poolFile), false)
+  const files = readdirSync(dir)
+  assert.ok(files.some((f) => f.includes('.corrupted')))
 })
 
 import { formatDuration, parseResetDurationMs } from '../src/common/types.ts'

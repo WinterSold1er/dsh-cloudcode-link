@@ -203,10 +203,9 @@ export async function convertMessages(
                 text: sanitizeText(reasoning),
                 thoughtSignature: sig,
               })
-            } else {
-              // Without valid thought signature, treat as text
-              parts.push({ text: sanitizeText(reasoning) })
             }
+            // Strict cache affinity: discard reasoning without valid signature.
+            // Never degrade to plain text to avoid polluting context and cache keys.
           }
         } else if (block.type === 'tool-call') {
           const tc = block as ToolCallBlock
@@ -224,6 +223,9 @@ export async function convertMessages(
           })
         }
       }
+      if (parts.length === 0) {
+        parts.push({ text: '(thought omitted)' })
+      }
       appendTurn(contents, 'model', parts)
     }
   }
@@ -239,10 +241,27 @@ export async function convertMessages(
   return sanitizeTopology(contents)
 }
 
+function hasMatchingFunctionCall(
+  modelTurn: GeminiContent | undefined,
+  fr: GeminiFunctionResponsePart['functionResponse'],
+): boolean {
+  if (!modelTurn || modelTurn.role !== 'model') return false
+  return modelTurn.parts.some((p) => {
+    if (!('functionCall' in p) || !p.functionCall) return false
+    const fc = p.functionCall
+    if (fr.id && fc.id) {
+      return fc.id === fr.id
+    }
+    return fc.name === fr.name
+  })
+}
+
 /**
  * Topologically sanitizes conversation turns:
  * 1. History model messages: strip thought:true if signature is missing or invalid.
- * 2. Filter orphan functionResponse: each functionResponse MUST follow a model turn with matching functionCall.
+ *    If all thoughts in a model turn are stripped, insert placeholder '(thought omitted)'.
+ * 2. Unpaired / orphan functionResponse: only retain structured functionResponse if preceding
+ *    turn is 'model' with matching functionCall; otherwise degrade to text observation block.
  */
 export function sanitizeTopology(contents: GeminiContent[]): GeminiContent[] {
   const result: GeminiContent[] = []
@@ -256,46 +275,35 @@ export function sanitizeTopology(contents: GeminiContent[]): GeminiContent[] {
         if ('thought' in part && part.thought) {
           if (isValidThoughtSignature(part.thoughtSignature)) {
             cleanParts.push(part)
-          } else {
-            // Strip invalid signature thought flag, convert to regular text
-            cleanParts.push({ text: sanitizeText(part.text) })
           }
+          // Strip invalid signature thoughts completely. Never degrade to plain text.
         } else {
           cleanParts.push(part)
         }
       }
-      if (cleanParts.length > 0) {
-        result.push({ role: 'model', parts: cleanParts })
+      if (cleanParts.length === 0) {
+        cleanParts.push({ text: '(thought omitted)' })
       }
+      result.push({ role: 'model', parts: cleanParts })
     } else {
-      // User turn: check for orphan functionResponses
+      // User turn
       const prevTurn = result[result.length - 1]
-      const validCallNames = new Set<string>()
-      const validCallIds = new Set<string>()
-
-      if (prevTurn && prevTurn.role === 'model') {
-        for (const p of prevTurn.parts) {
-          if ('functionCall' in p && p.functionCall) {
-            if (p.functionCall.name) validCallNames.add(p.functionCall.name)
-            if (p.functionCall.id) validCallIds.add(p.functionCall.id)
-          }
-        }
-      }
-
       const cleanParts: GeminiPart[] = []
       for (const part of turn.parts) {
         if ('functionResponse' in part && part.functionResponse) {
           const fr = part.functionResponse
-          const matched =
-            (fr.id && validCallIds.has(fr.id)) ||
-            (fr.name && validCallNames.has(fr.name))
-
-          if (matched) {
+          if (hasMatchingFunctionCall(prevTurn, fr)) {
             cleanParts.push(part)
           } else {
-            // Orphan functionResponse: convert to user observation text
+            // Unpaired / orphan functionResponse: degrade safely to plain text observation block
             const output =
-              'output' in fr.response ? fr.response.output : fr.response.error
+              typeof fr.response === 'object' && fr.response !== null
+                ? ('output' in fr.response && typeof fr.response.output === 'string'
+                    ? fr.response.output
+                    : 'error' in fr.response && typeof fr.response.error === 'string'
+                      ? fr.response.error
+                      : JSON.stringify(fr.response))
+                : String(fr.response ?? '')
             cleanParts.push({
               text: `[Observation from \`${fr.name}\`:\n${output}]`,
             })

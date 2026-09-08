@@ -25,6 +25,7 @@ import {
   streamGenerateContent,
   type AntigravityGenerateRequest,
 } from './client.ts'
+import type { SessionStore } from './sessions.ts'
 import { convertTools } from './schema-converter.ts'
 import { convertMessages, type ImageReader } from './message-converter.ts'
 import { mapSseStreamToChunks } from './sse-mapper.ts'
@@ -34,6 +35,7 @@ export interface AgyAdapterDeps {
   catalog: ModelCatalog
   pool?: AccountPoolManager
   quota?: QuotaService
+  sessionStore?: SessionStore
   /** Shared semaphore for cross-session concurrency. */
   acquire?: () => Promise<() => void>
   log?: (msg: string) => void
@@ -152,6 +154,19 @@ export class AgyAdapter extends LlmAdapter {
       const convertedTools = convertTools(options.tools, isClaude || isGptOss)
       const contents = await convertMessages(options.messages, this.deps.readImage, wireModel)
 
+      // Session management & session affinity (FR-01, FR-02)
+      const rawSessionId = options.sessionId ? String(options.sessionId) : undefined
+      let trajectoryId: string | undefined
+      let step: number | undefined
+      let boundAccountId: string | undefined
+
+      if (rawSessionId && this.deps.sessionStore) {
+        const next = this.deps.sessionStore.nextStep(rawSessionId)
+        step = next.step
+        trajectoryId = next.trajectoryId
+        boundAccountId = this.deps.sessionStore.getBoundAccount(rawSessionId)
+      }
+
       let hasEmitted = false
       const maxAttempts = Math.max(1, this.deps.pool ? this.deps.pool.getAccounts().length : 1)
       let attempt = 0
@@ -160,29 +175,40 @@ export class AgyAdapter extends LlmAdapter {
       while (attempt < maxAttempts) {
         attempt++
 
-        // 1. Select account
+        // 1. Select account (Priority arbitration: Pin > Session Affinity > Sticky Sequential)
         let account: ManagedAccount | null = null
         if (this.deps.pool) {
-          account = this.deps.pool.selectAccount(family)
+          // Priority 1: Pin Lock takes absolute precedence if healthy and not tried
+          const pinned = this.deps.pool.getPinnedAccount()
+          if (pinned && !triedAccountIds.has(pinned.id) && this.deps.pool.isAccountHealthy(pinned, family)) {
+            account = pinned
+          }
+
+          // Priority 2: Session Affinity (if no healthy pinned account or pinned account is in cooldown/tried)
+          if (!account && boundAccountId && !triedAccountIds.has(boundAccountId)) {
+            const boundAcc = this.deps.pool.getAccount(boundAccountId)
+            if (boundAcc && this.deps.pool.isAccountHealthy(boundAcc, family)) {
+              account = boundAcc
+            }
+          }
+
+          // Priority 3: Sticky Sequential / Pool selection
+          if (!account) {
+            account = this.deps.pool.selectAccount(family)
+          }
+
+          // Failover candidate: if chosen account was already tried in this turn
           if (account && triedAccountIds.has(account.id)) {
-            // Find another untried enabled candidate
             const alt = this.deps.pool
               .getAccounts()
-              .find((a) => {
-                if (!a.enabled || a.authRequired || triedAccountIds.has(a.id)) return false
-                const cd = a.cooldowns[family]
-                if (cd && cd.cooldownUntil > Date.now()) return false
-                const q = a.quotas[family]
-                if (q && typeof q.remainingFraction === 'number' && q.remainingFraction <= 0.02) {
-                  if (q.resetTime && Date.parse(q.resetTime) > Date.now()) return false
-                }
-                if (q && typeof q.weeklyFraction === 'number' && q.weeklyFraction <= 0.01) {
-                  if (q.weeklyResetTime && Date.parse(q.weeklyResetTime) > Date.now()) return false
-                }
-                return true
-              })
+              .find((a) => !triedAccountIds.has(a.id) && this.deps.pool!.isAccountHealthy(a, family))
             account = alt ?? null
           }
+        }
+
+        // Record affinity binding on selected account
+        if (rawSessionId && this.deps.sessionStore && account) {
+          this.deps.sessionStore.bindAccount(rawSessionId, account.id)
         }
 
         // If pool is present and no candidate account is available (and no env token override)
@@ -261,7 +287,11 @@ export class AgyAdapter extends LlmAdapter {
           // 4. Ensure project ID & build request envelope
           const proxyUrl = account?.proxyUrl
           const customEndpoints = this.deps.endpointCandidates
-          const envelope = antigravityRequestEnvelope(wireModel, isClaude)
+          const envelope = antigravityRequestEnvelope(wireModel, isClaude, {
+            sessionId: rawSessionId,
+            trajectoryId,
+            step,
+          })
           const projectId = await ensureProject(
             token,
             account?.alias || account?.id || 'antigravity-default',
@@ -277,7 +307,6 @@ export class AgyAdapter extends LlmAdapter {
               ...(options.system
                 ? {
                     systemInstruction: {
-                      role: 'user',
                       parts: [{ text: options.system }],
                     },
                   }

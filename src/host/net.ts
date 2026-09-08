@@ -27,8 +27,10 @@ function agentFor(proxyUrl?: string): EnvHttpProxyAgent | ProxyAgent {
 
 /** fetch() honoring env proxies, or an explicit per-account proxy URL. */
 export function agyFetch(url: string, init: RequestInit = {}, proxyUrl?: string): Promise<Response> {
+  const signal = init.signal ?? AbortSignal.timeout(30_000)
   return undiciFetch(url, {
     ...(init as object),
+    signal,
     dispatcher: agentFor(proxyUrl),
   }) as unknown as Promise<Response>
 }

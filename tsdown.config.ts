@@ -1,4 +1,4 @@
-// Build config for dsh-agy-link (tsdown / rolldown):
+// Build config for dsh-cloudcode-link (tsdown / rolldown):
 //  Host half:  src/index.ts  -> dist/index.js (ESM, node), @deepseek-ai/*
 //              stays external (provided by the harness host at runtime).
 //  Client half: src/client/index.ts -> dist/client.js in the DSH
@@ -31,7 +31,7 @@ export default defineConfig([
     external: [/^@deepseek-ai\//, "react"],
     outputOptions: {
       entryFileNames: "client.js",
-      banner: `window.__ModuleLoader__.load({ id: "dsh-agy-link", factory: (require) => {`,
+      banner: `window.__ModuleLoader__.load({ id: "dsh-cloudcode-link", factory: (require) => {`,
       intro: "var module = { exports: {} }; var exports = module.exports;",
       footer: "return module.exports; } });",
     },

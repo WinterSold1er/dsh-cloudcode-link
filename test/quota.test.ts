@@ -463,6 +463,82 @@ test('QuotaService discoverAvailableModels retrieves models using active candida
   }
 })
 
+test('normalizeStoredToken accepts token with only refresh_token', () => {
+  const parsed = normalizeStoredToken({
+    refresh_token: '1//only_refresh',
+  })
+  assert.notEqual(parsed, null)
+  assert.equal(parsed?.accessToken, '')
+  assert.equal(parsed?.refreshToken, '1//only_refresh')
+})
+
+test('QuotaService deduplicates concurrent token refreshes via refreshLocks', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'agy-quota-lock-'))
+  const pool = new AccountPoolManager(dir)
+  const acc = pool.createAccountSlot('lock-acc')
+
+  const tokenDir = join(acc.dir, '.gemini', 'antigravity-cli')
+  mkdirSync(tokenDir, { recursive: true })
+  writeFileSync(
+    join(tokenDir, 'antigravity-oauth-token'),
+    JSON.stringify({
+      refresh_token: '1//test-lock-refresh',
+      expiry: Date.now() - 1000, // Expired
+    }),
+    'utf8',
+  )
+
+  let refreshCalls = 0
+  class LockTestService extends QuotaService {
+    override async doRefreshToken(refreshToken: string) {
+      refreshCalls++
+      await new Promise((r) => setTimeout(r, 50))
+      return {
+        access_token: 'ya29.refreshed_lock_token',
+        expiryMs: Date.now() + 3600_000,
+      }
+    }
+  }
+
+  const svc = new LockTestService(pool)
+  const [t1, t2, t3] = await Promise.all([
+    svc.getValidAccessToken(acc),
+    svc.getValidAccessToken(acc),
+    svc.getValidAccessToken(acc),
+  ])
+
+  assert.equal(refreshCalls, 1, 'Only one refreshTokens call should have been made for concurrent requests')
+  assert.equal(t1, 'ya29.refreshed_lock_token')
+  assert.equal(t2, 'ya29.refreshed_lock_token')
+  assert.equal(t3, 'ya29.refreshed_lock_token')
+})
+
+test('QuotaService selfHealQuarantinedAccounts restores accounts with valid token', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'agy-quota-heal-'))
+  const pool = new AccountPoolManager(dir)
+  const acc = pool.createAccountSlot('heal-acc')
+
+  const tokenDir = join(acc.dir, '.gemini', 'antigravity-cli')
+  mkdirSync(tokenDir, { recursive: true })
+  writeFileSync(
+    join(tokenDir, 'antigravity-oauth-token'),
+    JSON.stringify({
+      access_token: 'ya29.healthy_token',
+      refresh_token: '1//refresh_token',
+      expiry: Date.now() + 3600_000,
+    }),
+    'utf8',
+  )
+
+  pool.markAuthRequired(acc.id, 'Timeout error')
+  assert.equal(pool.getAccount(acc.id)?.authRequired, true)
+
+  const svc = new QuotaService(pool)
+  const healed = await svc.selfHealQuarantinedAccounts()
+  assert.equal(healed, 1)
+  assert.equal(pool.getAccount(acc.id)?.authRequired, undefined)
+})
+
 test('UI_PATHS contains all expected clean SVG paths', async () => {
   const { UI_PATHS } = await import('../src/client/brand-icons.ts')
   assert.ok(UI_PATHS.trash.length > 10)

@@ -17,6 +17,7 @@ import { AccountPoolManager } from './host/pool.ts'
 import { PoolAuthFlow } from './host/pool-auth.ts'
 import { QuotaService } from './host/quota.ts'
 import { HeartbeatManager } from './host/heartbeat.ts'
+import { SessionStore } from './host/sessions.ts'
 import type { ImageReader } from './host/message-converter.ts'
 
 export interface SubagentEvent {
@@ -89,6 +90,8 @@ export function apply(ctx: Context, entryConfig: Record<string, unknown> = {}): 
   const getConfig = (): PluginConfig => resolveConfig(entryConfig)
   const pool = new AccountPoolManager()
   const quota = new QuotaService(pool)
+  void quota.selfHealQuarantinedAccounts().catch(() => undefined)
+  const sessionStore = new SessionStore(join(stateDir(), 'sessions.json'))
   const heartbeat = new HeartbeatManager({ getConfig, quota, pool, log })
   const semaphore = new Semaphore(() => getConfig().maxConcurrent)
 
@@ -150,6 +153,7 @@ export function apply(ctx: Context, entryConfig: Record<string, unknown> = {}): 
     catalog,
     pool,
     quota,
+    sessionStore,
     acquire: () => semaphore.acquire(),
     log,
     readImage,
@@ -186,6 +190,7 @@ export function apply(ctx: Context, entryConfig: Record<string, unknown> = {}): 
       cfg: getConfig,
       auth: () => auth,
       catalog: () => catalog,
+      store: () => sessionStore,
       pool: () => pool,
       poolAuth: () => poolAuth,
       quota: () => quota,
@@ -281,6 +286,20 @@ export function apply(ctx: Context, entryConfig: Record<string, unknown> = {}): 
             lastRun,
           })
         })()
+      },
+    })
+
+    reg({
+      kind: 'exact',
+      path: '/plugins/agy-link/catalog',
+      handler: (_req, res) => {
+        const current = catalog.get()
+        sendJson(res as RawRes, 200, {
+          ok: true,
+          source: current.source,
+          count: current.models.length,
+          models: current.models,
+        })
       },
     })
 

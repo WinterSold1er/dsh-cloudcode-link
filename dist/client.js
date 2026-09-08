@@ -1,5 +1,5 @@
 window.__ModuleLoader__.load({
-	id: "dsh-agy-link",
+	id: "dsh-cloudcode-link",
 	factory: (require) => {
 		var module = { exports: {} };
 		var exports = module.exports;

@@ -7,7 +7,7 @@
 // wrong client pair makes Google return invalid_client and surfaces as
 // "API key is invalid" in the UI. Quota refresh degrades silently to
 // "unavailable" when credentials cannot be sourced.
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -138,8 +138,8 @@ export function normalizeStoredToken(raw: Record<string, unknown>): StoredToken 
     parseExpiryMs(source.expiresAt) ??
     parseExpiryMs(source.expires_in ? Date.now() / 1000 + Number(source.expires_in) : undefined) ??
     parseExpiryMs(raw.expiry)
-  if (!accessToken) return null
-  return { accessToken, refreshToken, expiryMs }
+  if (!accessToken && !refreshToken) return null
+  return { accessToken: accessToken ?? '', refreshToken, expiryMs }
 }
 
 interface DiscoveredModelEntry {
@@ -204,6 +204,7 @@ export function readMacKeychainToken(): StoredToken | null {
 export class QuotaService {
   private preferredEndpointIndex = 0
   private readonly pool: AccountPoolManager
+  private readonly refreshLocks = new Map<string, Promise<string | null>>()
 
   constructor(pool: AccountPoolManager) {
     this.pool = pool
@@ -214,6 +215,13 @@ export class QuotaService {
     // only secondary accounts have an isolated dir.
     const home = account.systemHome || !account.dir ? homedir() : account.dir
     return join(home, '.gemini', 'antigravity-cli', 'antigravity-oauth-token')
+  }
+
+  /**
+   * Refresh token via Google OAuth endpoint. Protected for testability.
+   */
+  protected doRefreshToken(refreshToken: string, proxyUrl?: string): Promise<{ access_token: string; expiryMs?: number } | null> {
+    return refreshTokens(refreshToken, proxyUrl)
   }
 
   /**
@@ -283,7 +291,10 @@ export class QuotaService {
         raw.access_token = tokens.access_token
         if (tokens.expiryMs) raw.expiry = tokens.expiryMs
       }
-      writeFileSync(file, JSON.stringify(raw), 'utf8')
+      writeFileSync(file, JSON.stringify(raw), { encoding: 'utf8', mode: 0o600 })
+      try {
+        chmodSync(file, 0o600)
+      } catch {}
     } catch {
       // Best-effort
     }
@@ -308,29 +319,45 @@ export class QuotaService {
     // Still fresh (with 60s buffer)? Use it directly.
     if (tok.accessToken && (!tok.expiryMs || tok.expiryMs > Date.now() + 60_000)) {
       this.pool.setMemoryToken(account.id, tok.accessToken, tok.expiryMs)
+      if (account.authRequired) {
+        this.pool.clearAuthRequired(account.id)
+      }
       return tok.accessToken
     }
 
     // Expired or missing access token — refresh if we have a refresh_token
     if (tok.refreshToken) {
-      try {
-        const refreshed = await refreshTokens(tok.refreshToken, account.proxyUrl)
-        if (refreshed?.access_token) {
-          this.persistRefreshedToken(account, {
-            access_token: refreshed.access_token,
-            expiryMs: refreshed.expiryMs,
-          })
-          if (account.authRequired) {
-            this.pool.clearAuthRequired(account.id)
-          }
-          return refreshed.access_token
-        }
-      } catch (err: unknown) {
-        const errMsg = String(err)
-        if (/invalid_grant|revoked|disabled|unauthorized_client|token endpoint 400/i.test(errMsg)) {
-          this.pool.markAuthRequired(account.id, errMsg)
-        }
+      const existing = this.refreshLocks.get(account.id)
+      if (existing) {
+        return existing
       }
+
+      const refreshPromise = (async () => {
+        try {
+          const refreshed = await this.doRefreshToken(tok.refreshToken!, account.proxyUrl)
+          if (refreshed?.access_token) {
+            this.persistRefreshedToken(account, {
+              access_token: refreshed.access_token,
+              expiryMs: refreshed.expiryMs,
+            })
+            if (account.authRequired) {
+              this.pool.clearAuthRequired(account.id)
+            }
+            return refreshed.access_token
+          }
+        } catch (err: unknown) {
+          const errMsg = String(err)
+          if (/invalid_grant|revoked|disabled|unauthorized_client|token endpoint 400/i.test(errMsg)) {
+            this.pool.markAuthRequired(account.id, errMsg)
+          }
+        }
+        return tok.accessToken || null
+      })().finally(() => {
+        this.refreshLocks.delete(account.id)
+      })
+
+      this.refreshLocks.set(account.id, refreshPromise)
+      return refreshPromise
     }
 
     return tok.accessToken || null
@@ -620,6 +647,31 @@ export class QuotaService {
   }
 
   /**
+   * Self-heal quarantined accounts that possess a valid refresh_token or still-fresh access_token.
+   */
+  async selfHealQuarantinedAccounts(): Promise<number> {
+    let healed = 0
+    for (const acc of this.pool.getAccounts()) {
+      if (!acc.enabled || !acc.authRequired) continue
+      const tok = this.getStoredToken(acc)
+      if (!tok) continue
+      if (!tok.refreshToken && (!tok.accessToken || (tok.expiryMs && tok.expiryMs <= Date.now() + 60_000))) {
+        continue
+      }
+      try {
+        const token = await this.getValidAccessToken(acc)
+        if (token) {
+          this.pool.clearAuthRequired(acc.id)
+          healed++
+        }
+      } catch {
+        // Refresh failed, remain quarantined
+      }
+    }
+    return healed
+  }
+
+  /**
    * Refresh quota statistics for all accounts in the pool.
    * Automatic polling (force=false) skips restricted accounts (disabled /
    * auth-quarantined / in cooldown) so the poller never keeps knocking on
@@ -633,10 +685,9 @@ export class QuotaService {
    * Google is made for this check (risk-control neutral).
    */
   async refreshAllQuotas(force = false): Promise<void> {
-    let accounts = this.pool.getAccounts()
     if (!force) {
       const now = Date.now()
-      for (const acc of accounts) {
+      for (const acc of this.pool.getAccounts()) {
         const flagged = acc.authRequired || Object.values(acc.cooldowns).some((cd) => cd && cd.cooldownUntil > now)
         if (!acc.systemHome || !flagged) continue
         const home = acc.systemHome || !acc.dir ? homedir() : acc.dir
@@ -645,6 +696,10 @@ export class QuotaService {
           this.pool.resetAccountIdentity(acc.id, detected)
         }
       }
+      await this.selfHealQuarantinedAccounts()
+    }
+    let accounts = this.pool.getAccounts()
+    if (!force) {
       accounts = accounts.filter(shouldPollAccount)
     }
     await Promise.allSettled(accounts.map((acc) => this.refreshAccountQuota(acc, force)))

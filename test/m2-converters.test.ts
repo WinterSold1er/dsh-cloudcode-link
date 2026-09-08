@@ -175,7 +175,7 @@ describe('M2: Converters & Sanitizer', () => {
       }
     })
 
-    it('sanitizeTopology strips unsigned thoughts and sanitizes orphan functionResponses', () => {
+    it('sanitizeTopology strips unsigned thoughts, pairs valid functionResponse, and safely degrades orphan functionResponse', () => {
       const input = [
         {
           role: 'user' as const,
@@ -201,19 +201,20 @@ describe('M2: Converters & Sanitizer', () => {
       const clean = sanitizeTopology(input)
       assert.equal(clean.length, 3)
 
-      // Model turn: unsigned thought stripped to text
+      // Model turn: unsigned thought stripped completely, never degraded to plain text (FR-03)
       const modelParts = clean[1]!.parts
-      assert.equal(modelParts.length, 3)
-      assert.equal('thought' in modelParts[0]!, false)
-      assert.equal((modelParts[0] as { text: string }).text, 'Thinking without signature')
-      assert.equal('thought' in modelParts[1]!, true)
+      assert.equal(modelParts.length, 2)
+      assert.equal('thought' in modelParts[0]!, true)
+      assert.equal((modelParts[0] as { thoughtSignature: string }).thoughtSignature, 'YWJjZA==')
+      assert.ok('functionCall' in modelParts[1]!)
 
-      // User turn: matched response kept, orphan response turned into observation text
+      // User turn: matched functionResponse kept as structured object; orphan safely degraded to observation text
       const userParts = clean[2]!.parts
       assert.equal(userParts.length, 2)
       assert.ok('functionResponse' in userParts[0]!)
-      assert.ok('text' in userParts[1]!)
-      assert.match((userParts[1] as { text: string }).text, /\[Observation from `orphan_tool`:/)
+      assert.equal((userParts[0] as any).functionResponse.name, 'read_file')
+      assert.equal('text' in userParts[1]!, true)
+      assert.equal((userParts[1] as any).text, '[Observation from `orphan_tool`:\norphan content]')
     })
 
     it('prepends user hello if conversation starts with model', async () => {
@@ -346,12 +347,10 @@ describe('M2: Converters & Sanitizer', () => {
       const contents = await convertMessages(msgs)
       assert.equal(contents.length, 2)
       const modelParts = contents[1]!.parts
-      assert.equal(modelParts.length, 2)
-      // Unsigned reasoning degrades to text in sanitizeTopology
-      assert.equal('thought' in modelParts[0]!, false)
-      assert.equal((modelParts[0] as { text: string }).text, 'Thinking without signature')
+      // Unsigned reasoning is completely discarded, never degraded to plain text (FR-03)
+      assert.equal(modelParts.length, 1)
       // Unsigned tool-call retains functionCall but does not have thoughtSignature
-      const funcPart = modelParts[1] as any
+      const funcPart = modelParts[0] as any
       assert.ok(funcPart.functionCall)
       assert.equal(funcPart.thoughtSignature, undefined)
     })
