@@ -2,7 +2,7 @@ import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { createServer } from 'node:http'
 import { mkdtempSync, statSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { tmpdir, homedir } from 'node:os'
 import { join } from 'node:path'
 import { AgyAdapter } from '../src/host/adapter.ts'
 import { ModelCatalog } from '../src/host/models.ts'
@@ -421,24 +421,39 @@ describe('Comprehensive Remediation Verification: 8 Issues', () => {
   // Issue 8: Canonical Base Directory Resolution
   // --------------------------------------------------------------------------
   describe('Issue 8: Canonical Base Directory Resolution', () => {
-    it('dshHome honors DSH_HOME and DSH_STATE_DIR, and defaultPoolDir aligns', () => {
+    it('dshHome honors DSH_HOME and DSH_STATE_DIR, and defaultPoolDir aligns with externalization', () => {
       const origHome = process.env.DSH_HOME
       const origState = process.env.DSH_STATE_DIR
+      const origCloud = process.env.CLOUDCODE_ACCOUNTS_DIR
+      const origAgy = process.env.ANTIGRAVITY_ACCOUNTS_DIR
 
       try {
         delete process.env.DSH_HOME
+        delete process.env.CLOUDCODE_ACCOUNTS_DIR
+        delete process.env.ANTIGRAVITY_ACCOUNTS_DIR
         process.env.DSH_STATE_DIR = '/custom/dsh/state'
         assert.equal(dshHome(), '/custom/dsh/state')
-        assert.equal(defaultPoolDir(), '/custom/dsh/state/agy-accounts')
+        assert.equal(defaultPoolDir(), join(homedir(), '.cloudcode', 'accounts'))
+
+        // DSH host explicitly injects dshHome-derived dir
+        const dshInjected = join(dshHome(), 'agy-accounts')
+        assert.equal(dshInjected, '/custom/dsh/state/agy-accounts')
 
         process.env.DSH_HOME = '/priority/dsh/home'
         assert.equal(dshHome(), '/priority/dsh/home')
-        assert.equal(defaultPoolDir(), '/priority/dsh/home/agy-accounts')
+        assert.equal(join(dshHome(), 'agy-accounts'), '/priority/dsh/home/agy-accounts')
+
+        process.env.CLOUDCODE_ACCOUNTS_DIR = '/external/cloudcode/accounts'
+        assert.equal(defaultPoolDir(), '/external/cloudcode/accounts')
       } finally {
         if (origHome !== undefined) process.env.DSH_HOME = origHome
         else delete process.env.DSH_HOME
         if (origState !== undefined) process.env.DSH_STATE_DIR = origState
         else delete process.env.DSH_STATE_DIR
+        if (origCloud !== undefined) process.env.CLOUDCODE_ACCOUNTS_DIR = origCloud
+        else delete process.env.CLOUDCODE_ACCOUNTS_DIR
+        if (origAgy !== undefined) process.env.ANTIGRAVITY_ACCOUNTS_DIR = origAgy
+        else delete process.env.ANTIGRAVITY_ACCOUNTS_DIR
       }
     })
   })

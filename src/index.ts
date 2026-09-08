@@ -88,7 +88,10 @@ export function apply(ctx: Context, entryConfig: Record<string, unknown> = {}): 
   let lastRun: { ok: boolean; code: string; durationMs: number; model: string } | null = null
 
   const getConfig = (): PluginConfig => resolveConfig(entryConfig)
-  const pool = new AccountPoolManager()
+  const dshAccountsDir = process.env.CLOUDCODE_ACCOUNTS_DIR?.trim()
+    || process.env.ANTIGRAVITY_ACCOUNTS_DIR?.trim()
+    || join(dshHome(), 'agy-accounts')
+  const pool = new AccountPoolManager(dshAccountsDir)
   const quota = new QuotaService(pool)
   void quota.selfHealQuarantinedAccounts().catch(() => undefined)
   const sessionStore = new SessionStore(join(stateDir(), 'sessions.json'))

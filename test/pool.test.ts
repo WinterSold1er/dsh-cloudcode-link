@@ -161,17 +161,20 @@ test('Sticky Sequential Drain: stays on current active account until it runs out
   assert.equal(pool.selectAccount('google')?.id, accA.id)
 })
 
-test('Corrupt pool.json backs up to .corrupted and throws readable error', () => {
+test('Corrupt pool.json backs up to .corrupted and self-heals to empty configuration without throwing', () => {
   const dir = mkdtempSync(join(tmpdir(), 'agy-pool-corrupt-'))
   const poolFile = join(dir, 'pool.json')
   writeFileSync(poolFile, '{ broken json', 'utf8')
-  assert.throws(
-    () => new AccountPoolManager(dir),
-    /Failed to load account pool from/,
-  )
-  assert.equal(existsSync(poolFile), false)
+  assert.doesNotThrow(() => {
+    const pool = new AccountPoolManager(dir)
+    assert.equal(pool.getAccounts().length, 1)
+    assert.equal(pool.getAccounts()[0].id, 'acc_primary')
+  })
   const files = readdirSync(dir)
   assert.ok(files.some((f) => f.includes('.corrupted')))
+  assert.equal(existsSync(poolFile), true)
+  const healed = JSON.parse(readFileSync(poolFile, 'utf8'))
+  assert.ok(Array.isArray(healed.accounts))
 })
 
 import { formatDuration, parseResetDurationMs } from '../src/common/types.ts'

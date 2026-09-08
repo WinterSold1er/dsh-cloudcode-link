@@ -33,19 +33,21 @@ describe('QA Adversarial Verification Suite: Boundary, Failure Paths & Externali
         process.env.DSH_HOME = tempDirA
         process.env.DSH_STATE_DIR = tempDirB
         assert.equal(dshHome(), tempDirA, 'DSH_HOME must have highest precedence')
-        assert.equal(defaultPoolDir(), join(tempDirA, 'agy-accounts'))
+        const dshAccountsDirA = join(dshHome(), 'agy-accounts')
+        assert.equal(dshAccountsDirA, join(tempDirA, 'agy-accounts'))
 
         // Fallback test: DSH_STATE_DIR takes over when DSH_HOME is absent
         delete process.env.DSH_HOME
         assert.equal(dshHome(), tempDirB, 'DSH_STATE_DIR must take over when DSH_HOME is missing')
-        assert.equal(defaultPoolDir(), join(tempDirB, 'agy-accounts'))
+        const dshAccountsDirB = join(dshHome(), 'agy-accounts')
+        assert.equal(dshAccountsDirB, join(tempDirB, 'agy-accounts'))
 
-        // AccountPoolManager bootstraps securely in externalized dir
-        const pool = new AccountPoolManager(defaultPoolDir())
-        const dirStat = statSync(defaultPoolDir())
+        // AccountPoolManager bootstraps securely in DSH injected dir
+        const pool = new AccountPoolManager(dshAccountsDirB)
+        const dirStat = statSync(dshAccountsDirB)
         assert.equal(dirStat.mode & 0o777, 0o700, 'Pool base directory must be strictly 0o700')
 
-        const poolJsonStat = statSync(join(defaultPoolDir(), 'pool.json'))
+        const poolJsonStat = statSync(join(dshAccountsDirB, 'pool.json'))
         assert.equal(poolJsonStat.mode & 0o666, 0o600, 'pool.json file must be strictly 0o600')
       } finally {
         if (origHome !== undefined) process.env.DSH_HOME = origHome

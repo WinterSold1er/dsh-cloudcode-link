@@ -2,10 +2,15 @@
 // plugin's QuotaService uses, with the primary account's stored token, and
 // dumps raw shapes so we can see which one broke and what it returns now.
 import { homedir } from 'node:os'
+import { join } from 'node:path'
+import { dshHome } from '../src/common/config.ts'
 import { AccountPoolManager } from '../src/host/pool.ts'
 import { QuotaService } from '../src/host/quota.ts'
 
-const pool = new AccountPoolManager()
+const dshAccountsDir = process.env.CLOUDCODE_ACCOUNTS_DIR?.trim()
+  || process.env.ANTIGRAVITY_ACCOUNTS_DIR?.trim()
+  || join(dshHome(), 'agy-accounts')
+const pool = new AccountPoolManager(dshAccountsDir)
 const quota = new QuotaService(pool)
 const acc = pool.getAccounts().find((a) => a.systemHome) ?? pool.getAccounts()[0]!
 console.log('account:', acc.id, acc.email, 'systemHome:', !!acc.systemHome)

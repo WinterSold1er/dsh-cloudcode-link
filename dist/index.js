@@ -125,12 +125,12 @@ function formatDuration(ms) {
 }
 //#endregion
 //#region src/common/config.ts
-function dshHome$1() {
+function dshHome() {
 	return process.env.DSH_HOME ?? process.env.DSH_STATE_DIR ?? join(homedir(), ".dsh");
 }
 function stateDir() {
-	const newDir = join(dshHome$1(), "cloudcode-link");
-	const legacyDir = join(dshHome$1(), "agy-link");
+	const newDir = join(dshHome(), "cloudcode-link");
+	const legacyDir = join(dshHome(), "agy-link");
 	if (!existsSync(newDir) && existsSync(legacyDir)) return legacyDir;
 	return newDir;
 }
@@ -24437,10 +24437,15 @@ function agentFor(proxyUrl) {
 }
 /** fetch() honoring env proxies, or an explicit per-account proxy URL. */
 function agyFetch(url, init = {}, proxyUrl) {
-	const signal = init.signal ?? AbortSignal.timeout(3e4);
+	let signal = init.signal ?? void 0;
+	if (!signal && init.timeoutMs !== null && init.timeoutMs !== 0) {
+		const isStream = url.includes("streamGenerateContent");
+		const timeout = init.timeoutMs ?? (isStream ? 0 : 3e4);
+		if (timeout > 0) signal = AbortSignal.timeout(timeout);
+	}
 	return (0, import_undici.fetch)(url, {
 		...init,
-		signal,
+		...signal ? { signal } : {},
 		dispatcher: agentFor(proxyUrl)
 	});
 }
@@ -24469,6 +24474,14 @@ var SessionStore = class {
 	file;
 	constructor(file) {
 		this.file = file;
+		const dir = dirname(file);
+		try {
+			mkdirSync(dir, {
+				recursive: true,
+				mode: 448
+			});
+			chmodSync(dir, 448);
+		} catch {}
 		this.load();
 	}
 	load() {
@@ -24573,9 +24586,16 @@ var SessionStore = class {
 	/** Atomic write: tmp file + rename. */
 	persist() {
 		try {
-			mkdirSync(dirname(this.file), { recursive: true });
+			const dir = dirname(this.file);
+			mkdirSync(dir, {
+				recursive: true,
+				mode: 448
+			});
+			try {
+				chmodSync(dir, 448);
+			} catch {}
 			const randomSuffix = Math.random().toString(36).slice(2);
-			const tmp = join(dirname(this.file), `.${require$$basename(this.file)}.tmp.${process.pid}.${Date.now()}.${randomSuffix}`);
+			const tmp = join(dir, `.${require$$basename(this.file)}.tmp.${process.pid}.${Date.now()}.${randomSuffix}`);
 			writeFileSync(tmp, JSON.stringify(this.data, null, 2), {
 				encoding: "utf8",
 				mode: 384
@@ -24842,7 +24862,8 @@ async function streamGenerateContent(token, request, signal, proxyUrl, customEnd
 				method: "POST",
 				headers,
 				body,
-				signal
+				signal,
+				timeoutMs: null
 			}, proxyUrl);
 			if (res.ok) return {
 				response: res,
@@ -26225,14 +26246,11 @@ function writeDoctorReport(deps) {
 }
 //#endregion
 //#region packages/core/src/pool.ts
-function dshHome() {
-	return process.env.DSH_HOME ?? process.env.DSH_STATE_DIR ?? join(homedir(), ".dsh");
-}
 function defaultPoolDir(customBase) {
 	if (customBase) return customBase;
 	if (process.env.CLOUDCODE_ACCOUNTS_DIR?.trim()) return process.env.CLOUDCODE_ACCOUNTS_DIR.trim();
 	if (process.env.ANTIGRAVITY_ACCOUNTS_DIR?.trim()) return process.env.ANTIGRAVITY_ACCOUNTS_DIR.trim();
-	return join(dshHome(), "agy-accounts");
+	return join(homedir(), ".cloudcode", "accounts");
 }
 var Semaphore$1 = class {
 	active = 0;
@@ -26291,12 +26309,18 @@ var AccountPoolManager = class {
 			};
 			throw new Error("Missing or invalid accounts array");
 		} catch (err) {
-			const corruptBackup = `${this.file}.corrupted.${Date.now()}`;
+			const corruptBackup = `${this.file}.corrupted`;
 			try {
+				if (existsSync(corruptBackup)) rmSync(corruptBackup, { force: true });
 				renameSync(this.file, corruptBackup);
-			} catch {}
-			const msg = err instanceof Error ? err.message : String(err);
-			throw new Error(`Failed to load account pool from ${this.file}: ${msg}. Corrupted file backed up to ${corruptBackup}`);
+			} catch {
+				try {
+					renameSync(this.file, `${this.file}.corrupted.${Date.now()}`);
+				} catch {}
+			}
+			const empty = defaultPoolData();
+			this.data = empty;
+			return empty;
 		}
 	}
 	persist() {
@@ -26387,9 +26411,16 @@ var AccountPoolManager = class {
 	createStagingSlot() {
 		const id = `acc_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
 		const dir = join(this.baseDir, `staging_${id}`);
-		mkdirSync(join(dir, ".gemini", "antigravity-cli"), { recursive: true });
+		const geminiDir = join(dir, ".gemini");
+		const tokenDir = join(geminiDir, "antigravity-cli");
+		mkdirSync(tokenDir, {
+			recursive: true,
+			mode: 448
+		});
 		try {
 			chmodSync(dir, 448);
+			chmodSync(geminiDir, 448);
+			chmodSync(tokenDir, 448);
 		} catch {}
 		return {
 			id,
@@ -26471,9 +26502,16 @@ var AccountPoolManager = class {
 	createAccountSlot(alias) {
 		const id = `acc_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
 		const dir = join(this.baseDir, id);
-		mkdirSync(join(dir, ".gemini", "antigravity-cli"), { recursive: true });
+		const geminiDir = join(dir, ".gemini");
+		const tokenDir = join(geminiDir, "antigravity-cli");
+		mkdirSync(tokenDir, {
+			recursive: true,
+			mode: 448
+		});
 		try {
 			chmodSync(dir, 448);
+			chmodSync(geminiDir, 448);
+			chmodSync(tokenDir, 448);
 		} catch {}
 		const count = this.data.accounts.length + 1;
 		const newAccount = {
@@ -26904,8 +26942,17 @@ async function fetchUserEmail(accessToken, proxyUrl) {
 *   {"token": {access_token, token_type, refresh_token, expiry}, "auth_method": "consumer"}
 */
 function writeAgyTokenFile(homeDir, tokens) {
-	const dir = join(homeDir, ".gemini", "antigravity-cli");
-	mkdirSync(dir, { recursive: true });
+	const geminiDir = join(homeDir, ".gemini");
+	const dir = join(geminiDir, "antigravity-cli");
+	mkdirSync(dir, {
+		recursive: true,
+		mode: 448
+	});
+	try {
+		chmodSync(homeDir, 448);
+		chmodSync(geminiDir, 448);
+		chmodSync(dir, 448);
+	} catch {}
 	const file = join(dir, "antigravity-oauth-token");
 	const expiryIso = tokens.expiryMs ? formatLocalIso(tokens.expiryMs) : formatLocalIso(Date.now() + 36e5);
 	const doc = {
@@ -27344,7 +27391,16 @@ var QuotaService = class {
 		this.pool.setMemoryToken(account.id, tokens.access_token, tokens.expiryMs);
 		const file = this.getTokenFilePath(account);
 		try {
-			mkdirSync(dirname(file), { recursive: true });
+			const dir = dirname(file);
+			const geminiDir = dirname(dir);
+			mkdirSync(dir, {
+				recursive: true,
+				mode: 448
+			});
+			try {
+				chmodSync(geminiDir, 448);
+				chmodSync(dir, 448);
+			} catch {}
 			let raw = {};
 			if (existsSync(file)) try {
 				raw = JSON.parse(readFileSync(file, "utf8"));
@@ -27727,7 +27783,7 @@ function apply(ctx, entryConfig = {}) {
 	let dormantReason = null;
 	let lastRun = null;
 	const getConfig = () => resolveConfig(entryConfig);
-	const pool = new AccountPoolManager();
+	const pool = new AccountPoolManager(process.env.CLOUDCODE_ACCOUNTS_DIR?.trim() || process.env.ANTIGRAVITY_ACCOUNTS_DIR?.trim() || join(dshHome(), "agy-accounts"));
 	const quota = new QuotaService(pool);
 	quota.selfHealQuarantinedAccounts().catch(() => void 0);
 	const sessionStore = new SessionStore(join(stateDir(), "sessions.json"));
@@ -27764,7 +27820,7 @@ function apply(ctx, entryConfig = {}) {
 		try {
 			const id = ref?.attachmentId;
 			if (id && typeof id === "string") {
-				const diskPath = join(dshHome$1(), "attachments", "v1", "objects", id.slice(0, 2), id);
+				const diskPath = join(dshHome(), "attachments", "v1", "objects", id.slice(0, 2), id);
 				if (existsSync(diskPath)) return readFileSync(diskPath);
 			}
 		} catch {
