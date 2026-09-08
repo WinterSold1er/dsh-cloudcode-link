@@ -99,7 +99,7 @@ export function defineAgyAskTool(deps: OneShotDeps & { catalog: () => Catalog })
     timeoutMs: 15 * 60_000,
     async execute(args, exec) {
       const cfg = deps.cfg()
-      const model = resolveAskModel(args.model ?? '', deps.catalog(), cfg.defaultModel)
+      const model = resolveAskModel(args.model ?? '', deps.catalog(), cfg.defaultModel ?? '')
       let parsedSchema: unknown
       if (typeof args.schema === 'string' && args.schema.trim() !== '') {
         try {

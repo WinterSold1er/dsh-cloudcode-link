@@ -19,7 +19,7 @@ const DEFAULT_ENDPOINT_CANDIDATES = [
 	"https://daily-cloudcode-pa.sandbox.googleapis.com",
 	"https://cloudcode-pa.googleapis.com"
 ];
-const DEFAULT_FALLBACK_MODELS = [
+const DEFAULT_FALLBACK_MODELS$1 = [
 	{
 		id: "gemini-3.8-flash",
 		name: "Gemini 3.8 Flash",
@@ -84,7 +84,7 @@ function defaultConfig() {
 		contextWindowDefault: 1048576,
 		maxTokensDefault: 65536,
 		quotaPollIntervalMs: 9e5,
-		fallbackModels: DEFAULT_FALLBACK_MODELS,
+		fallbackModels: DEFAULT_FALLBACK_MODELS$1,
 		askTool: false,
 		disableTelemetry: true,
 		autoFallbackModel: false,
@@ -111,32 +111,6 @@ function defaultConfig() {
 		extraArgs: []
 	};
 }
-function parseResetDurationMs(text) {
-	if (!text) return void 0;
-	const compactMatch = text.match(/resets?\s+in\s+((?:(\d+)\s*h)?\s*(?:(\d+)\s*m)?\s*(?:(\d+)\s*s)?)/i);
-	if (compactMatch && compactMatch[1]?.trim()) {
-		const hours = parseInt(compactMatch[2] || "0", 10);
-		const minutes = parseInt(compactMatch[3] || "0", 10);
-		const seconds = parseInt(compactMatch[4] || "0", 10);
-		const totalMs = (hours * 3600 + minutes * 60 + seconds) * 1e3;
-		if (totalMs > 0) return totalMs;
-	}
-	const wordMatch = text.match(/(?:resets?|retry)\s+(?:in|after)\s+(\d+)\s*(hour|hr|minute|min|second|sec)s?/i);
-	if (wordMatch) {
-		const num = parseInt(wordMatch[1], 10);
-		const unit = wordMatch[2].toLowerCase();
-		if (unit.startsWith("h")) return num * 3600 * 1e3;
-		if (unit.startsWith("m")) return num * 60 * 1e3;
-		if (unit.startsWith("s")) return num * 1e3;
-	}
-	const isoMatch = text.match(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})/);
-	if (isoMatch) {
-		const parsed = Date.parse(isoMatch[0]);
-		if (!Number.isNaN(parsed) && parsed > Date.now()) return parsed - Date.now();
-	}
-	const retrySec = parseInt(text.trim(), 10);
-	if (!Number.isNaN(retrySec) && retrySec > 0 && retrySec < 604800) return retrySec * 1e3;
-}
 function formatDuration(ms) {
 	if (ms <= 0) return "0s";
 	const totalSecs = Math.ceil(ms / 1e3);
@@ -151,12 +125,12 @@ function formatDuration(ms) {
 }
 //#endregion
 //#region src/common/config.ts
-function dshHome() {
+function dshHome$1() {
 	return process.env.DSH_HOME ?? process.env.DSH_STATE_DIR ?? join(homedir(), ".dsh");
 }
 function stateDir() {
-	const newDir = join(dshHome(), "cloudcode-link");
-	const legacyDir = join(dshHome(), "agy-link");
+	const newDir = join(dshHome$1(), "cloudcode-link");
+	const legacyDir = join(dshHome$1(), "agy-link");
 	if (!existsSync(newDir) && existsSync(legacyDir)) return legacyDir;
 	return newDir;
 }
@@ -272,7 +246,7 @@ function resolveConfig(entry, env = process.env, overrides = readOverrides()) {
 	return cfg;
 }
 //#endregion
-//#region src/common/pool-types.ts
+//#region packages/core/src/types/pool-types.ts
 /** Map a model slug to its backend quota counter family. */
 function modelFamilyOf(modelId) {
 	if (!modelId) return "unknown";
@@ -284,10 +258,6 @@ function modelFamilyOf(modelId) {
 }
 /**
 * Whether the background quota poller should touch this account at all.
-* Disabled, auth-quarantined and cooldown accounts are skipped so automatic
-* polling never hammers Google endpoints for accounts already known to be
-* restricted (risk-control exposure minimization). Manual force refresh
-* from the UI bypasses this gate.
 */
 function shouldPollAccount(account) {
 	if (!account.enabled) return false;
@@ -306,7 +276,90 @@ function defaultPoolData() {
 	};
 }
 //#endregion
-//#region src/host/models.ts
+//#region packages/core/src/types/config-types.ts
+const DEFAULT_FALLBACK_MODELS = [
+	{
+		id: "gemini-3.8-flash",
+		name: "Gemini 3.8 Flash",
+		efforts: [
+			"low",
+			"medium",
+			"high"
+		]
+	},
+	{
+		id: "gemini-3.7-flash",
+		name: "Gemini 3.7 Flash",
+		efforts: [
+			"low",
+			"medium",
+			"high"
+		]
+	},
+	{
+		id: "gemini-3.6-flash",
+		name: "Gemini 3.6 Flash",
+		efforts: [
+			"low",
+			"medium",
+			"high"
+		]
+	},
+	{
+		id: "gemini-3.5-flash",
+		name: "Gemini 3.5 Flash",
+		efforts: [
+			"low",
+			"medium",
+			"high"
+		]
+	},
+	{
+		id: "gemini-3.1-pro",
+		name: "Gemini 3.1 Pro",
+		efforts: ["low", "high"]
+	},
+	{
+		id: "claude-sonnet-4-6",
+		name: "Claude Sonnet 4.6 (Thinking)"
+	},
+	{
+		id: "claude-opus-4-6-thinking",
+		name: "Claude Opus 4.6 (Thinking)"
+	},
+	{
+		id: "gpt-oss-120b-medium",
+		name: "GPT-OSS 120B (Medium)"
+	}
+];
+function parseResetDurationMs(text) {
+	if (!text) return void 0;
+	const compactMatch = text.match(/resets?\s+in\s+((?:(\d+)\s*h)?\s*(?:(\d+)\s*m)?\s*(?:(\d+)\s*s)?)/i);
+	if (compactMatch && compactMatch[1]?.trim()) {
+		const hours = parseInt(compactMatch[2] || "0", 10);
+		const minutes = parseInt(compactMatch[3] || "0", 10);
+		const seconds = parseInt(compactMatch[4] || "0", 10);
+		const totalMs = (hours * 3600 + minutes * 60 + seconds) * 1e3;
+		if (totalMs > 0) return totalMs;
+	}
+	const wordMatch = text.match(/(?:resets?|retry)\s+(?:in|after)\s+(\d+)\s*(hour|hr|minute|min|second|sec)s?/i);
+	if (wordMatch) {
+		const num = parseInt(wordMatch[1], 10);
+		const unit = wordMatch[2].toLowerCase();
+		if (unit.startsWith("h")) return num * 3600 * 1e3;
+		if (unit.startsWith("m")) return num * 60 * 1e3;
+		if (unit.startsWith("s")) return num * 1e3;
+	}
+	const isoMatch = text.match(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})/);
+	if (isoMatch) {
+		const parsed = Date.parse(isoMatch[0]);
+		if (!Number.isNaN(parsed) && parsed > Date.now()) return parsed - Date.now();
+	}
+	const retrySec = parseInt(text.trim(), 10);
+	if (!Number.isNaN(retrySec) && retrySec > 0 && retrySec < 604800) return retrySec * 1e3;
+}
+//#endregion
+//#region packages/core/src/models.ts
 /** Parse `agy models` stdout: JSON shapes first, then two-column text. */
 function parseModelsOutput(stdout) {
 	const text = stdout.trim();
@@ -624,7 +677,7 @@ function findEntry(catalog, id) {
 }
 function defaultEffortFor(entry, cfg) {
 	if (!entry.efforts || entry.efforts.length === 0) return void 0;
-	if (cfg.defaultEffort !== "" && entry.efforts.includes(cfg.defaultEffort)) return cfg.defaultEffort;
+	if (cfg.defaultEffort && cfg.defaultEffort !== "" && entry.efforts.includes(cfg.defaultEffort)) return cfg.defaultEffort;
 	for (const pref of [
 		"high",
 		"medium",
@@ -24200,7 +24253,7 @@ var require_eventsource = /* @__PURE__ */ __commonJSMin(((exports, module) => {
 	};
 }));
 //#endregion
-//#region src/host/net.ts
+//#region packages/core/src/net.ts
 var import_undici = (/* @__PURE__ */ __commonJSMin(((exports, module) => {
 	const Client = require_client();
 	const Dispatcher = require_dispatcher();
@@ -24392,7 +24445,7 @@ function agyFetch(url, init = {}, proxyUrl) {
 	});
 }
 //#endregion
-//#region src/host/sessions.ts
+//#region packages/core/src/sessions.ts
 /**
 * Deterministic FNV-1a 64-bit hash algorithm producing a signed 64-bit integer string.
 * Meets Google CloudCode / Gemini wireSessionId 64-bit signed integer protocol requirement.
@@ -24517,7 +24570,7 @@ var SessionStore = class {
 	getBoundAccount(sessionId) {
 		return this.data[sessionId]?.accountId;
 	}
-	/** Atomic write: tmp file + rename, then merge on next load. */
+	/** Atomic write: tmp file + rename. */
 	persist() {
 		try {
 			mkdirSync(dirname(this.file), { recursive: true });
@@ -24812,7 +24865,7 @@ async function streamGenerateContent(token, request, signal, proxyUrl, customEnd
 	throw lastError || /* @__PURE__ */ new Error("All Google CloudCode endpoints failed to connect");
 }
 //#endregion
-//#region src/host/schema-converter.ts
+//#region packages/core/src/schema-converter.ts
 function isRecord(value) {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -24908,7 +24961,7 @@ function normalizeCustomToolSchema(schema) {
 	return out;
 }
 /**
-* Convert DSH ToolSchema to Gemini functionDeclarations.
+* Convert ToolSchema to Gemini functionDeclarations.
 * Gemini models accept JSON Schema through parametersJsonSchema.
 * Claude and GPT-OSS use parameters with allowlist.
 */
@@ -24924,7 +24977,7 @@ function convertTools(tools, useLegacyParameters = false) {
 	}) }];
 }
 //#endregion
-//#region src/host/message-converter.ts
+//#region packages/core/src/message-converter.ts
 const base64SignaturePattern = /^[A-Za-z0-9+/]+={0,2}$/;
 function isValidThoughtSignature(signature) {
 	if (!signature || typeof signature !== "string" || signature.length === 0) return false;
@@ -24953,37 +25006,50 @@ function appendTurn(contents, role, parts) {
 	});
 }
 function parseJsonArguments(raw) {
-	try {
+	if (typeof raw === "object" && raw !== null && !Array.isArray(raw)) return raw;
+	if (typeof raw === "string") try {
 		const parsed = JSON.parse(raw);
 		if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) return parsed;
 	} catch {}
 	return {};
 }
 function extractToolResultText(blocks) {
+	if (typeof blocks === "string") return blocks;
+	if (!Array.isArray(blocks)) return String(blocks ?? "");
 	const texts = [];
-	for (const b of blocks) if (b.type === "text") texts.push(b.text);
+	for (const b of blocks) if (b && typeof b === "object" && "type" in b && b.type === "text") texts.push(String(b.text ?? ""));
 	return texts.join("\n");
 }
 /**
-* Maps DSH conversation messages into Google CloudCode GeminiContent turns.
+* Maps conversation messages into Google CloudCode GeminiContent turns.
 */
 async function convertMessages(messages, readImage, runtimeModel = "gemini-3.7-flash") {
 	const contents = [];
 	const toolNameByCallId = /* @__PURE__ */ new Map();
 	for (const msg of messages) if (msg.role === "assistant" && Array.isArray(msg.content)) {
-		for (const block of msg.content) if (block.type === "tool-call") {
+		for (const block of msg.content) if (block.type === "tool_call" || block.type === "tool-call") {
 			const tc = block;
 			if (tc.id && tc.name) toolNameByCallId.set(tc.id, tc.name);
 		}
 	}
 	for (const msg of messages) if (msg.role === "user") {
 		const parts = [];
-		for (const block of msg.content) if (block.type === "text") {
+		const blocks = typeof msg.content === "string" ? [{
+			type: "text",
+			text: msg.content
+		}] : msg.content || [];
+		for (const block of blocks) if (block.type === "text") {
 			const text = block.text;
 			if (text) parts.push({ text: sanitizeText(text) });
 		} else if (block.type === "image") {
 			const imgBlock = block;
-			if (readImage && imgBlock.attachment) try {
+			if (imgBlock.data) {
+				const buf = Buffer.isBuffer(imgBlock.data) ? imgBlock.data : typeof imgBlock.data === "string" ? Buffer.from(imgBlock.data, "base64") : Buffer.from(imgBlock.data);
+				parts.push({ inlineData: {
+					mimeType: imgBlock.mimeType || detectImageMimeType(buf),
+					data: buf.toString("base64")
+				} });
+			} else if (readImage && imgBlock.attachment) try {
 				const bytes = await readImage(imgBlock.attachment);
 				if (bytes && bytes.length > 0) {
 					const buf = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes);
@@ -24994,18 +25060,20 @@ async function convertMessages(messages, readImage, runtimeModel = "gemini-3.7-f
 					} });
 				}
 			} catch {}
-		} else if (block.type === "tool-result") {
+		} else if (block.type === "tool_result" || block.type === "tool-result") {
 			const tr = block;
-			const toolName = toolNameByCallId.get(tr.toolCallId) || "tool";
-			const resultText = extractToolResultText(tr.content);
+			const callId = tr.id || tr.toolCallId || "";
+			const toolName = toolNameByCallId.get(callId) || "tool";
+			const rawContent = tr.content ?? tr.result;
+			const resultText = extractToolResultText(rawContent);
 			const resp = tr.isError ? { error: resultText || "Tool error" } : { output: resultText || "" };
 			parts.push({ functionResponse: {
 				name: toolName,
 				response: resp,
-				...tr.toolCallId ? { id: tr.toolCallId } : {}
+				...callId ? { id: callId } : {}
 			} });
-			if (readImage && Array.isArray(tr.content)) {
-				for (const sub of tr.content) if (sub.type === "image") {
+			if (readImage && Array.isArray(rawContent)) {
+				for (const sub of rawContent) if (sub.type === "image") {
 					const subImg = sub;
 					if (subImg.attachment) try {
 						const bytes = await readImage(subImg.attachment);
@@ -25024,7 +25092,11 @@ async function convertMessages(messages, readImage, runtimeModel = "gemini-3.7-f
 		appendTurn(contents, "user", parts);
 	} else if (msg.role === "assistant") {
 		const parts = [];
-		for (const block of msg.content) if (block.type === "text") {
+		const blocks = typeof msg.content === "string" ? [{
+			type: "text",
+			text: msg.content
+		}] : msg.content || [];
+		for (const block of blocks) if (block.type === "text") {
 			const text = block.text;
 			const sig = block.thoughtSignature || block.thought_signature;
 			if (text) parts.push({
@@ -25041,7 +25113,7 @@ async function convertMessages(messages, readImage, runtimeModel = "gemini-3.7-f
 					thoughtSignature: sig
 				});
 			}
-		} else if (block.type === "tool-call") {
+		} else if (block.type === "tool_call" || block.type === "tool-call") {
 			const tc = block;
 			const sig = block.thoughtSignature || block.thought_signature;
 			const functionCall = {
@@ -25117,7 +25189,7 @@ function sanitizeTopology(contents) {
 	return result;
 }
 //#endregion
-//#region src/host/sse-mapper.ts
+//#region packages/core/src/sse-mapper.ts
 function createFinishReason(rawReason, hasToolCalls = false) {
 	if (hasToolCalls) return { kind: "tool-calls" };
 	if (rawReason === "MAX_TOKENS") return { kind: "max-tokens" };
@@ -25149,9 +25221,9 @@ function calculateNetUsage(meta) {
 }
 let toolCallGen = 0;
 /**
-* Maps SSE stream from Google CloudCode into DSH StreamChunk async stream.
+* Maps SSE stream from Google CloudCode into StreamChunk async stream.
 */
-async function* mapSseStreamToChunks(response, signal, onFirstEmit) {
+async function* mapSseStreamToChunks$1(response, signal, onFirstEmit) {
 	if (!response.body) {
 		yield {
 			type: "finish",
@@ -25364,6 +25436,9 @@ async function* mapSseStreamToChunks(response, signal, onFirstEmit) {
 		};
 	}
 }
+//#endregion
+//#region src/host/sse-mapper.ts
+const mapSseStreamToChunks = mapSseStreamToChunks$1;
 //#endregion
 //#region src/host/adapter.ts
 var AgyAdapter = class extends LlmAdapter {
@@ -25602,7 +25677,7 @@ var AgyAdapter = class extends LlmAdapter {
 					})) {
 						yield chunk;
 						if (chunk.type === "finish") {
-							if (chunk.reason.kind === "error") runOk = false;
+							if (chunk.reason?.kind === "error") runOk = false;
 						}
 					}
 					if (runOk) {
@@ -25658,8 +25733,7 @@ var AgyAdapter = class extends LlmAdapter {
 	}
 };
 //#endregion
-//#region src/host/oneshot.ts
-/** Per-file inline cap; larger files are truncated. */
+//#region packages/core/src/oneshot.ts
 const INLINE_MAX_BYTES = 262144;
 function looksTextual(head) {
 	if (head === "") return true;
@@ -25695,7 +25769,7 @@ async function inlineFiles(prompt, paths, cwd) {
 async function runAgyOnce(deps, req) {
 	const startTime = Date.now();
 	const cfg = deps.cfg();
-	const timeoutMs = req.timeoutMs ?? cfg.timeoutMs;
+	const timeoutMs = req.timeoutMs ?? cfg.timeoutMs ?? 6e5;
 	const abortController = new AbortController();
 	const timeoutTimer = setTimeout(() => abortController.abort(), timeoutMs);
 	if (req.signal) req.signal.addEventListener("abort", () => abortController.abort());
@@ -25722,7 +25796,7 @@ async function runAgyOnce(deps, req) {
 			durationMs: Date.now() - startTime
 		};
 		const proxyUrl = account?.proxyUrl;
-		const endpoints = deps.endpointCandidates || cfg.endpointCandidates;
+		const endpoints = deps.endpointCandidates || (cfg.endpointCandidates ? [...cfg.endpointCandidates] : void 0);
 		const envelope = antigravityRequestEnvelope(wireModel, isClaude);
 		const requestBody = {
 			project: await ensureProject(token, account?.alias || account?.id || "antigravity-default", proxyUrl, endpoints),
@@ -25755,14 +25829,17 @@ async function runAgyOnce(deps, req) {
 			};
 		}
 		let fullText = "";
-		for await (const chunk of mapSseStreamToChunks(streamResult.response, abortController.signal)) if (chunk.type === "text-delta") fullText += chunk.text;
-		else if (chunk.type === "block-end" && chunk.block.type === "text") {} else if (chunk.type === "finish" && chunk.reason.kind === "error") return {
-			ok: false,
-			text: fullText,
-			conversationId: null,
-			error: chunk.reason.failure?.message || "Stream error",
-			durationMs: Date.now() - startTime
-		};
+		for await (const chunk of mapSseStreamToChunks$1(streamResult.response, abortController.signal)) if (chunk.type === "text-delta") fullText += chunk.text;
+		else if (chunk.type === "finish") {
+			const finishReason = chunk.reason;
+			if (finishReason?.kind === "error") return {
+				ok: false,
+				text: fullText,
+				conversationId: null,
+				error: finishReason.failure?.message || "Stream error",
+				durationMs: Date.now() - startTime
+			};
+		}
 		return {
 			ok: true,
 			text: fullText,
@@ -25872,7 +25949,7 @@ function defineAgyAskTool(deps) {
 		timeoutMs: 9e5,
 		async execute(args, exec) {
 			const cfg = deps.cfg();
-			const model = resolveAskModel(args.model ?? "", deps.catalog(), cfg.defaultModel);
+			const model = resolveAskModel(args.model ?? "", deps.catalog(), cfg.defaultModel ?? "");
 			let parsedSchema;
 			if (typeof args.schema === "string" && args.schema.trim() !== "") try {
 				parsedSchema = JSON.parse(args.schema);
@@ -26147,8 +26224,14 @@ function writeDoctorReport(deps) {
 	return file;
 }
 //#endregion
-//#region src/host/pool.ts
-function defaultPoolDir() {
+//#region packages/core/src/pool.ts
+function dshHome() {
+	return process.env.DSH_HOME ?? process.env.DSH_STATE_DIR ?? join(homedir(), ".dsh");
+}
+function defaultPoolDir(customBase) {
+	if (customBase) return customBase;
+	if (process.env.CLOUDCODE_ACCOUNTS_DIR?.trim()) return process.env.CLOUDCODE_ACCOUNTS_DIR.trim();
+	if (process.env.ANTIGRAVITY_ACCOUNTS_DIR?.trim()) return process.env.ANTIGRAVITY_ACCOUNTS_DIR.trim();
 	return join(dshHome(), "agy-accounts");
 }
 var Semaphore$1 = class {
@@ -26194,6 +26277,9 @@ var AccountPoolManager = class {
 		this.bootstrapDefaultAccount();
 		this.normalizeLegacyPrimary();
 	}
+	getBaseDir() {
+		return this.baseDir;
+	}
 	load() {
 		if (!existsSync(this.file)) return defaultPoolData();
 		const raw = readFileSync(this.file, "utf8");
@@ -26237,14 +26323,6 @@ var AccountPoolManager = class {
 	}
 	/**
 	* Bootstraps the primary account on first start.
-	*
-	* The primary account rides the REAL system HOME with no directory
-	* isolation: agy 1.1.15+ persists credentials in the macOS Keychain
-	* ("Antigravity Safe Storage"), not in a ~/.gemini token file, so copying
-	* files cannot migrate sign-in state. Injecting HOME would log the
-	* primary account out of agy entirely (observed: "Please sign in").
-	* Only SECONDARY pool accounts get isolated HOME directories, created
-	* and signed in via /agy add-account.
 	*/
 	bootstrapDefaultAccount() {
 		if (this.data.accounts.some((a) => a.systemHome)) return;
@@ -26262,12 +26340,6 @@ var AccountPoolManager = class {
 		this.data.primaryAccountId = primary.id;
 		this.persist();
 	}
-	/**
-	* Migrates pool files created before Keychain-aware primaries: an
-	* acc_primary that carries an isolated dir (and likely a broken token
-	* copy) is converted back to the system HOME so agy stays signed in.
-	* The stale directory is left untouched (never deletes user data).
-	*/
 	normalizeLegacyPrimary() {
 		const primary = this.data.accounts.find((a) => a.id === "acc_primary");
 		if (!primary || primary.systemHome) return;
@@ -26312,9 +26384,6 @@ var AccountPoolManager = class {
 	getAccount(id) {
 		return this.data.accounts.find((a) => a.id === id);
 	}
-	/**
-	* Create an isolated staging directory for an unverified account login attempt.
-	*/
 	createStagingSlot() {
 		const id = `acc_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
 		const dir = join(this.baseDir, `staging_${id}`);
@@ -26327,9 +26396,6 @@ var AccountPoolManager = class {
 			dir
 		};
 	}
-	/**
-	* Commit a successfully authenticated staging account into the pool.
-	*/
 	commitStagingAccount(id, dir, alias, email, proxyUrl) {
 		const finalDir = join(this.baseDir, id);
 		try {
@@ -26364,11 +26430,6 @@ var AccountPoolManager = class {
 			});
 		} catch {}
 	}
-	/**
-	* Remove every staging_* directory left behind by interrupted add-account
-	* attempts. Staging dirs are never referenced by committed accounts, so
-	* sweeping them at boot is always safe. Returns the number removed.
-	*/
 	sweepStaleStaging() {
 		let removed = 0;
 		try {
@@ -26383,10 +26444,6 @@ var AccountPoolManager = class {
 		} catch {}
 		return removed;
 	}
-	/**
-	* Sweep agy CLI log files older than maxDays (default: 7) across all managed account directories
-	* as well as the primary system ~/.gemini/antigravity-cli/log directory.
-	*/
 	sweepOldLogs(maxDays = 7) {
 		const maxAgeMs = Math.max(1, maxDays) * 864e5;
 		const now = Date.now();
@@ -26411,9 +26468,6 @@ var AccountPoolManager = class {
 		}
 		return removed;
 	}
-	/**
-	* Create a new isolated account slot and prepare its filesystem home.
-	*/
 	createAccountSlot(alias) {
 		const id = `acc_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
 		const dir = join(this.baseDir, id);
@@ -26494,12 +26548,6 @@ var AccountPoolManager = class {
 		}
 		this.persist();
 	}
-	/**
-	* External re-login detected (agy logout + new login): identity-bound
-	* state from the PREVIOUS account (cooldowns, quotas, auth quarantine)
-	* must not leak onto the new one. Resets everything email-bound while
-	* keeping slot config (alias, dir, proxy, enabled).
-	*/
 	resetAccountIdentity(id, newEmail) {
 		const acc = this.getAccount(id);
 		if (!acc) return;
@@ -26534,10 +26582,6 @@ var AccountPoolManager = class {
 		this.persist();
 		return true;
 	}
-	/**
-	* Pins an account as the user-locked preferred account.
-	* A healthy pinned account always takes precedence over sequential drain or round-robin.
-	*/
 	pinAccount(id) {
 		if (!id) {
 			this.data.pinnedAccountId = void 0;
@@ -26556,9 +26600,6 @@ var AccountPoolManager = class {
 		this.persist();
 		return true;
 	}
-	/**
-	* Retrieves the currently pinned account if configured.
-	*/
 	getPinnedAccount() {
 		if (this.data.pinnedAccountId) return this.getAccount(this.data.pinnedAccountId) ?? null;
 		return this.data.accounts.find((a) => a.pinned) ?? null;
@@ -26592,9 +26633,6 @@ var AccountPoolManager = class {
 		if (email) acc.email = email;
 		this.persist();
 	}
-	/**
-	* Records a rate-limit / 429 error and sets cooldown for the requested model family.
-	*/
 	recordFailure(id, family, reason, serverResetTime) {
 		const acc = this.getAccount(id);
 		if (!acc) return;
@@ -26614,9 +26652,6 @@ var AccountPoolManager = class {
 		};
 		this.persist();
 	}
-	/**
-	* Records a successful run, clearing failure counter and authRequired flag for the family.
-	*/
 	recordSuccess(id, family) {
 		const acc = this.getAccount(id);
 		if (!acc) return;
@@ -26638,10 +26673,6 @@ var AccountPoolManager = class {
 		else acc.cooldowns = {};
 		this.persist();
 	}
-	/**
-	* Checks whether an account is healthy and available for use with the specified model family.
-	* Centralizes checks for enabled, authRequired, cooldown, and 5h/weekly quota exhaustion.
-	*/
 	isAccountHealthy(account, family) {
 		if (!account.enabled || account.authRequired) return false;
 		const now = Date.now();
@@ -26662,11 +26693,6 @@ var AccountPoolManager = class {
 		}
 		return true;
 	}
-	/**
-	* Core scheduling algorithm: Sticky Sequential Drain.
-	* Sticks to the current active account until it runs out of quota/rate-limited,
-	* then smoothly advances to the next available account in cyclic order.
-	*/
 	selectAccount(family) {
 		const candidates = this.data.accounts.filter((acc) => this.isAccountHealthy(acc, family));
 		if (candidates.length === 0) return null;
@@ -26705,9 +26731,6 @@ var AccountPoolManager = class {
 		this.runtimeActiveAccountIds.set(family, nextAccount.id);
 		return nextAccount;
 	}
-	/**
-	* Get countdown in milliseconds until the earliest account in cooldown or quota resets.
-	*/
 	getEarliestResetCountdown(family) {
 		const now = Date.now();
 		let earliest = null;
@@ -26735,9 +26758,6 @@ var AccountPoolManager = class {
 		}
 		return earliest !== null ? Math.max(0, earliest - now) : null;
 	}
-	/**
-	* Inspect availability and suppression status for a given model family across the pool.
-	*/
 	getFamilyStatus(family) {
 		const accounts = this.data.accounts;
 		if (accounts.length === 0) return {
@@ -26775,13 +26795,7 @@ var AccountPoolManager = class {
 	}
 };
 //#endregion
-//#region src/host/oauth.ts
-/**
-* Public Google consumer-OAuth credentials shipped inside the Antigravity
-* desktop product and its agy CLI (also embedded in many public tools).
-* Not secrets owned by this project; AGY_CLIENT_ID / AGY_CLIENT_SECRET env
-* vars override them for BYO OAuth app setups.
-*/
+//#region packages/core/src/oauth.ts
 const AGY_PUBLIC_CLIENT_ID = ["1071006060591", "tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com"].join("-");
 const AGY_PUBLIC_CLIENT_SECRET = ["GOCSPX", "K58FWR486LdLJ1mLB8sXC4z6qDAf"].join("-");
 function resolveClientCredentials() {
@@ -26790,11 +26804,6 @@ function resolveClientCredentials() {
 		clientSecret: process.env.AGY_CLIENT_SECRET || AGY_PUBLIC_CLIENT_SECRET
 	};
 }
-/**
-* Required scopes. `openid` must NOT be added: it routes Google into the
-* hanging firstparty/nativeapp consent for this client (verified by
-* OmniRoute captures).
-*/
 const AGY_SCOPES = [
 	"https://www.googleapis.com/auth/cloud-platform",
 	"https://www.googleapis.com/auth/userinfo.email",
@@ -26804,11 +26813,9 @@ const AGY_SCOPES = [
 ];
 const OAUTH_AUTHORIZE_URL = "https://accounts.google.com/o/oauth2/v2/auth";
 const OAUTH_TOKEN_URL = "https://oauth2.googleapis.com/token";
-const OAUTH_USERINFO_URL$1 = "https://www.googleapis.com/oauth2/v1/userinfo";
-/** Fixed loopback callback registered for the Antigravity client (like opencode). */
+const OAUTH_USERINFO_URL = "https://www.googleapis.com/oauth2/v1/userinfo";
 const OAUTH_CALLBACK_PORT = 51121;
 const OAUTH_REDIRECT_URI = `http://localhost:${OAUTH_CALLBACK_PORT}/oauth-callback`;
-/** Runtime endpoint fallback order (daily first, mirroring OmniRoute). */
 const AGY_ENDPOINTS = [
 	"https://daily-cloudcode-pa.googleapis.com",
 	"https://cloudcode-pa.googleapis.com",
@@ -26884,7 +26891,7 @@ async function refreshTokens(refreshToken, proxyUrl) {
 /** Fetch the account email for a valid access token (best effort). */
 async function fetchUserEmail(accessToken, proxyUrl) {
 	try {
-		const res = await agyFetch(OAUTH_USERINFO_URL$1, { headers: { Authorization: `Bearer ${accessToken}` } }, proxyUrl);
+		const res = await agyFetch(OAUTH_USERINFO_URL, { headers: { Authorization: `Bearer ${accessToken}` } }, proxyUrl);
 		if (!res.ok) return void 0;
 		const info = await res.json();
 		return typeof info.email === "string" && info.email ? info.email : void 0;
@@ -26893,10 +26900,8 @@ async function fetchUserEmail(accessToken, proxyUrl) {
 	}
 }
 /**
-* Persist tokens in agy's own on-disk format so the official binary is
-* signed in for the given HOME. Verified against agy 1.1.16 output:
+* Persist tokens in on-disk format:
 *   {"token": {access_token, token_type, refresh_token, expiry}, "auth_method": "consumer"}
-* where expiry is a local-time ISO-8601 string with timezone offset.
 */
 function writeAgyTokenFile(homeDir, tokens) {
 	const dir = join(homeDir, ".gemini", "antigravity-cli");
@@ -26921,7 +26926,6 @@ function writeAgyTokenFile(homeDir, tokens) {
 	} catch {}
 	return file;
 }
-/** ISO-8601 with local timezone offset, matching agy's writer. */
 function formatLocalIso(ms) {
 	const d = new Date(ms);
 	const pad = (n, w = 2) => String(n).padStart(w, "0");
@@ -26933,13 +26937,8 @@ function formatLocalIso(ms) {
 const CALLBACK_SUCCESS_HTML = `<!doctype html><html><head><meta charset="utf-8"><title>登录成功</title></head>
 <body style="font-family:system-ui;text-align:center;padding:3rem">
 <h2>✓ 授权成功</h2>
-<p>可以关闭此标签页，返回 DeepSeek Harness。</p>
+<p>可以关闭此标签页返回终端或应用。</p>
 </body></html>`;
-/**
-* Listen on 127.0.0.1:OAUTH_CALLBACK_PORT for the OAuth redirect.
-* Rejects on bind failure (e.g. port busy) so callers can fall back to
-* manual code paste. Resolves with the first well-formed callback.
-*/
 function startCallbackListener(timeoutMs = 3e5) {
 	let resolveResult;
 	let rejectResult;
@@ -27002,7 +27001,6 @@ function startCallbackListener(timeoutMs = 3e5) {
 		}
 	};
 }
-/** Open a URL in the system browser. Resolves false when the launch fails. */
 function openBrowser(url) {
 	return new Promise((resolve) => {
 		try {
@@ -27019,10 +27017,6 @@ function openBrowser(url) {
 		}
 	});
 }
-/**
-* Parse a manual paste: accepts a bare authorization code or a full
-* loopback redirect URL (http://localhost:51121/oauth-callback?code=...&state=...).
-*/
 function parsePastedCode(input) {
 	const text = input.trim();
 	if (!text) return null;
@@ -27041,7 +27035,7 @@ function parsePastedCode(input) {
 	return null;
 }
 //#endregion
-//#region src/host/pool-auth.ts
+//#region packages/core/src/pool-auth.ts
 const DONE_STATUS_TTL_MS = 3e4;
 var PoolAuthFlow = class {
 	flow = null;
@@ -27073,11 +27067,6 @@ var PoolAuthFlow = class {
 			if (this.statusValue.phase === "done") this.statusValue = { phase: "idle" };
 		}, DONE_STATUS_TTL_MS);
 	}
-	/**
-	* Shared starter: PKCE + loopback listener + server-side browser open.
-	* Never reports success without a URL; bind failure degrades to manual
-	* paste mode instead of pretending the browser opened.
-	*/
 	async startFlow(flow) {
 		await this.abortActive();
 		const { verifier, challenge } = generatePkce();
@@ -27123,7 +27112,6 @@ var PoolAuthFlow = class {
 			dir: active.dir
 		};
 	}
-	/** Begin adding a pool account (isolated staging HOME). */
 	async begin(alias, proxyUrl) {
 		const staging = this.pool.createStagingSlot();
 		return this.startFlow({
@@ -27133,10 +27121,6 @@ var PoolAuthFlow = class {
 			proxyUrl
 		});
 	}
-	/**
-	* Begin logging in the PRIMARY account (system HOME, no staging slot):
-	* same browser flow, tokens land in ~/.gemini so the real agy stays signed in.
-	*/
 	async beginPrimary() {
 		const { homedir } = await import("node:os");
 		return this.startFlow({
@@ -27145,7 +27129,6 @@ var PoolAuthFlow = class {
 			primary: true
 		});
 	}
-	/** Manual paste fallback: accepts a bare code or the full redirect URL. */
 	async submitCode(input) {
 		const flow = this.flow;
 		if (!flow || this.statusValue.phase !== "waiting") return {
@@ -27243,15 +27226,7 @@ var PoolAuthFlow = class {
 	}
 };
 //#endregion
-//#region src/host/quota.ts
-/**
-* When the quota-summary endpoint transiently fails, per-model fallback
-* data carries a SINGLE window (sometimes the weekly one) and no weekly
-* fields. Overwriting a previously COMPLETE family entry with that partial
-* shape dropped weeklyFraction to none and put wrong-window numbers into
-* the 5h row (observed: 5h=100% / reset a week out / weekly missing).
-* Rule: last-known-good complete data always wins over partial fallback.
-*/
+//#region packages/core/src/quota.ts
 function mergeFallbackFamilyQuota(prev, fallback) {
 	if (prev && typeof prev.remainingFraction === "number") return prev;
 	return fallback;
@@ -27273,12 +27248,9 @@ function detectEmailFromAgyLogs(homeDir) {
 		} catch {}
 	} catch {}
 }
-const OAUTH_USERINFO_URL = "https://www.googleapis.com/oauth2/v1/userinfo";
-/** Platform-faithful agy User-Agent (hardcoding darwin/arm64 on Windows is a bad fingerprint). */
 function agyUserAgent(version = "1.1.15") {
 	return `antigravity/${version} ${process.platform === "win32" ? "windows" : process.platform}/${process.arch === "x64" ? "amd64" : process.arch}`;
 }
-/** Coerce an expiry value (ISO string, epoch millis, or epoch seconds) to ms. */
 function parseExpiryMs(value) {
 	if (typeof value === "number" && Number.isFinite(value)) return value < 1e11 ? value * 1e3 : value;
 	if (typeof value === "string") {
@@ -27292,11 +27264,6 @@ function stringField(obj, ...keys) {
 		if (typeof v === "string" && v) return v;
 	}
 }
-/**
-* Normalize the on-disk token document (nested agy shape or flat legacy
-* shape) to a flat StoredToken. Returns null when no usable string access
-* token is present.
-*/
 function normalizeStoredToken(raw) {
 	const nested = raw.token;
 	const source = nested && typeof nested === "object" && !Array.isArray(nested) ? nested : raw;
@@ -27310,11 +27277,6 @@ function normalizeStoredToken(raw) {
 		expiryMs
 	};
 }
-/**
-* Reads the active primary Antigravity OAuth token from the macOS Keychain.
-* agy 1.1.15+ on macOS stores primary credentials via go-keyring in the Keychain
-* under service "gemini" / account "antigravity" (base64-encoded JSON).
-*/
 function readMacKeychainToken() {
 	if (process.platform !== "darwin") return null;
 	try {
@@ -27356,31 +27318,12 @@ var QuotaService = class {
 		const home = account.systemHome || !account.dir ? homedir() : account.dir;
 		return join(home, ".gemini", "antigravity-cli", "antigravity-oauth-token");
 	}
-	/**
-	* Refresh token via Google OAuth endpoint. Protected for testability.
-	*/
 	doRefreshToken(refreshToken, proxyUrl) {
 		return refreshTokens(refreshToken, proxyUrl);
 	}
-	/**
-	* Read the system-HOME Keychain credential. Protected so tests (and future
-	* platforms) can substitute the reader without touching the real Keychain.
-	*/
 	readSystemKeychainToken() {
 		return readMacKeychainToken();
 	}
-	/**
-	* Read the active token document and normalize it to a flat StoredToken.
-	*
-	* Precedence for the primary / system-HOME account: the macOS Keychain
-	* WINS over the on-disk token file. agy >= 1.1.15 keeps its CURRENT
-	* credential in the Keychain; the on-disk antigravity-oauth-token can be a
-	* stale leftover from a PREVIOUS account's login (verified live: disk
-	* held an old account's token while agy itself was authenticated as
-	* someone else — disk-first precedence made every quota refresh fetch the
-	* WRONG account's numbers). Isolated pool accounts only ever read their
-	* own directory's file; the Keychain is one shared slot they must not see.
-	*/
 	getStoredToken(account) {
 		const disk = (() => {
 			const file = this.getTokenFilePath(account);
@@ -27397,7 +27340,6 @@ var QuotaService = class {
 		}
 		return disk;
 	}
-	/** Persist refreshed tokens back in the SAME on-disk shape agy wrote. */
 	persistRefreshedToken(account, tokens) {
 		this.pool.setMemoryToken(account.id, tokens.access_token, tokens.expiryMs);
 		const file = this.getTokenFilePath(account);
@@ -27427,11 +27369,6 @@ var QuotaService = class {
 			} catch {}
 		} catch {}
 	}
-	/**
-	* Get a valid access token, refreshing via refresh_token when expired.
-	* Uses the public Antigravity client credentials (env-overridable), so
-	* refresh works out of the box.
-	*/
 	async getValidAccessToken(account) {
 		if (process.env.ANTIGRAVITY_TOKEN?.trim()) return process.env.ANTIGRAVITY_TOKEN.trim();
 		const mem = this.pool.getMemoryToken(account.id);
@@ -27470,9 +27407,6 @@ var QuotaService = class {
 		}
 		return tok.accessToken || null;
 	}
-	/**
-	* Query live user info (email) from Google OAuth userinfo endpoint.
-	*/
 	async fetchUserInfo(accessToken, proxyUrl) {
 		try {
 			const res = await agyFetch(OAUTH_USERINFO_URL, { headers: { Authorization: `Bearer ${accessToken}` } }, proxyUrl);
@@ -27480,19 +27414,12 @@ var QuotaService = class {
 		} catch {}
 		return null;
 	}
-	/**
-	* Re-order endpoints so the preferred/working endpoint is tried first.
-	*/
 	getOrderedEndpoints() {
 		const total = AGY_ENDPOINTS.length;
 		const ordered = [];
 		for (let i = 0; i < total; i++) ordered.push(AGY_ENDPOINTS[(this.preferredEndpointIndex + i) % total]);
 		return ordered;
 	}
-	/**
-	* Fetch official multi-bucket quota summary (both weekly and 5h limit windows)
-	* via v1internal:retrieveUserQuotaSummary.
-	*/
 	async fetchQuotaSummary(accessToken, proxyUrl) {
 		const endpoints = this.getOrderedEndpoints();
 		for (let i = 0; i < endpoints.length; i++) {
@@ -27516,9 +27443,6 @@ var QuotaService = class {
 		}
 		return null;
 	}
-	/**
-	* Fetch available models and model-level quotas via v1internal:fetchAvailableModels.
-	*/
 	async fetchAvailableModels(accessToken, proxyUrl) {
 		const endpoints = this.getOrderedEndpoints();
 		for (let i = 0; i < endpoints.length; i++) {
@@ -27542,9 +27466,6 @@ var QuotaService = class {
 		}
 		return null;
 	}
-	/**
-	* Automatically locate a valid account and fetch real-time available models from CloudCode.
-	*/
 	async discoverAvailableModels() {
 		if (process.env.ANTIGRAVITY_TOKEN?.trim()) return this.fetchAvailableModels(process.env.ANTIGRAVITY_TOKEN.trim());
 		const poolData = this.pool.getPoolData();
@@ -27555,11 +27476,6 @@ var QuotaService = class {
 		if (!accessToken) return null;
 		return this.fetchAvailableModels(accessToken, candidate.proxyUrl);
 	}
-	/**
-	* Fetch and aggregate live quota statistics (both 5-hour limit and weekly limit)
-	* for a single account across model families.
-	* Includes 10s cache throttle to avoid spamming Google APIs on fast clicks.
-	*/
 	async refreshAccountQuota(account, force = false) {
 		const now = Date.now();
 		if (!force && account.quotas) {
@@ -27652,9 +27568,6 @@ var QuotaService = class {
 		this.pool.updateAccountQuotas(account.id, familyQuotas, email);
 		return familyQuotas;
 	}
-	/**
-	* Self-heal quarantined accounts that possess a valid refresh_token or still-fresh access_token.
-	*/
 	async selfHealQuarantinedAccounts() {
 		let healed = 0;
 		for (const acc of this.pool.getAccounts()) {
@@ -27671,19 +27584,6 @@ var QuotaService = class {
 		}
 		return healed;
 	}
-	/**
-	* Refresh quota statistics for all accounts in the pool.
-	* Automatic polling (force=false) skips restricted accounts (disabled /
-	* auth-quarantined / in cooldown) so the poller never keeps knocking on
-	* Google endpoints for accounts already known to be limited. Manual force
-	* refresh from the UI refreshes everything.
-	*
-	* Before gating, a ZERO-NETWORK identity reconciliation runs for flagged
-	* slots: an external `agy logout` + re-login writes the new email into the
-	* newest CLI logs, and detecting that locally lets us reset the stale
-	* quarantine/cooldowns so the slot rejoins polling — no extra request to
-	* Google is made for this check (risk-control neutral).
-	*/
 	async refreshAllQuotas(force = false) {
 		if (!force) {
 			const now = Date.now();
@@ -27701,7 +27601,7 @@ var QuotaService = class {
 	}
 };
 //#endregion
-//#region src/host/heartbeat.ts
+//#region packages/core/src/heartbeat.ts
 var HeartbeatManager = class {
 	deps;
 	activeSubagentIds = /* @__PURE__ */ new Set();
@@ -27753,7 +27653,7 @@ var HeartbeatManager = class {
 			const accounts = this.deps.pool ? this.deps.pool.getAccounts().filter((a) => a.enabled && !a.authRequired) : [];
 			if (accounts.length === 0) return;
 			const ping = this.deps.pingFn ?? ((t, p, c) => loadCodeAssist(t, p, c, true));
-			const customEndpoints = cfg.endpointCandidates;
+			const customEndpoints = cfg.endpointCandidates ? [...cfg.endpointCandidates] : void 0;
 			let pingCount = 0;
 			const results = await Promise.allSettled(accounts.map(async (acc) => {
 				const token = await this.deps.quota.getValidAccessToken(acc);
@@ -27864,7 +27764,7 @@ function apply(ctx, entryConfig = {}) {
 		try {
 			const id = ref?.attachmentId;
 			if (id && typeof id === "string") {
-				const diskPath = join(dshHome(), "attachments", "v1", "objects", id.slice(0, 2), id);
+				const diskPath = join(dshHome$1(), "attachments", "v1", "objects", id.slice(0, 2), id);
 				if (existsSync(diskPath)) return readFileSync(diskPath);
 			}
 		} catch {

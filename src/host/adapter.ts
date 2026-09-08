@@ -394,9 +394,10 @@ export class AgyAdapter extends LlmAdapter {
           for await (const chunk of mapSseStreamToChunks(res, options.signal, () => {
             hasEmitted = true
           })) {
-            yield chunk
+            yield chunk as StreamChunk
             if (chunk.type === 'finish') {
-              if (chunk.reason.kind === 'error') {
+              const finish = (chunk as { reason?: { kind?: string } }).reason
+              if (finish?.kind === 'error') {
                 runOk = false
               }
             }
