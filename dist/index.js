@@ -25084,7 +25084,7 @@ async function convertMessages(messages, readImage, runtimeModel = "gemini-3.7-f
 		} else if (block.type === "tool_result" || block.type === "tool-result") {
 			const tr = block;
 			const callId = tr.id || tr.toolCallId || "";
-			const toolName = toolNameByCallId.get(callId) || "tool";
+			const toolName = tr.toolName || toolNameByCallId.get(callId) || "tool";
 			const rawContent = tr.content ?? tr.result;
 			const resultText = extractToolResultText(rawContent);
 			const resp = tr.isError ? { error: resultText || "Tool error" } : { output: resultText || "" };
@@ -25117,16 +25117,24 @@ async function convertMessages(messages, readImage, runtimeModel = "gemini-3.7-f
 			type: "text",
 			text: msg.content
 		}] : msg.content || [];
+		let turnThoughtSignature;
+		for (const b of blocks) {
+			const sig = b.thoughtSignature || b.thought_signature || b.textSignature || b.thinkingSignature;
+			if (isValidThoughtSignature(sig)) {
+				turnThoughtSignature = sig;
+				break;
+			}
+		}
 		for (const block of blocks) if (block.type === "text") {
 			const text = block.text;
-			const sig = block.thoughtSignature || block.thought_signature;
+			const sig = block.thoughtSignature || block.thought_signature || block.textSignature;
 			if (text) parts.push({
 				text: sanitizeText(text),
 				...isValidThoughtSignature(sig) ? { thoughtSignature: sig } : {}
 			});
 		} else if (block.type === "reasoning") {
 			const reasoning = block.text;
-			const sig = block.thoughtSignature || block.thought_signature;
+			const sig = block.thoughtSignature || block.thought_signature || block.thinkingSignature;
 			if (reasoning) {
 				if (isValidThoughtSignature(sig)) parts.push({
 					thought: true,
@@ -25136,7 +25144,7 @@ async function convertMessages(messages, readImage, runtimeModel = "gemini-3.7-f
 			}
 		} else if (block.type === "tool_call" || block.type === "tool-call") {
 			const tc = block;
-			const sig = block.thoughtSignature || block.thought_signature;
+			const sig = block.thoughtSignature || block.thought_signature || turnThoughtSignature;
 			const functionCall = {
 				name: tc.name,
 				args: parseJsonArguments(tc.arguments),
@@ -25268,6 +25276,7 @@ async function* mapSseStreamToChunks$1(response, signal, onFirstEmit) {
 	let lastFinishReason;
 	let hasToolCalls = false;
 	let firstChunkEmitted = false;
+	let lastSeenThoughtSignature;
 	const notifyFirstEmit = () => {
 		if (!firstChunkEmitted) {
 			firstChunkEmitted = true;
@@ -25354,6 +25363,7 @@ async function* mapSseStreamToChunks$1(response, signal, onFirstEmit) {
 						const isThought = part.thought === true;
 						const blockType = isThought ? "reasoning" : "text";
 						const sig = part.thoughtSignature || part.thought_signature;
+						if (sig) lastSeenThoughtSignature = sig;
 						if (!currentBlock || currentBlock.type !== blockType) {
 							const end = closeCurrentBlock();
 							if (end) yield end;
@@ -25378,12 +25388,14 @@ async function* mapSseStreamToChunks$1(response, signal, onFirstEmit) {
 						if (isThought) yield {
 							type: "reasoning-delta",
 							index: active.index,
-							text: part.text
+							text: part.text,
+							...sig ? { thoughtSignature: sig } : {}
 						};
 						else yield {
 							type: "text-delta",
 							index: active.index,
-							text: part.text
+							text: part.text,
+							...sig ? { thoughtSignature: sig } : {}
 						};
 					}
 					if (part.functionCall) {
@@ -25394,7 +25406,9 @@ async function* mapSseStreamToChunks$1(response, signal, onFirstEmit) {
 						const rawId = part.functionCall.id || `call_${Date.now()}_${++toolCallGen}`;
 						const name = part.functionCall.name || "tool";
 						const fullArgs = JSON.stringify(part.functionCall.args || {});
-						const sig = part.thoughtSignature || part.thought_signature || part.functionCall.thoughtSignature || part.functionCall.thought_signature;
+						const rawSig = part.thoughtSignature || part.thought_signature || part.functionCall.thoughtSignature || part.functionCall.thought_signature;
+						if (rawSig) lastSeenThoughtSignature = rawSig;
+						const sig = rawSig || lastSeenThoughtSignature;
 						notifyFirstEmit();
 						yield {
 							type: "block-start",
@@ -25406,7 +25420,8 @@ async function* mapSseStreamToChunks$1(response, signal, onFirstEmit) {
 							index: idx,
 							id: rawId,
 							name,
-							argumentsDelta: fullArgs
+							argumentsDelta: fullArgs,
+							...sig ? { thoughtSignature: sig } : {}
 						};
 						yield {
 							type: "block-end",
