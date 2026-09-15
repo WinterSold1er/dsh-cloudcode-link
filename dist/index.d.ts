@@ -8,6 +8,7 @@ interface SubagentEvent {
 }
 declare module '@deepseek-ai/cordis' {
   interface Events {
+    'dispose'(): void | Promise<void>;
     'subagent/start'(event?: SubagentEvent): void;
     'subagent/end'(event?: SubagentEvent): void;
   }

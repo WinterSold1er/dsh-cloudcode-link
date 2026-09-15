@@ -86,13 +86,41 @@ interface ToastNotice {
 }
 
 const base = win.location?.origin ?? '';
+const API_PREFIX = '/plugins/cloudcode-link';
+const LEGACY_API_PREFIX = '/plugins/agy-link';
+
+async function fetchWithFallback(urlPath: string, options?: Record<string, unknown>): Promise<{ ok: boolean; status: number; json(): Promise<unknown> } | null> {
+	const norm = urlPath.startsWith('/') ? urlPath : `/${urlPath}`;
+	const primaryUrl = `${base}${norm}`;
+	try {
+		const res = await win.fetch?.(primaryUrl, options);
+		if (res && res.status !== 404) {
+			return res;
+		}
+		// Backward compatibility fallback to legacy /plugins/agy-link if primary gave 404
+		if (norm.startsWith(API_PREFIX)) {
+			const legacyPath = norm.replace(API_PREFIX, LEGACY_API_PREFIX);
+			const legacyRes = await win.fetch?.(`${base}${legacyPath}`, options);
+			if (legacyRes) return legacyRes;
+		}
+		return res ?? null;
+	} catch {
+		if (norm.startsWith(API_PREFIX)) {
+			try {
+				const legacyPath = norm.replace(API_PREFIX, LEGACY_API_PREFIX);
+				return (await win.fetch?.(`${base}${legacyPath}`, options)) ?? null;
+			} catch {}
+		}
+		return null;
+	}
+}
 
 // Module-level cache for instant remount rendering
 let statusCache: StatusPayload | null = null;
 
 async function getStatus(): Promise<StatusPayload | null> {
 	try {
-		const res = await win.fetch?.(base + '/plugins/agy-link/status');
+		const res = await fetchWithFallback(`${API_PREFIX}/status`);
 		if (!res || !res.ok) return null;
 		const payload = (await res.json()) as StatusPayload;
 		statusCache = payload;
@@ -104,7 +132,7 @@ async function getStatus(): Promise<StatusPayload | null> {
 
 async function postJson(path: string, body: Record<string, unknown>): Promise<any> {
 	try {
-		const res = await win.fetch?.(base + path, {
+		const res = await fetchWithFallback(path, {
 			method: 'POST',
 			headers: { 'Content-Type': 'application/json' },
 			body: JSON.stringify(body),
@@ -165,6 +193,32 @@ function formatQuotaWindow(resetTimeStr?: string): {
 	} catch {
 		return { resetText: '' };
 	}
+}
+
+/**
+ * Mask email address for privacy display (e.g. user123@gmail.com -> us***@gmail.com).
+ */
+function maskEmail(email?: string): string {
+	if (!email || typeof email !== 'string') return '';
+	const atIdx = email.indexOf('@');
+	if (atIdx <= 0) return email;
+	const user = email.slice(0, atIdx);
+	const domain = email.slice(atIdx);
+	if (user.length <= 2) {
+		return `${user[0]}***${domain}`;
+	}
+	return `${user.slice(0, 2)}***${domain}`;
+}
+
+function formatNumber(n: number): string {
+	return Number(n || 0).toLocaleString();
+}
+
+function formatCompactTokens(n: number): string {
+	if (!n) return '0';
+	if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + 'M';
+	if (n >= 1_000) return (n / 1_000).toFixed(1) + 'K';
+	return String(n);
 }
 
 type BrandKey = keyof typeof BRAND_PATHS;
@@ -363,27 +417,27 @@ const GLOBAL_CSS = `
 body[data-ds-dark-theme],
 body.dark,
 [data-theme="dark"] {
-	--agy-bg-panel: var(--dsw-alias-bg-layer-2, #0f172a);
-	--agy-bg-card: var(--dsw-alias-bg-layer-2, #1e293b);
-	--agy-bg-card-primary: #111d33;
-	--agy-bg-header: var(--dsw-alias-bg-layer-1, #1e293b);
-	--agy-bg-box: var(--dsw-alias-bg-layer-1, #0f172a);
-	--agy-bg-subbox: var(--dsw-alias-bg-layer-3, #090d16);
-	--agy-bg-input: var(--dsw-alias-bg-layer-3, #090d16);
-	--agy-bg-btn: var(--dsw-alias-bg-layer-3, #334155);
-	--agy-bg-btn-hover: var(--dsw-alias-interactive-bg-hover, #475569);
-	--agy-bg-btn-primary: var(--dsw-alias-state-business-primary, #2563eb);
-	--agy-bg-progress-track: #1e293b;
+	--agy-bg-panel: #0d0e12;
+	--agy-bg-card: #161922;
+	--agy-bg-card-primary: #171f30;
+	--agy-bg-header: #181b22;
+	--agy-bg-box: #12141a;
+	--agy-bg-subbox: #0c0e12;
+	--agy-bg-input: #12141a;
+	--agy-bg-btn: #27272a;
+	--agy-bg-btn-hover: #3f3f46;
+	--agy-bg-btn-primary: #2563eb;
+	--agy-bg-progress-track: #27272a;
 
-	--agy-border-card: var(--dsw-alias-border-l2, #334155);
+	--agy-border-card: #27272a;
 	--agy-border-card-primary: #3b82f6;
-	--agy-border-box: var(--dsw-alias-border-l1, #1e293b);
-	--agy-border-subbox: var(--dsw-alias-border-l2, #334155);
-	--agy-border-input: var(--dsw-alias-border-l2, #334155);
+	--agy-border-box: #27272a;
+	--agy-border-subbox: #27272a;
+	--agy-border-input: #27272a;
 	--agy-border-input-focus: #3b82f6;
-	--agy-border-btn: var(--dsw-alias-border-l2, #475569);
+	--agy-border-btn: #3f3f46;
 	--agy-border-btn-primary: #3b82f6;
-	--agy-border-divider: var(--dsw-alias-border-l2, #334155);
+	--agy-border-divider: #27272a;
 
 	--agy-text-primary: var(--dsw-alias-label-primary, #f8fafc);
 	--agy-text-secondary: var(--dsw-alias-label-secondary, #cbd5e1);
@@ -627,6 +681,33 @@ const S: Record<string, Record<string, unknown>> = {
 		fontSize: '11px',
 		fontWeight: 700,
 	},
+	statBox: {
+		background: 'var(--agy-bg-box)',
+		border: '1px solid var(--agy-border-card)',
+		borderRadius: '8px',
+		padding: '12px 14px',
+		display: 'flex',
+		flexDirection: 'column',
+		gap: '4px',
+	},
+	statLabel: {
+		fontSize: '11px',
+		color: 'var(--agy-text-tertiary)',
+		fontWeight: 600,
+		textTransform: 'uppercase',
+		letterSpacing: '0.4px',
+	},
+	statValue: {
+		fontSize: '20px',
+		fontWeight: 800,
+		color: 'var(--agy-text-primary)',
+		fontFamily: 'monospace',
+	},
+	statSub: {
+		fontSize: '11px',
+		color: 'var(--agy-text-muted)',
+		marginTop: '2px',
+	},
 	card: {
 		background: 'var(--agy-bg-card)',
 		border: '1px solid var(--agy-border-card)',
@@ -797,6 +878,51 @@ export function apply(ctx: ClientContext): void {
 		const [loadingAction, setLoadingAction] = useState<string | null>(null);
 		const [toast, setToast] = useState<ToastNotice | null>(null);
 		const [expandedModels, setExpandedModels] = useState<Record<string, boolean>>({});
+		const [statsOverview, setStatsOverview] = useState<any>(null);
+		const [statsLoading, setStatsLoading] = useState(false);
+		const [showAuditDrawer, setShowAuditDrawer] = useState(false);
+		const [auditRequests, setAuditRequests] = useState<any[]>([]);
+		const [auditTotal, setAuditTotal] = useState(0);
+		const [auditPage, setAuditPage] = useState(0);
+		const [auditLoading, setAuditLoading] = useState(false);
+
+		const fetchStatsOverview = async () => {
+			try {
+				setStatsLoading(true);
+				const res = await fetchWithFallback(`${API_PREFIX}/stats/overview`);
+				if (res && res.ok) {
+					const data = (await res.json()) as any;
+					if (data && data.ok && data.overview) {
+						setStatsOverview(data.overview);
+					}
+				}
+			} catch {
+				// ignore
+			} finally {
+				setStatsLoading(false);
+			}
+		};
+
+		const fetchAuditRequests = async (page = 0) => {
+			try {
+				setAuditLoading(true);
+				const limit = 20;
+				const offset = page * limit;
+				const res = await fetchWithFallback(`${API_PREFIX}/stats/requests?limit=${limit}&offset=${offset}`);
+				if (res && res.ok) {
+					const data = (await res.json()) as any;
+					if (data && data.ok) {
+						setAuditRequests(data.requests || []);
+						setAuditTotal(data.total || 0);
+						setAuditPage(page);
+					}
+				}
+			} catch {
+				// ignore
+			} finally {
+				setAuditLoading(false);
+			}
+		};
 
 		useEffect(() => {
 			let alive = true;
@@ -811,10 +937,15 @@ export function apply(ctx: ClientContext): void {
 				}
 			};
 			void tick();
+			void fetchStatsOverview();
 			const timer = setInterval(tick, 3000);
+			const statsTimer = setInterval(() => {
+				if (alive) void fetchStatsOverview();
+			}, 10000);
 			return () => {
 				alive = false;
 				clearInterval(timer);
+				clearInterval(statsTimer);
 			};
 		}, []);
 
@@ -850,7 +981,7 @@ export function apply(ctx: ClientContext): void {
 		const handleBeginAddAccount = async (): Promise<void> => {
 			setLoadingAction('pool:beginAdd');
 			const alias = aliasInput.trim() || `备用 Google 账号 ${(status?.pool?.accounts?.length ?? 1) + 1}`;
-			const res = await postJson('/plugins/agy-link/pool/begin-add', { alias });
+			const res = await postJson(`${API_PREFIX}/pool/begin-add`, { alias });
 			setLoadingAction(null);
 			if (res && res.ok) {
 				flowStartedRef.current = true;
@@ -868,7 +999,7 @@ export function apply(ctx: ClientContext): void {
 		const handleCompleteAddAccount = async (): Promise<void> => {
 			if (!authCodeInput.trim()) return;
 			setLoadingAction('pool:completeAdd');
-			const res = await postJson('/plugins/agy-link/pool/complete-add', { code: authCodeInput.trim() });
+			const res = await postJson(`${API_PREFIX}/pool/complete-add`, { code: authCodeInput.trim() });
 			setLoadingAction(null);
 			if (res && res.ok) {
 				flowStartedRef.current = false;
@@ -884,7 +1015,7 @@ export function apply(ctx: ClientContext): void {
 
 		const handleCancelAddAccount = async (): Promise<void> => {
 			flowStartedRef.current = false;
-			await postJson('/plugins/agy-link/pool/cancel-add', {});
+			await postJson(`${API_PREFIX}/pool/cancel-add`, {});
 			setAuthCodeInput('');
 			setAliasInput('');
 			setAddingAccount(false);
@@ -893,14 +1024,14 @@ export function apply(ctx: ClientContext): void {
 
 		const setCfg = async (key: string, value: unknown): Promise<void> => {
 			setLoadingAction(`config:${key}`);
-			await postJson('/plugins/agy-link/config', { key, value });
+			await postJson(`${API_PREFIX}/config`, { key, value });
 			await refresh();
 			setLoadingAction(null);
 		};
 
 		const setPrimary = async (id: string): Promise<void> => {
 			setLoadingAction(`primary:${id}`);
-			await postJson('/plugins/agy-link/pool/primary', { id });
+			await postJson(`${API_PREFIX}/pool/primary`, { id });
 			await refresh();
 			setLoadingAction(null);
 			showToast('已设为主用账号', 'success');
@@ -908,7 +1039,7 @@ export function apply(ctx: ClientContext): void {
 
 		const removeAccount = async (id: string, alias: string): Promise<void> => {
 			setLoadingAction(`remove:${id}`);
-			await postJson('/plugins/agy-link/pool/remove', { id });
+			await postJson(`${API_PREFIX}/pool/remove`, { id });
 			await refresh();
 			setLoadingAction(null);
 			showToast(`已移除账号: ${alias}`, 'info');
@@ -916,7 +1047,7 @@ export function apply(ctx: ClientContext): void {
 
 		const refreshQuota = async (id?: string): Promise<void> => {
 			setLoadingAction(id ? `refresh:${id}` : 'refresh:all');
-			await postJson('/plugins/agy-link/pool/refresh-quota', { id });
+			await postJson(`${API_PREFIX}/pool/refresh-quota`, { id });
 			await refresh();
 			setLoadingAction(null);
 			showToast('额度已刷新', 'success');
@@ -925,7 +1056,7 @@ export function apply(ctx: ClientContext): void {
 		const saveProxy = async (id: string): Promise<void> => {
 			setLoadingAction(`proxy:${id}`);
 			const proxyUrl = proxyInputs[id];
-			await postJson('/plugins/agy-link/pool/proxy', { id, proxyUrl });
+			await postJson(`${API_PREFIX}/pool/proxy`, { id, proxyUrl });
 			setEditingProxyId(null);
 			await refresh();
 			setLoadingAction(null);
@@ -934,14 +1065,14 @@ export function apply(ctx: ClientContext): void {
 
 		const setMode = async (mode: string): Promise<void> => {
 			setLoadingAction(`mode:${mode}`);
-			await postJson('/plugins/agy-link/pool/mode', { mode });
+			await postJson(`${API_PREFIX}/pool/mode`, { mode });
 			await refresh();
 			setLoadingAction(null);
 		};
 
 		const clearCooldown = async (id?: string): Promise<void> => {
 			setLoadingAction(id ? `clearCooldown:${id}` : 'clearCooldown:all');
-			await postJson('/plugins/agy-link/pool/clear-cooldown', { id });
+			await postJson(`${API_PREFIX}/pool/clear-cooldown`, { id });
 			await refresh();
 			setLoadingAction(null);
 			showToast('已清除冷却', 'success');
@@ -1000,7 +1131,15 @@ export function apply(ctx: ClientContext): void {
 			const pctWeekly = hasWeekly ? Math.max(0, Math.min(100, Math.round(info!.weeklyFraction! * 100))) : -1;
 			const wWeekly = formatQuotaWindow(info?.weeklyResetTime);
 
-			const getColors = (pct: number) => {
+			const getColors = (pct: number, isCooling = false) => {
+				if (isCooling) {
+					return {
+						bar: 'linear-gradient(90deg, #475569, #64748b)',
+						text: '#94a3b8',
+						bg: 'rgba(100, 116, 139, 0.15)',
+						border: 'rgba(100, 116, 139, 0.3)',
+					};
+				}
 				if (pct < 0) {
 					return {
 						bar: 'var(--agy-quota-none-border)',
@@ -1009,31 +1148,34 @@ export function apply(ctx: ClientContext): void {
 						border: 'var(--agy-quota-none-border)',
 					};
 				}
-				if (pct <= 20) {
+				if (pct < 10) {
+					// <10% 珊瑚红
 					return {
 						bar: 'linear-gradient(90deg, #dc2626, #ef4444)',
-						text: 'var(--agy-quota-low-text)',
-						bg: 'var(--agy-quota-low-bg)',
-						border: 'var(--agy-quota-low-border)',
+						text: '#ef4444',
+						bg: 'rgba(239, 68, 68, 0.12)',
+						border: 'rgba(239, 68, 68, 0.3)',
 					};
 				}
-				if (pct <= 50) {
+				if (pct <= 30) {
+					// 10%-30% 琥珀黄
 					return {
 						bar: 'linear-gradient(90deg, #d97706, #f59e0b)',
-						text: 'var(--agy-quota-med-text)',
-						bg: 'var(--agy-quota-med-bg)',
-						border: 'var(--agy-quota-med-border)',
+						text: '#f59e0b',
+						bg: 'rgba(245, 158, 11, 0.12)',
+						border: 'rgba(245, 158, 11, 0.3)',
 					};
 				}
+				// >30% 翡翠绿
 				return {
 					bar: 'linear-gradient(90deg, #059669, #10b981)',
-					text: 'var(--agy-quota-high-text)',
-					bg: 'var(--agy-quota-high-bg)',
-					border: 'var(--agy-quota-high-border)',
+					text: '#10b981',
+					bg: 'rgba(16, 185, 129, 0.12)',
+					border: 'rgba(16, 185, 129, 0.3)',
 				};
 			};
 
-			const c5h = getColors(pct5h);
+			const c5h = getColors(pct5h, inCooldown);
 			const cWeekly = getColors(pctWeekly);
 
 			const renderLine = (windowName: string, percent: number, c: { bar: string; text: string; bg: string; border: string }, resetStr: string) => {
@@ -1115,9 +1257,9 @@ export function apply(ctx: ClientContext): void {
 								fontWeight: 700,
 							},
 						}, uiIcon('alert', 11, '#ef4444'), '需重新登录') : null,
-						acc.email ? h('span', { style: { ...S.badgeTag, background: 'var(--agy-badge-email-bg)', color: 'var(--agy-badge-email-text)', borderColor: 'var(--agy-badge-email-border)', gap: '5px' } },
+						acc.email ? h('span', { style: { ...S.badgeTag, background: 'var(--agy-badge-email-bg)', color: 'var(--agy-badge-email-text)', borderColor: 'var(--agy-badge-email-border)', gap: '5px' }, title: maskEmail(acc.email) },
 							uiIcon('mail', 11, 'var(--agy-badge-email-text)'),
-							acc.email,
+							maskEmail(acc.email),
 						) : null,
 						isPrimary ? h('span', { style: { ...S.badgePrimary, gap: '4px' } },
 							uiIcon('star', 10, 'var(--agy-badge-primary-text)'),
@@ -1334,6 +1476,230 @@ export function apply(ctx: ClientContext): void {
 			)
 			: null;
 
+		const renderTelemetryCard = (): unknown => {
+			const o = statsOverview;
+			const totalReq = o?.totalRequests ?? 0;
+			const successCount = o?.totalSuccess ?? 0;
+			const failCount = o?.totalFailed ?? 0;
+			const cacheRate = typeof o?.cacheHitRate === 'number' ? Math.max(0, Math.min(100, o.cacheHitRate * 100)) : 0;
+			const cacheColor = cacheRate > 30 ? '#10b981' : cacheRate >= 10 ? '#f59e0b' : '#94a3b8';
+			const avgLat = o?.avgLatencyMs ?? 0;
+			const avgTtft = o?.avgTtftMs ?? 0;
+			const p90 = o?.p90LatencyMs ?? 0;
+
+			return h('div', {
+				style: {
+					background: 'linear-gradient(180deg, #181b22 0%, #12141a 100%)',
+					border: '1px solid #27272a',
+					borderRadius: '12px',
+					padding: '14px 16px',
+					marginBottom: '14px',
+					boxShadow: '0 4px 20px rgba(0, 0, 0, 0.25)',
+				},
+			},
+				h('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '12px' } },
+					h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px' } },
+						uiIcon('activity', 14, '#10b981'),
+						h('span', { style: { fontWeight: 700, fontSize: '13.5px', color: '#f4f4f5', letterSpacing: '0.2px' } }, '遥测总览 (Telemetry Metrics)'),
+					),
+					h('div', { style: { display: 'flex', gap: '8px', alignItems: 'center' } },
+						h('button', {
+							type: 'button',
+							className: 'agy-btn',
+							style: { ...S.btnSm, gap: '4px', background: '#27272a', borderColor: '#3f3f46', color: '#e4e4e7' },
+							title: '刷新遥测汇总指标',
+							disabled: statsLoading,
+							onClick: () => void fetchStatsOverview(),
+						}, statsLoading ? [renderSpinner(), ' 刷新中'] : [uiIcon('refresh', 11), ' 刷新遥测']),
+						h('button', {
+							type: 'button',
+							className: 'agy-btn',
+							style: { ...S.btnSmPrimary, gap: '4px' },
+							onClick: () => {
+								setShowAuditDrawer(true);
+								void fetchAuditRequests(0);
+							},
+						}, [uiIcon('activity', 11), ' 请求审计明细']),
+					),
+				),
+				h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: '10px' } },
+					h('div', { style: S.statBox },
+						h('div', { style: S.statLabel }, '请求总数'),
+						h('div', { style: S.statValue }, formatNumber(totalReq)),
+						h('div', { style: S.statSub },
+							h('span', { style: { color: '#10b981', fontWeight: 600 } }, `${formatNumber(successCount)} 成功`),
+							failCount > 0 ? h('span', { style: { color: '#ef4444', marginLeft: '6px' } }, `${formatNumber(failCount)} 异常`) : null,
+						),
+					),
+					h('div', { style: S.statBox },
+						h('div', { style: S.statLabel }, '缓存命中率 (Cache Hit %)'),
+						h('div', { style: { ...S.statValue, color: cacheColor } }, `${cacheRate.toFixed(1)}%`),
+						h('div', { style: S.statSub }, `节省: ${formatCompactTokens(o?.totalCachedTokens ?? 0)} tokens`),
+					),
+					h('div', { style: S.statBox },
+						h('div', { style: S.statLabel }, 'Token 汇总 (P / C / O)'),
+						h('div', { style: S.statValue }, formatCompactTokens(o?.totalTokens ?? 0)),
+						h('div', { style: S.statSub },
+							`P: ${formatCompactTokens(o?.totalPromptTokens ?? 0)} · O: ${formatCompactTokens(o?.totalOutputTokens ?? 0)}`,
+						),
+					),
+					h('div', { style: S.statBox },
+						h('div', { style: S.statLabel }, '平均耗时 / TTFT'),
+						h('div', { style: S.statValue }, `${formatNumber(avgLat)} ms`),
+						h('div', { style: S.statSub }, `TTFT: ${formatNumber(avgTtft)} ms · P90: ${formatNumber(p90)} ms`),
+					),
+				),
+			);
+		};
+
+		const renderAuditDrawer = (): unknown => {
+			if (!showAuditDrawer) return null;
+			return portalToBody(
+				h('div', {
+					className: 'agy-modal-backdrop',
+					style: {
+						position: 'fixed',
+						top: 0,
+						left: 0,
+						right: 0,
+						bottom: 0,
+						background: 'rgba(0, 0, 0, 0.75)',
+						backdropFilter: 'blur(4px)',
+						zIndex: 99999,
+						display: 'flex',
+						justifyContent: 'flex-end',
+					},
+					onClick: (e: { target: unknown; currentTarget: unknown }) => {
+						if (e.target === e.currentTarget) setShowAuditDrawer(false);
+					},
+				},
+					h('div', {
+						style: {
+							width: 'min(880px, 95vw)',
+							height: '100%',
+							background: '#12141a',
+							borderLeft: '1px solid #27272a',
+							display: 'flex',
+							flexDirection: 'column',
+							boxShadow: '-8px 0 30px rgba(0, 0, 0, 0.5)',
+							color: '#f4f4f5',
+						},
+					},
+						h('div', {
+							style: {
+								padding: '14px 18px',
+								borderBottom: '1px solid #27272a',
+								display: 'flex',
+								alignItems: 'center',
+								justifyContent: 'space-between',
+								background: '#181b22',
+							},
+						},
+							h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px' } },
+								uiIcon('activity', 15, '#3b82f6'),
+								h('span', { style: { fontSize: '14px', fontWeight: 700 } }, '请求审计明细 (Audit Log)'),
+								h('span', { style: { fontSize: '12px', color: '#71717a', marginLeft: '6px' } }, `共 ${auditTotal} 条记录`),
+							),
+							h('div', { style: { display: 'flex', gap: '8px', alignItems: 'center' } },
+								h('button', {
+									type: 'button',
+									className: 'agy-btn',
+									style: { ...S.btnSm, background: '#27272a', borderColor: '#3f3f46', color: '#e4e4e7' },
+									disabled: auditLoading,
+									onClick: () => void fetchAuditRequests(auditPage),
+								}, auditLoading ? [renderSpinner(), '刷新中'] : [uiIcon('refresh', 11), '刷新']),
+								h('button', {
+									type: 'button',
+									className: 'agy-btn',
+									style: { ...S.btnSm, padding: '4px 8px' },
+									onClick: () => setShowAuditDrawer(false),
+								}, '✕'),
+							),
+						),
+						h('div', { style: { flex: 1, overflowY: 'auto', padding: '16px 20px' } },
+							h('table', { style: { width: '100%', borderCollapse: 'collapse', fontSize: '12px' } },
+								h('thead', null,
+									h('tr', { style: { borderBottom: '1px solid #27272a', color: '#a1a1aa', textAlign: 'left' } },
+										h('th', { style: { padding: '8px 10px' } }, '时间'),
+										h('th', { style: { padding: '8px 10px' } }, '模型'),
+										h('th', { style: { padding: '8px 10px' } }, '账号'),
+										h('th', { style: { padding: '8px 10px' } }, 'Token (P/C/O)'),
+										h('th', { style: { padding: '8px 10px' } }, '耗时 / TTFT'),
+										h('th', { style: { padding: '8px 10px' } }, '状态'),
+									),
+								),
+								h('tbody', null,
+									auditRequests.length === 0
+										? h('tr', null, h('td', { colSpan: 6, style: { textAlign: 'center', padding: '40px', color: '#71717a' } }, auditLoading ? '加载中...' : '暂无请求审计记录'))
+										: auditRequests.map((r) => {
+												const dateStr = new Date(r.timestamp).toLocaleTimeString();
+												const statusBg = r.status === 'success' ? 'rgba(16, 185, 129, 0.15)' : r.status === 'abort' ? 'rgba(100, 116, 139, 0.2)' : 'rgba(239, 68, 68, 0.15)';
+												const statusColor = r.status === 'success' ? '#34d399' : r.status === 'abort' ? '#94a3b8' : '#f87171';
+												const account = pool?.accounts?.find((a: ManagedAccount) => a.id === r.accountId);
+												const accDisplay = account?.alias || (account?.email ? maskEmail(account.email) : r.accountId);
+												return h('tr', { key: r.requestId, style: { borderBottom: '1px solid #1f222b' } },
+													h('td', { style: { padding: '8px 10px', color: '#a1a1aa', whiteSpace: 'nowrap' } }, dateStr),
+													h('td', { style: { padding: '8px 10px', fontWeight: 600, color: '#f4f4f5' } }, r.model),
+													h('td', { style: { padding: '8px 10px', color: '#cbd5e1' } }, accDisplay),
+													h('td', { style: { padding: '8px 10px', fontFamily: 'monospace' } },
+														`${r.promptTokens} / `,
+														h('span', { style: { color: r.cachedTokens > 0 ? '#34d399' : 'inherit' } }, `${r.cachedTokens}`),
+														` / ${r.outputTokens}`,
+													),
+													h('td', { style: { padding: '8px 10px', fontFamily: 'monospace' } },
+														`${r.latencyMs}ms`,
+														typeof r.ttftMs === 'number' ? h('span', { style: { color: '#71717a', marginLeft: '4px' } }, `(${r.ttftMs}ms)`) : null,
+													),
+													h('td', { style: { padding: '8px 10px' } },
+														h('span', {
+															style: {
+																padding: '2px 6px',
+																borderRadius: '4px',
+																background: statusBg,
+																color: statusColor,
+																fontSize: '11px',
+																fontWeight: 700,
+															},
+														}, r.status),
+													),
+												);
+											}),
+								),
+							),
+						),
+						h('div', {
+							style: {
+								padding: '12px 20px',
+								borderTop: '1px solid #27272a',
+								display: 'flex',
+								justifyContent: 'space-between',
+								alignItems: 'center',
+								background: '#181b22',
+							},
+						},
+							h('span', { style: { fontSize: '12px', color: '#71717a' } }, `第 ${auditPage + 1} 页`),
+							h('div', { style: { display: 'flex', gap: '8px' } },
+								h('button', {
+									type: 'button',
+									className: 'agy-btn',
+									style: { ...S.btnSm, background: '#27272a', borderColor: '#3f3f46', color: '#e4e4e7' },
+									disabled: auditPage <= 0 || auditLoading,
+									onClick: () => void fetchAuditRequests(auditPage - 1),
+								}, '上一页'),
+								h('button', {
+									type: 'button',
+									className: 'agy-btn',
+									style: { ...S.btnSm, background: '#27272a', borderColor: '#3f3f46', color: '#e4e4e7' },
+									disabled: (auditPage + 1) * 20 >= auditTotal || auditLoading,
+									onClick: () => void fetchAuditRequests(auditPage + 1),
+								}, '下一页'),
+							),
+						),
+					),
+				),
+			);
+		};
+
 		if (status === null) {
 			return h('div', { style: { ...S.container, minHeight: '120px', display: 'flex', alignItems: 'center', justifyContent: 'center' } },
 				h('style', null, GLOBAL_CSS),
@@ -1366,6 +1732,7 @@ export function apply(ctx: ClientContext): void {
 				),
 			),
 			renderToastBanner(),
+			renderTelemetryCard(),
 			addAccountSection,
 			renderedAccountCards,
 			h('div', { style: { marginTop: '16px', paddingTop: '12px', borderTop: '1px solid var(--agy-border-divider)' } },
@@ -1432,6 +1799,7 @@ export function apply(ctx: ClientContext): void {
 					),
 				),
 			),
+			renderAuditDrawer(),
 		);
 	};
 

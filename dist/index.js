@@ -12,6 +12,720 @@ import { execFile, execFileSync } from "node:child_process";
 var __commonJSMin = (cb, mod) => () => (mod || (cb((mod = { exports: {} }).exports, mod), cb = null), mod.exports);
 var __require = /* #__PURE__ */ (() => createRequire(import.meta.url))();
 //#endregion
+//#region packages/core/src/types/pool-types.ts
+/** Map a model slug to its backend quota counter family. */
+function modelFamilyOf(modelId) {
+	if (!modelId) return "unknown";
+	const id = modelId.toLowerCase();
+	if (id.startsWith("claude-") || id.includes("claude")) return "anthropic";
+	if (id.startsWith("gemini-") || id.startsWith("gemma-") || id.includes("gemini")) return "google";
+	if (id.startsWith("gpt-") || id.startsWith("openai/") || id.includes("gpt-oss")) return "openai";
+	return "unknown";
+}
+/**
+* Whether the background quota poller should touch this account at all.
+*/
+function shouldPollAccount(account) {
+	if (!account.enabled) return false;
+	if (account.authRequired) return false;
+	const now = Date.now();
+	for (const cd of Object.values(account.cooldowns)) if (cd && cd.cooldownUntil > now) return false;
+	return true;
+}
+function defaultPoolData() {
+	return {
+		version: 1,
+		mode: "sequential",
+		defaultCooldownMs: 9e5,
+		maxCooldownMs: 36e5,
+		accounts: []
+	};
+}
+//#endregion
+//#region packages/core/src/types/config-types.ts
+const DEFAULT_FALLBACK_MODELS$1 = [
+	{
+		id: "gemini-3.8-flash",
+		name: "Gemini 3.8 Flash",
+		efforts: [
+			"low",
+			"medium",
+			"high"
+		]
+	},
+	{
+		id: "gemini-3.7-flash",
+		name: "Gemini 3.7 Flash",
+		efforts: [
+			"low",
+			"medium",
+			"high"
+		]
+	},
+	{
+		id: "gemini-3.6-flash",
+		name: "Gemini 3.6 Flash",
+		efforts: [
+			"low",
+			"medium",
+			"high"
+		]
+	},
+	{
+		id: "gemini-3.5-flash",
+		name: "Gemini 3.5 Flash",
+		efforts: [
+			"low",
+			"medium",
+			"high"
+		]
+	},
+	{
+		id: "gemini-3.1-pro",
+		name: "Gemini 3.1 Pro",
+		efforts: ["low", "high"]
+	},
+	{
+		id: "claude-sonnet-4-6",
+		name: "Claude Sonnet 4.6 (Thinking)"
+	},
+	{
+		id: "claude-opus-4-6-thinking",
+		name: "Claude Opus 4.6 (Thinking)"
+	},
+	{
+		id: "gpt-oss-120b-medium",
+		name: "GPT-OSS 120B (Medium)"
+	}
+];
+function parseResetDurationMs(text) {
+	if (!text) return void 0;
+	const compactMatch = text.match(/resets?\s+in\s+((?:(\d+)\s*h)?\s*(?:(\d+)\s*m)?\s*(?:(\d+)\s*s)?)/i);
+	if (compactMatch && compactMatch[1]?.trim()) {
+		const hours = parseInt(compactMatch[2] || "0", 10);
+		const minutes = parseInt(compactMatch[3] || "0", 10);
+		const seconds = parseInt(compactMatch[4] || "0", 10);
+		const totalMs = (hours * 3600 + minutes * 60 + seconds) * 1e3;
+		if (totalMs > 0) return totalMs;
+	}
+	const wordMatch = text.match(/(?:resets?|retry)\s+(?:in|after)\s+(\d+)\s*(hour|hr|minute|min|second|sec)s?/i);
+	if (wordMatch) {
+		const num = parseInt(wordMatch[1], 10);
+		const unit = wordMatch[2].toLowerCase();
+		if (unit.startsWith("h")) return num * 3600 * 1e3;
+		if (unit.startsWith("m")) return num * 60 * 1e3;
+		if (unit.startsWith("s")) return num * 1e3;
+	}
+	const isoMatch = text.match(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})/);
+	if (isoMatch) {
+		const parsed = Date.parse(isoMatch[0]);
+		if (!Number.isNaN(parsed) && parsed > Date.now()) return parsed - Date.now();
+	}
+	const retrySec = parseInt(text.trim(), 10);
+	if (!Number.isNaN(retrySec) && retrySec > 0 && retrySec < 604800) return retrySec * 1e3;
+}
+//#endregion
+//#region packages/core/src/pool.ts
+function defaultPoolDir(customBase) {
+	if (customBase) return customBase;
+	if (process.env.CLOUDCODE_ACCOUNTS_DIR?.trim()) return process.env.CLOUDCODE_ACCOUNTS_DIR.trim();
+	if (process.env.ANTIGRAVITY_ACCOUNTS_DIR?.trim()) return process.env.ANTIGRAVITY_ACCOUNTS_DIR.trim();
+	return join(homedir(), ".cloudcode", "accounts");
+}
+var Semaphore$1 = class {
+	active = 0;
+	queue = [];
+	max;
+	constructor(max) {
+		this.max = max;
+	}
+	async acquire() {
+		if (this.active < Math.max(1, this.max())) {
+			this.active++;
+			return () => this.releaseOne();
+		}
+		return new Promise((resolve) => {
+			this.queue.push(() => {
+				this.active++;
+				resolve(() => this.releaseOne());
+			});
+		});
+	}
+	releaseOne() {
+		this.active--;
+		const next = this.queue.shift();
+		if (next) next();
+	}
+};
+var AccountPoolManager = class {
+	data;
+	baseDir;
+	file;
+	activeMemoryTokens = /* @__PURE__ */ new Map();
+	accountSemaphores = /* @__PURE__ */ new Map();
+	runtimeActiveAccountIds = /* @__PURE__ */ new Map();
+	writeQueue = Promise.resolve();
+	lowQuotaThreshold = .05;
+	constructor(baseDir = defaultPoolDir(), lowQuotaThreshold = .05) {
+		this.baseDir = baseDir;
+		this.lowQuotaThreshold = typeof lowQuotaThreshold === "number" && Number.isFinite(lowQuotaThreshold) && lowQuotaThreshold >= 0 && lowQuotaThreshold <= 1 ? lowQuotaThreshold : .05;
+		this.file = join(baseDir, "pool.json");
+		try {
+			chmodSync(this.baseDir, 448);
+		} catch {}
+		this.data = this.load();
+		this.bootstrapDefaultAccount();
+		this.normalizeLegacyPrimary();
+	}
+	getBaseDir() {
+		return this.baseDir;
+	}
+	setLowQuotaThreshold(threshold) {
+		if (typeof threshold === "number" && Number.isFinite(threshold) && threshold >= 0 && threshold <= 1) this.lowQuotaThreshold = threshold;
+	}
+	getLowQuotaThreshold() {
+		return this.lowQuotaThreshold;
+	}
+	load() {
+		if (!existsSync(this.file)) return defaultPoolData();
+		const raw = readFileSync(this.file, "utf8");
+		try {
+			const parsed = JSON.parse(raw);
+			if (parsed && Array.isArray(parsed.accounts)) return {
+				...defaultPoolData(),
+				...parsed
+			};
+			throw new Error("Missing or invalid accounts array");
+		} catch (err) {
+			const corruptBackup = `${this.file}.corrupted`;
+			try {
+				if (existsSync(corruptBackup)) rmSync(corruptBackup, { force: true });
+				renameSync(this.file, corruptBackup);
+			} catch {
+				try {
+					renameSync(this.file, `${this.file}.corrupted.${Date.now()}`);
+				} catch {}
+			}
+			const empty = defaultPoolData();
+			this.data = empty;
+			return empty;
+		}
+	}
+	persist() {
+		const doWrite = () => {
+			try {
+				const dir = dirname(this.file);
+				mkdirSync(dir, { recursive: true });
+				try {
+					chmodSync(dir, 448);
+				} catch {}
+				const tmp = join(dir, `.pool.json.tmp.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}`);
+				writeFileSync(tmp, JSON.stringify(this.data, null, 2), {
+					encoding: "utf8",
+					mode: 384
+				});
+				try {
+					chmodSync(tmp, 384);
+				} catch {}
+				renameSync(tmp, this.file);
+			} catch {}
+		};
+		this.writeQueue = this.writeQueue.then(doWrite, doWrite);
+		doWrite();
+	}
+	/**
+	* Bootstraps the primary account on first start.
+	*/
+	bootstrapDefaultAccount() {
+		if (this.data.accounts.some((a) => a.systemHome)) return;
+		const primary = {
+			id: "acc_primary",
+			alias: "主账号 (系统登录)",
+			dir: "",
+			systemHome: true,
+			enabled: true,
+			createdAt: Date.now(),
+			cooldowns: {},
+			quotas: {}
+		};
+		this.data.accounts.unshift(primary);
+		this.data.primaryAccountId = primary.id;
+		this.persist();
+	}
+	normalizeLegacyPrimary() {
+		const primary = this.data.accounts.find((a) => a.id === "acc_primary");
+		if (!primary || primary.systemHome) return;
+		primary.dir = "";
+		primary.systemHome = true;
+		primary.alias = "主账号 (系统登录)";
+		this.data.primaryAccountId = primary.id;
+		this.persist();
+	}
+	getPoolData() {
+		return this.data;
+	}
+	setMemoryToken(id, token, expiresAt) {
+		this.activeMemoryTokens.set(id, {
+			token,
+			expiresAt: expiresAt ?? Date.now() + 33e5
+		});
+	}
+	getMemoryToken(id) {
+		const entry = this.activeMemoryTokens.get(id);
+		if (!entry) return null;
+		if (entry.expiresAt <= Date.now() + 1e4) {
+			this.activeMemoryTokens.delete(id);
+			return null;
+		}
+		return entry.token;
+	}
+	clearMemoryToken(id) {
+		this.activeMemoryTokens.delete(id);
+	}
+	async acquireAccount(id, maxConcurrent = 1) {
+		let sem = this.accountSemaphores.get(id);
+		if (!sem) {
+			sem = new Semaphore$1(() => maxConcurrent);
+			this.accountSemaphores.set(id, sem);
+		}
+		return sem.acquire();
+	}
+	getAccounts() {
+		return this.data.accounts;
+	}
+	getAccount(id) {
+		return this.data.accounts.find((a) => a.id === id);
+	}
+	createStagingSlot() {
+		const id = `acc_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+		const dir = join(this.baseDir, `staging_${id}`);
+		const geminiDir = join(dir, ".gemini");
+		const tokenDir = join(geminiDir, "antigravity-cli");
+		mkdirSync(tokenDir, {
+			recursive: true,
+			mode: 448
+		});
+		try {
+			chmodSync(dir, 448);
+			chmodSync(geminiDir, 448);
+			chmodSync(tokenDir, 448);
+		} catch {}
+		return {
+			id,
+			dir
+		};
+	}
+	commitStagingAccount(id, dir, alias, email, proxyUrl) {
+		const finalDir = join(this.baseDir, id);
+		try {
+			if (existsSync(dir)) {
+				renameSync(dir, finalDir);
+				try {
+					chmodSync(finalDir, 448);
+				} catch {}
+			}
+		} catch {}
+		const count = this.data.accounts.length + 1;
+		const newAccount = {
+			id,
+			alias: alias || `备用 Google 账号 ${count}`,
+			dir: existsSync(finalDir) ? finalDir : dir,
+			...email ? { email } : {},
+			...proxyUrl ? { proxyUrl } : {},
+			enabled: true,
+			createdAt: Date.now(),
+			cooldowns: {},
+			quotas: {}
+		};
+		this.data.accounts.push(newAccount);
+		this.persist();
+		return newAccount;
+	}
+	cleanupStagingSlot(dir) {
+		try {
+			if (existsSync(dir)) rmSync(dir, {
+				recursive: true,
+				force: true
+			});
+		} catch {}
+	}
+	sweepStaleStaging() {
+		let removed = 0;
+		try {
+			for (const entry of readdirSync(this.baseDir)) {
+				if (!entry.startsWith("staging_")) continue;
+				rmSync(join(this.baseDir, entry), {
+					recursive: true,
+					force: true
+				});
+				removed++;
+			}
+		} catch {}
+		return removed;
+	}
+	sweepOldLogs(maxDays = 7) {
+		const maxAgeMs = Math.max(1, maxDays) * 864e5;
+		const now = Date.now();
+		let removed = 0;
+		const targetLogDirs = [join(homedir(), ".gemini", "antigravity-cli", "log")];
+		for (const acc of this.data.accounts) if (acc.dir) targetLogDirs.push(join(acc.dir, ".gemini", "antigravity-cli", "log"));
+		for (const logDir of targetLogDirs) {
+			if (!existsSync(logDir)) continue;
+			try {
+				const files = readdirSync(logDir);
+				for (const f of files) {
+					if (!f.startsWith("cli-") || !f.endsWith(".log")) continue;
+					const fp = join(logDir, f);
+					try {
+						if (now - statSync(fp).mtimeMs > maxAgeMs) {
+							rmSync(fp, { force: true });
+							removed++;
+						}
+					} catch {}
+				}
+			} catch {}
+		}
+		return removed;
+	}
+	createAccountSlot(alias) {
+		const id = `acc_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+		const dir = join(this.baseDir, id);
+		const geminiDir = join(dir, ".gemini");
+		const tokenDir = join(geminiDir, "antigravity-cli");
+		mkdirSync(tokenDir, {
+			recursive: true,
+			mode: 448
+		});
+		try {
+			chmodSync(dir, 448);
+			chmodSync(geminiDir, 448);
+			chmodSync(tokenDir, 448);
+		} catch {}
+		const count = this.data.accounts.length + 1;
+		const newAccount = {
+			id,
+			alias: alias || `备用账号 ${count} (Account ${count})`,
+			dir,
+			enabled: true,
+			createdAt: Date.now(),
+			cooldowns: {},
+			quotas: {}
+		};
+		this.data.accounts.push(newAccount);
+		this.persist();
+		return newAccount;
+	}
+	deleteAccount(id) {
+		const idx = this.data.accounts.findIndex((a) => a.id === id);
+		if (idx === -1) return false;
+		const [removed] = this.data.accounts.splice(idx, 1);
+		if (removed) try {
+			if (existsSync(removed.dir)) rmSync(removed.dir, {
+				recursive: true,
+				force: true
+			});
+		} catch {}
+		if (this.data.primaryAccountId === id) this.data.primaryAccountId = void 0;
+		if (this.data.pinnedAccountId === id) this.data.pinnedAccountId = void 0;
+		for (const [fam, accId] of this.runtimeActiveAccountIds.entries()) if (accId === id) this.runtimeActiveAccountIds.delete(fam);
+		if (this.data.activeAccountIds) {
+			for (const [fam, accId] of Object.entries(this.data.activeAccountIds)) if (accId === id) delete this.data.activeAccountIds[fam];
+		}
+		this.persist();
+		return true;
+	}
+	setAccountProxy(id, proxyUrl) {
+		const acc = this.getAccount(id);
+		if (!acc) return false;
+		acc.proxyUrl = proxyUrl?.trim() ? proxyUrl.trim() : void 0;
+		this.persist();
+		return true;
+	}
+	setAccountAlias(id, alias) {
+		const acc = this.getAccount(id);
+		if (!acc) return false;
+		acc.alias = alias.trim();
+		this.persist();
+		return true;
+	}
+	setAccountEnabled(id, enabled) {
+		const acc = this.getAccount(id);
+		if (!acc) return false;
+		acc.enabled = enabled;
+		if (!enabled) {
+			for (const [fam, accId] of this.runtimeActiveAccountIds.entries()) if (accId === id) this.runtimeActiveAccountIds.delete(fam);
+			if (this.data.activeAccountIds) {
+				for (const [fam, accId] of Object.entries(this.data.activeAccountIds)) if (accId === id) delete this.data.activeAccountIds[fam];
+			}
+			if (this.data.pinnedAccountId === id) this.data.pinnedAccountId = void 0;
+			delete acc.pinned;
+		}
+		this.persist();
+		return true;
+	}
+	markAuthRequired(id, reason) {
+		const acc = this.getAccount(id);
+		if (!acc) return;
+		acc.authRequired = true;
+		acc.authError = reason || "Authentication expired or revoked (invalid_grant)";
+		for (const [fam, accId] of this.runtimeActiveAccountIds.entries()) if (accId === id) this.runtimeActiveAccountIds.delete(fam);
+		if (this.data.activeAccountIds) {
+			for (const [fam, accId] of Object.entries(this.data.activeAccountIds)) if (accId === id) delete this.data.activeAccountIds[fam];
+		}
+		this.persist();
+	}
+	resetAccountIdentity(id, newEmail) {
+		const acc = this.getAccount(id);
+		if (!acc) return;
+		acc.email = newEmail;
+		acc.cooldowns = {};
+		acc.quotas = {};
+		delete acc.authRequired;
+		delete acc.authError;
+		this.persist();
+	}
+	clearAuthRequired(id) {
+		const acc = this.getAccount(id);
+		if (!acc) return;
+		delete acc.authRequired;
+		delete acc.authError;
+		this.persist();
+	}
+	setPrimaryAccount(id) {
+		const idx = this.data.accounts.findIndex((a) => a.id === id);
+		if (idx === -1) return false;
+		this.data.primaryAccountId = id;
+		const [acc] = this.data.accounts.splice(idx, 1);
+		if (acc) this.data.accounts.unshift(acc);
+		this.data.activeAccountIds = {
+			google: id,
+			anthropic: id,
+			openai: id
+		};
+		this.runtimeActiveAccountIds.set("google", id);
+		this.runtimeActiveAccountIds.set("anthropic", id);
+		this.runtimeActiveAccountIds.set("openai", id);
+		this.persist();
+		return true;
+	}
+	pinAccount(id) {
+		if (!id) {
+			this.data.pinnedAccountId = void 0;
+			for (const acc of this.data.accounts) delete acc.pinned;
+			this.persist();
+			return true;
+		}
+		const acc = this.getAccount(id);
+		if (!acc || !acc.enabled) return false;
+		this.data.pinnedAccountId = id;
+		for (const a of this.data.accounts) if (a.id === id) a.pinned = true;
+		else delete a.pinned;
+		this.runtimeActiveAccountIds.set("google", id);
+		this.runtimeActiveAccountIds.set("anthropic", id);
+		this.runtimeActiveAccountIds.set("openai", id);
+		this.persist();
+		return true;
+	}
+	getPinnedAccount() {
+		if (this.data.pinnedAccountId) return this.getAccount(this.data.pinnedAccountId) ?? null;
+		return this.data.accounts.find((a) => a.pinned) ?? null;
+	}
+	reorderAccounts(ids) {
+		const map = new Map(this.data.accounts.map((a) => [a.id, a]));
+		const reordered = [];
+		for (const id of ids) {
+			const acc = map.get(id);
+			if (acc) {
+				reordered.push(acc);
+				map.delete(id);
+			}
+		}
+		for (const remaining of map.values()) reordered.push(remaining);
+		this.data.accounts = reordered;
+		this.persist();
+		return true;
+	}
+	setMode(mode) {
+		this.data.mode = mode;
+		this.persist();
+	}
+	updateAccountQuotas(id, quotas, email) {
+		const acc = this.getAccount(id);
+		if (!acc) return;
+		acc.quotas = {
+			...acc.quotas,
+			...quotas
+		};
+		if (email) acc.email = email;
+		this.persist();
+	}
+	recordFailure(id, family, reason, serverResetTime) {
+		const acc = this.getAccount(id);
+		if (!acc) return;
+		const failures = (acc.cooldowns[family]?.consecutiveFailures ?? 0) + 1;
+		let cooldownUntil;
+		const parsedDuration = parseResetDurationMs(serverResetTime || reason);
+		if (serverResetTime && !parsedDuration) {
+			const parsed = Date.parse(serverResetTime);
+			if (!Number.isNaN(parsed) && parsed > Date.now()) cooldownUntil = parsed + 1e4;
+			else cooldownUntil = Date.now() + Math.min(this.data.defaultCooldownMs * failures, this.data.maxCooldownMs);
+		} else if (parsedDuration && parsedDuration > 0) cooldownUntil = Date.now() + parsedDuration + 1e4;
+		else cooldownUntil = Date.now() + Math.min(this.data.defaultCooldownMs * failures, this.data.maxCooldownMs);
+		acc.cooldowns[family] = {
+			cooldownUntil,
+			reason,
+			consecutiveFailures: failures
+		};
+		this.persist();
+	}
+	recordSuccess(id, family) {
+		const acc = this.getAccount(id);
+		if (!acc) return;
+		acc.lastUsedAt = Date.now();
+		if (acc.authRequired) {
+			delete acc.authRequired;
+			delete acc.authError;
+		}
+		if (acc.cooldowns[family]) delete acc.cooldowns[family];
+		this.persist();
+	}
+	clearCooldown(id, family) {
+		if (id) {
+			const acc = this.getAccount(id);
+			if (!acc) return;
+			if (family) delete acc.cooldowns[family];
+			else acc.cooldowns = {};
+		} else for (const acc of this.data.accounts) if (family) delete acc.cooldowns[family];
+		else acc.cooldowns = {};
+		this.persist();
+	}
+	isAccountHealthy(account, family, threshold = this.lowQuotaThreshold) {
+		if (!account.enabled || account.authRequired) return false;
+		const now = Date.now();
+		const cd = account.cooldowns[family];
+		if (cd && cd.cooldownUntil > now) return false;
+		const quota = account.quotas[family];
+		if (quota && typeof quota.remainingFraction === "number" && quota.remainingFraction <= threshold) {
+			if (quota.resetTime) {
+				const resetMs = Date.parse(quota.resetTime);
+				if (!Number.isNaN(resetMs) && resetMs > now) return false;
+			}
+		}
+		if (quota && typeof quota.weeklyFraction === "number" && quota.weeklyFraction <= .01) {
+			if (quota.weeklyResetTime) {
+				const resetMs = Date.parse(quota.weeklyResetTime);
+				if (!Number.isNaN(resetMs) && resetMs > now) return false;
+			}
+		}
+		return true;
+	}
+	selectAccount(family) {
+		const candidates = this.data.accounts.filter((acc) => this.isAccountHealthy(acc, family));
+		if (candidates.length === 0) return null;
+		const pinned = this.getPinnedAccount();
+		if (pinned && candidates.some((c) => c.id === pinned.id)) {
+			this.runtimeActiveAccountIds.set(family, pinned.id);
+			return pinned;
+		}
+		if (this.data.mode === "round-robin" && candidates.length > 1) {
+			const chosen = candidates.slice().sort((a, b) => {
+				const aFrac = a.quotas[family]?.remainingFraction ?? 1;
+				const bFrac = b.quotas[family]?.remainingFraction ?? 1;
+				if (bFrac !== aFrac) return bFrac - aFrac;
+				return candidates.indexOf(a) - candidates.indexOf(b);
+			})[0];
+			this.runtimeActiveAccountIds.set(family, chosen.id);
+			return chosen;
+		}
+		const activeId = this.runtimeActiveAccountIds.get(family) ?? this.data.activeAccountIds?.[family];
+		if (activeId) {
+			const activeCandidate = candidates.find((a) => a.id === activeId);
+			if (activeCandidate) {
+				this.runtimeActiveAccountIds.set(family, activeCandidate.id);
+				return activeCandidate;
+			}
+		}
+		let nextAccount = candidates[0];
+		if (activeId) {
+			const currentIndex = this.data.accounts.findIndex((a) => a.id === activeId);
+			if (currentIndex !== -1) {
+				const total = this.data.accounts.length;
+				for (let i = 1; i < total; i++) {
+					const checkAcc = this.data.accounts[(currentIndex + i) % total];
+					if (candidates.some((c) => c.id === checkAcc.id)) {
+						nextAccount = checkAcc;
+						break;
+					}
+				}
+			}
+		}
+		this.runtimeActiveAccountIds.set(family, nextAccount.id);
+		return nextAccount;
+	}
+	getEarliestResetCountdown(family) {
+		const now = Date.now();
+		let earliest = null;
+		for (const acc of this.data.accounts) {
+			if (!acc.enabled || acc.authRequired) continue;
+			let accReset = null;
+			const cd = acc.cooldowns[family];
+			if (cd && cd.cooldownUntil > now) accReset = Math.max(accReset ?? 0, cd.cooldownUntil);
+			const quota = acc.quotas[family];
+			if (quota && typeof quota.remainingFraction === "number" && quota.remainingFraction <= this.lowQuotaThreshold) {
+				if (quota.resetTime) {
+					const resetMs = Date.parse(quota.resetTime);
+					if (!Number.isNaN(resetMs) && resetMs > now) accReset = Math.max(accReset ?? 0, resetMs);
+				}
+			}
+			if (quota && typeof quota.weeklyFraction === "number" && quota.weeklyFraction <= .01) {
+				if (quota.weeklyResetTime) {
+					const resetMs = Date.parse(quota.weeklyResetTime);
+					if (!Number.isNaN(resetMs) && resetMs > now) accReset = Math.max(accReset ?? 0, resetMs);
+				}
+			}
+			if (accReset !== null) {
+				if (earliest === null || accReset < earliest) earliest = accReset;
+			}
+		}
+		return earliest !== null ? Math.max(0, earliest - now) : null;
+	}
+	getFamilyStatus(family) {
+		const accounts = this.data.accounts;
+		if (accounts.length === 0) return {
+			hasAccount: false,
+			suppressed: false,
+			reason: "no_accounts",
+			resetInMs: null
+		};
+		const enabledAccounts = accounts.filter((a) => a.enabled);
+		if (enabledAccounts.length === 0) return {
+			hasAccount: false,
+			suppressed: false,
+			reason: "disabled",
+			resetInMs: null
+		};
+		const authValidAccounts = enabledAccounts.filter((a) => !a.authRequired);
+		if (authValidAccounts.length === 0) return {
+			hasAccount: false,
+			suppressed: false,
+			reason: "auth_required",
+			resetInMs: null
+		};
+		if (this.selectAccount(family)) return {
+			hasAccount: true,
+			suppressed: false,
+			resetInMs: null
+		};
+		const resetInMs = this.getEarliestResetCountdown(family);
+		return {
+			hasAccount: true,
+			suppressed: true,
+			reason: authValidAccounts.some((a) => a.cooldowns[family] && a.cooldowns[family].cooldownUntil > Date.now()) ? "rate_limited" : "quota_exhausted",
+			resetInMs
+		};
+	}
+};
+//#endregion
 //#region src/common/types.ts
 const PROVIDER_ID = "antigravity";
 const DEFAULT_ENDPOINT_CANDIDATES = [
@@ -19,7 +733,7 @@ const DEFAULT_ENDPOINT_CANDIDATES = [
 	"https://daily-cloudcode-pa.sandbox.googleapis.com",
 	"https://cloudcode-pa.googleapis.com"
 ];
-const DEFAULT_FALLBACK_MODELS$1 = [
+const DEFAULT_FALLBACK_MODELS = [
 	{
 		id: "gemini-3.8-flash",
 		name: "Gemini 3.8 Flash",
@@ -84,7 +798,17 @@ function defaultConfig() {
 		contextWindowDefault: 1048576,
 		maxTokensDefault: 65536,
 		quotaPollIntervalMs: 9e5,
-		fallbackModels: DEFAULT_FALLBACK_MODELS$1,
+		sessionStartQuotaRefreshMinIntervalMs: 1e4,
+		statsEnabled: true,
+		statsDbPath: join(defaultPoolDir(), "stats.db"),
+		statsBufferCapacity: 2048,
+		statsBatchSize: 100,
+		statsFlushIntervalMs: 2e3,
+		statsRetentionDays: 30,
+		statsRetentionCheckIntervalMs: 36e5,
+		lowQuotaThreshold: .05,
+		apiMaxPageSize: 100,
+		fallbackModels: DEFAULT_FALLBACK_MODELS,
 		askTool: false,
 		disableTelemetry: true,
 		autoFallbackModel: false,
@@ -185,6 +909,16 @@ function resolveConfig(entry, env = process.env, overrides = readOverrides()) {
 		contextWindowDefault: asNum(get("contextWindowDefault")) ?? base.contextWindowDefault,
 		maxTokensDefault: asNum(get("maxTokensDefault")) ?? base.maxTokensDefault,
 		quotaPollIntervalMs: asNum(get("quotaPollIntervalMs")) ?? base.quotaPollIntervalMs,
+		sessionStartQuotaRefreshMinIntervalMs: asNum(get("sessionStartQuotaRefreshMinIntervalMs")) ?? base.sessionStartQuotaRefreshMinIntervalMs,
+		statsEnabled: asBool(get("statsEnabled")) ?? base.statsEnabled,
+		statsDbPath: asString$1(get("statsDbPath")) ?? base.statsDbPath,
+		statsBufferCapacity: asNum(get("statsBufferCapacity")) ?? base.statsBufferCapacity,
+		statsBatchSize: asNum(get("statsBatchSize")) ?? base.statsBatchSize,
+		statsFlushIntervalMs: asNum(get("statsFlushIntervalMs")) ?? base.statsFlushIntervalMs,
+		statsRetentionDays: asNum(get("statsRetentionDays")) ?? base.statsRetentionDays,
+		statsRetentionCheckIntervalMs: asNum(get("statsRetentionCheckIntervalMs")) ?? base.statsRetentionCheckIntervalMs,
+		lowQuotaThreshold: asNum(get("lowQuotaThreshold")) ?? base.lowQuotaThreshold,
+		apiMaxPageSize: asNum(get("apiMaxPageSize")) ?? base.apiMaxPageSize,
 		modelsCacheTtlMs: asNum(get("modelsCacheTtlMs")) ?? base.modelsCacheTtlMs,
 		baseUrl: asString$1(get("baseUrl")) ?? base.baseUrl,
 		endpointCandidates: Array.isArray(get("endpointCandidates")) ? get("endpointCandidates").filter((x) => typeof x === "string") : base.endpointCandidates,
@@ -243,120 +977,54 @@ function resolveConfig(entry, env = process.env, overrides = readOverrides()) {
 		const n = asNum(envHeartbeatInterval);
 		if (n !== void 0) cfg.heartbeatIntervalMs = Math.max(3e4, n);
 	}
+	const envStatsDbPath = env.DSH_CLOUDCODE_DB_PATH ?? env.DSH_AGY_DB_PATH;
+	if (envStatsDbPath) cfg.statsDbPath = envStatsDbPath;
+	const envStatsEnabled = env.DSH_CLOUDCODE_STATS_ENABLED ?? env.DSH_AGY_STATS_ENABLED;
+	if (envStatsEnabled !== void 0) {
+		const b = asBool(envStatsEnabled);
+		if (b !== void 0) cfg.statsEnabled = b;
+	}
+	const envStatsBufferCapacity = env.DSH_CLOUDCODE_STATS_BUFFER_CAPACITY;
+	if (envStatsBufferCapacity !== void 0) {
+		const n = asNum(envStatsBufferCapacity);
+		if (n !== void 0) cfg.statsBufferCapacity = Math.max(1, n);
+	}
+	const envStatsBatchSize = env.DSH_CLOUDCODE_STATS_BATCH_SIZE;
+	if (envStatsBatchSize !== void 0) {
+		const n = asNum(envStatsBatchSize);
+		if (n !== void 0) cfg.statsBatchSize = Math.max(1, n);
+	}
+	const envStatsFlushIntervalMs = env.DSH_CLOUDCODE_STATS_FLUSH_INTERVAL_MS;
+	if (envStatsFlushIntervalMs !== void 0) {
+		const n = asNum(envStatsFlushIntervalMs);
+		if (n !== void 0) cfg.statsFlushIntervalMs = Math.max(10, n);
+	}
+	const envStatsRetentionDays = env.DSH_CLOUDCODE_STATS_RETENTION_DAYS;
+	if (envStatsRetentionDays !== void 0) {
+		const n = asNum(envStatsRetentionDays);
+		if (n !== void 0) cfg.statsRetentionDays = Math.max(1, n);
+	}
+	const envStatsRetentionCheckMs = env.DSH_CLOUDCODE_STATS_RETENTION_CHECK_INTERVAL_MS;
+	if (envStatsRetentionCheckMs !== void 0) {
+		const n = asNum(envStatsRetentionCheckMs);
+		if (n !== void 0) cfg.statsRetentionCheckIntervalMs = Math.max(1e3, n);
+	}
+	const envLowQuotaThreshold = env.DSH_CLOUDCODE_LOW_QUOTA_THRESHOLD;
+	if (envLowQuotaThreshold !== void 0) {
+		const n = asNum(envLowQuotaThreshold);
+		if (n !== void 0) cfg.lowQuotaThreshold = Math.max(0, Math.min(1, n));
+	}
+	const envSessionRefreshMin = env.DSH_CLOUDCODE_SESSION_START_QUOTA_REFRESH_MIN_INTERVAL_MS;
+	if (envSessionRefreshMin !== void 0) {
+		const n = asNum(envSessionRefreshMin);
+		if (n !== void 0) cfg.sessionStartQuotaRefreshMinIntervalMs = Math.max(1e3, n);
+	}
+	const envApiMaxPageSize = env.DSH_CLOUDCODE_API_MAX_PAGE_SIZE;
+	if (envApiMaxPageSize !== void 0) {
+		const n = asNum(envApiMaxPageSize);
+		if (n !== void 0) cfg.apiMaxPageSize = Math.max(1, n);
+	}
 	return cfg;
-}
-//#endregion
-//#region packages/core/src/types/pool-types.ts
-/** Map a model slug to its backend quota counter family. */
-function modelFamilyOf(modelId) {
-	if (!modelId) return "unknown";
-	const id = modelId.toLowerCase();
-	if (id.startsWith("claude-") || id.includes("claude")) return "anthropic";
-	if (id.startsWith("gemini-") || id.startsWith("gemma-") || id.includes("gemini")) return "google";
-	if (id.startsWith("gpt-") || id.startsWith("openai/") || id.includes("gpt-oss")) return "openai";
-	return "unknown";
-}
-/**
-* Whether the background quota poller should touch this account at all.
-*/
-function shouldPollAccount(account) {
-	if (!account.enabled) return false;
-	if (account.authRequired) return false;
-	const now = Date.now();
-	for (const cd of Object.values(account.cooldowns)) if (cd && cd.cooldownUntil > now) return false;
-	return true;
-}
-function defaultPoolData() {
-	return {
-		version: 1,
-		mode: "sequential",
-		defaultCooldownMs: 9e5,
-		maxCooldownMs: 36e5,
-		accounts: []
-	};
-}
-//#endregion
-//#region packages/core/src/types/config-types.ts
-const DEFAULT_FALLBACK_MODELS = [
-	{
-		id: "gemini-3.8-flash",
-		name: "Gemini 3.8 Flash",
-		efforts: [
-			"low",
-			"medium",
-			"high"
-		]
-	},
-	{
-		id: "gemini-3.7-flash",
-		name: "Gemini 3.7 Flash",
-		efforts: [
-			"low",
-			"medium",
-			"high"
-		]
-	},
-	{
-		id: "gemini-3.6-flash",
-		name: "Gemini 3.6 Flash",
-		efforts: [
-			"low",
-			"medium",
-			"high"
-		]
-	},
-	{
-		id: "gemini-3.5-flash",
-		name: "Gemini 3.5 Flash",
-		efforts: [
-			"low",
-			"medium",
-			"high"
-		]
-	},
-	{
-		id: "gemini-3.1-pro",
-		name: "Gemini 3.1 Pro",
-		efforts: ["low", "high"]
-	},
-	{
-		id: "claude-sonnet-4-6",
-		name: "Claude Sonnet 4.6 (Thinking)"
-	},
-	{
-		id: "claude-opus-4-6-thinking",
-		name: "Claude Opus 4.6 (Thinking)"
-	},
-	{
-		id: "gpt-oss-120b-medium",
-		name: "GPT-OSS 120B (Medium)"
-	}
-];
-function parseResetDurationMs(text) {
-	if (!text) return void 0;
-	const compactMatch = text.match(/resets?\s+in\s+((?:(\d+)\s*h)?\s*(?:(\d+)\s*m)?\s*(?:(\d+)\s*s)?)/i);
-	if (compactMatch && compactMatch[1]?.trim()) {
-		const hours = parseInt(compactMatch[2] || "0", 10);
-		const minutes = parseInt(compactMatch[3] || "0", 10);
-		const seconds = parseInt(compactMatch[4] || "0", 10);
-		const totalMs = (hours * 3600 + minutes * 60 + seconds) * 1e3;
-		if (totalMs > 0) return totalMs;
-	}
-	const wordMatch = text.match(/(?:resets?|retry)\s+(?:in|after)\s+(\d+)\s*(hour|hr|minute|min|second|sec)s?/i);
-	if (wordMatch) {
-		const num = parseInt(wordMatch[1], 10);
-		const unit = wordMatch[2].toLowerCase();
-		if (unit.startsWith("h")) return num * 3600 * 1e3;
-		if (unit.startsWith("m")) return num * 60 * 1e3;
-		if (unit.startsWith("s")) return num * 1e3;
-	}
-	const isoMatch = text.match(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})/);
-	if (isoMatch) {
-		const parsed = Date.parse(isoMatch[0]);
-		if (!Number.isNaN(parsed) && parsed > Date.now()) return parsed - Date.now();
-	}
-	const retrySec = parseInt(text.trim(), 10);
-	if (!Number.isNaN(retrySec) && retrySec > 0 && retrySec < 604800) return retrySec * 1e3;
 }
 //#endregion
 //#region packages/core/src/models.ts
@@ -548,7 +1216,7 @@ function buildFallbackCatalog(defs) {
 		efforts: Array.isArray(d.efforts) && d.efforts.length > 0 ? d.efforts.filter((e) => typeof e === "string" && e.trim() !== "") : null
 	}));
 }
-function mergeDiscoveredWithFallback(discovered, fallbackDefs = DEFAULT_FALLBACK_MODELS) {
+function mergeDiscoveredWithFallback(discovered, fallbackDefs = DEFAULT_FALLBACK_MODELS$1) {
 	const fallbackEntries = buildFallbackCatalog(fallbackDefs);
 	if (discovered.length === 0) return fallbackEntries;
 	const existingIds = /* @__PURE__ */ new Set();
@@ -575,7 +1243,7 @@ var ModelCatalog = class {
 	discover;
 	fallbackDefs;
 	ttlMs;
-	constructor(discover, fallbackDefs = DEFAULT_FALLBACK_MODELS, ttlMs = 3e5) {
+	constructor(discover, fallbackDefs = DEFAULT_FALLBACK_MODELS$1, ttlMs = 3e5) {
 		this.discover = discover;
 		this.fallbackDefs = fallbackDefs;
 		this.ttlMs = ttlMs;
@@ -25479,9 +26147,46 @@ const mapSseStreamToChunks = mapSseStreamToChunks$1;
 //#region src/host/adapter.ts
 var AgyAdapter = class extends LlmAdapter {
 	deps;
+	/** Last forced quota refresh timestamp (per process, for session-start refresh). */
+	lastSessionStartQuotaRefresh = 0;
 	constructor(deps) {
 		super();
 		this.deps = deps;
+	}
+	/**
+	* Force a live refresh of every healthy account's 5h quota before choosing a
+	* fresh account (brand-new session, or mid-session failover when the bound
+	* account went unhealthy). This makes the round-robin selection pick the
+	* account with the most remaining 5h quota instead of relying on a stale
+	* 15-min background poll.
+	*
+	* Critically, this is called ONLY when bound/pinned affinity did NOT already
+	* resolve an account — so an established session stays pinned to its account
+	* and never re-selects, preserving CloudCode KV cache hits.
+	*
+	* Throttled per-process so rapid consecutive selections don't hammer every
+	* account with a fresh HTTPS quota fetch.
+	*/
+	async refreshQuotasForSelection(family) {
+		const pool = this.deps.pool;
+		const quota = this.deps.quota;
+		if (!pool || !quota) return;
+		const now = Date.now();
+		const cfg = this.deps.getConfig();
+		const minInterval = Math.max(1e3, cfg.sessionStartQuotaRefreshMinIntervalMs);
+		if (now - this.lastSessionStartQuotaRefresh < minInterval) return;
+		this.lastSessionStartQuotaRefresh = now;
+		const targets = pool.getAccounts().filter((acc) => {
+			if (!acc.enabled || acc.authRequired) return false;
+			const cd = acc.cooldowns[family];
+			if (cd && cd.cooldownUntil > now) return false;
+			return true;
+		});
+		if (targets.length === 0) return;
+		await Promise.allSettled(targets.map((acc) => quota.refreshQuotaSummaryOnly(acc).catch((err) => {
+			this.deps.log?.(`[quota-refresh] failed for ${acc.id}: ${String(err)}`);
+			return null;
+		})));
 	}
 	providerInfo(provider) {
 		return {
@@ -25542,7 +26247,6 @@ var AgyAdapter = class extends LlmAdapter {
 	* Supports pre-emission silent account failover on 429 / auth errors.
 	*/
 	async *stream(options) {
-		const startTime = Date.now();
 		const releaseGlobal = this.deps.acquire ? await this.deps.acquire() : null;
 		try {
 			const wireModel = getAntigravityRequestModelId(options.model, options.reasoningEffort);
@@ -25577,7 +26281,10 @@ var AgyAdapter = class extends LlmAdapter {
 						const boundAcc = this.deps.pool.getAccount(boundAccountId);
 						if (boundAcc && this.deps.pool.isAccountHealthy(boundAcc, family)) account = boundAcc;
 					}
-					if (!account) account = this.deps.pool.selectAccount(family);
+					if (!account) {
+						await this.refreshQuotasForSelection(family);
+						account = this.deps.pool.selectAccount(family);
+					}
 					if (account && triedAccountIds.has(account.id)) account = this.deps.pool.getAccounts().find((a) => !triedAccountIds.has(a.id) && this.deps.pool.isAccountHealthy(a, family)) ?? null;
 				}
 				if (rawSessionId && this.deps.sessionStore && account) this.deps.sessionStore.bindAccount(rawSessionId, account.id);
@@ -25615,6 +26322,41 @@ var AgyAdapter = class extends LlmAdapter {
 					const cfg = this.deps.getConfig();
 					releaseAccount = await this.deps.pool.acquireAccount(account.id, cfg.maxConcurrent);
 				}
+				const requestStartTime = Date.now();
+				let firstChunkTime = null;
+				let promptTokens = 0;
+				let cachedTokens = 0;
+				let outputTokens = 0;
+				let envelope = null;
+				let streamStarted = false;
+				let runOk = false;
+				let recorded = false;
+				const recordTelemetry = (statusOverride) => {
+					if (recorded) return;
+					if (!envelope) return;
+					if (!this.deps.statsCollector || !this.deps.getConfig().statsEnabled) return;
+					recorded = true;
+					const requestDuration = Date.now() - requestStartTime;
+					const ttftMs = firstChunkTime !== null ? Math.max(0, firstChunkTime - requestStartTime) : requestDuration;
+					const status = statusOverride ?? (options.signal?.aborted ? "abort" : runOk ? "success" : "error");
+					try {
+						this.deps.statsCollector.recordRequest({
+							requestId: envelope.requestId,
+							sessionId: rawSessionId ?? null,
+							accountId,
+							model: wireModel,
+							timestamp: requestStartTime,
+							status,
+							latencyMs: requestDuration,
+							ttftMs,
+							promptTokens,
+							cachedTokens,
+							outputTokens
+						});
+					} catch (err) {
+						this.deps.log?.(`Failed to record request stats: ${String(err)}`);
+					}
+				};
 				try {
 					let token = null;
 					if (process.env.ANTIGRAVITY_TOKEN?.trim()) token = process.env.ANTIGRAVITY_TOKEN.trim();
@@ -25637,11 +26379,12 @@ var AgyAdapter = class extends LlmAdapter {
 					}
 					const proxyUrl = account?.proxyUrl;
 					const customEndpoints = this.deps.endpointCandidates;
-					const envelope = antigravityRequestEnvelope(wireModel, isClaude, {
+					const env = antigravityRequestEnvelope(wireModel, isClaude, {
 						sessionId: rawSessionId,
 						trajectoryId,
 						step
 					});
+					envelope = env;
 					const requestBody = {
 						project: await ensureProject(token, account?.alias || account?.id || "antigravity-default", proxyUrl, customEndpoints),
 						model: wireModel,
@@ -25655,12 +26398,12 @@ var AgyAdapter = class extends LlmAdapter {
 							},
 							...convertedTools ? { tools: convertedTools } : {},
 							...convertedTools ? { toolConfig: { functionCallingConfig: { mode: "AUTO" } } } : {},
-							sessionId: envelope.sessionId,
-							labels: envelope.labels
+							sessionId: env.sessionId,
+							labels: env.labels
 						},
 						requestType: "AGENT",
 						userAgent: "ANTIGRAVITY",
-						requestId: envelope.requestId
+						requestId: env.requestId
 					};
 					let res;
 					try {
@@ -25670,6 +26413,7 @@ var AgyAdapter = class extends LlmAdapter {
 							this.deps.log?.(`CloudCode connection error on account ${accountId}: ${String(err)}, trying next`);
 							continue;
 						}
+						recordTelemetry(options.signal?.aborted ? "abort" : "error");
 						yield {
 							type: "finish",
 							reason: {
@@ -25695,6 +26439,7 @@ var AgyAdapter = class extends LlmAdapter {
 							if (this.deps.pool && account) this.deps.pool.markAuthRequired(account.id, `Auth failed (${res.status}): ${errText}`);
 							if (!hasEmitted && attempt < maxAttempts) continue;
 						}
+						recordTelemetry(options.signal?.aborted ? "abort" : "error");
 						yield {
 							type: "finish",
 							reason: {
@@ -25707,31 +26452,51 @@ var AgyAdapter = class extends LlmAdapter {
 						};
 						return;
 					}
-					let runOk = true;
-					for await (const chunk of mapSseStreamToChunks(res, options.signal, () => {
-						hasEmitted = true;
-					})) {
-						yield chunk;
-						if (chunk.type === "finish") {
-							if (chunk.reason?.kind === "error") runOk = false;
+					streamStarted = true;
+					runOk = true;
+					try {
+						for await (const chunk of mapSseStreamToChunks(res, options.signal, () => {
+							hasEmitted = true;
+							if (firstChunkTime === null) firstChunkTime = Date.now();
+						})) {
+							if (firstChunkTime === null) firstChunkTime = Date.now();
+							yield chunk;
+							if (chunk.type === "usage" && chunk.usage) {
+								const u = chunk.usage;
+								const cTokens = typeof u.cacheReadTokens === "number" ? u.cacheReadTokens : 0;
+								const inTokens = typeof u.inputTokens === "number" ? u.inputTokens : 0;
+								cachedTokens = cTokens;
+								promptTokens = inTokens + cTokens;
+								outputTokens = typeof u.outputTokens === "number" ? u.outputTokens : 0;
+							}
+							if (chunk.type === "finish") {
+								if (chunk.reason?.kind === "error") runOk = false;
+							}
 						}
+					} catch (streamErr) {
+						runOk = false;
+						throw streamErr;
+					} finally {
+						recordTelemetry();
 					}
+					const requestDuration = Date.now() - requestStartTime;
 					if (runOk) {
 						if (this.deps.pool && account) this.deps.pool.recordSuccess(account.id, family);
 						this.deps.onRun?.({
 							ok: true,
 							code: "OK",
-							durationMs: Date.now() - startTime,
+							durationMs: requestDuration,
 							model: wireModel
 						});
 					} else this.deps.onRun?.({
 						ok: false,
 						code: "STREAM_ERROR",
-						durationMs: Date.now() - startTime,
+						durationMs: requestDuration,
 						model: wireModel
 					});
 					return;
 				} finally {
+					if (streamStarted && !recorded) recordTelemetry();
 					if (releaseAccount) releaseAccount();
 				}
 			}
@@ -26259,594 +27024,6 @@ function writeDoctorReport(deps) {
 	writeFileSync(file, lines.join("\n"), "utf8");
 	return file;
 }
-//#endregion
-//#region packages/core/src/pool.ts
-function defaultPoolDir(customBase) {
-	if (customBase) return customBase;
-	if (process.env.CLOUDCODE_ACCOUNTS_DIR?.trim()) return process.env.CLOUDCODE_ACCOUNTS_DIR.trim();
-	if (process.env.ANTIGRAVITY_ACCOUNTS_DIR?.trim()) return process.env.ANTIGRAVITY_ACCOUNTS_DIR.trim();
-	return join(homedir(), ".cloudcode", "accounts");
-}
-var Semaphore$1 = class {
-	active = 0;
-	queue = [];
-	max;
-	constructor(max) {
-		this.max = max;
-	}
-	async acquire() {
-		if (this.active < Math.max(1, this.max())) {
-			this.active++;
-			return () => this.releaseOne();
-		}
-		return new Promise((resolve) => {
-			this.queue.push(() => {
-				this.active++;
-				resolve(() => this.releaseOne());
-			});
-		});
-	}
-	releaseOne() {
-		this.active--;
-		const next = this.queue.shift();
-		if (next) next();
-	}
-};
-var AccountPoolManager = class {
-	data;
-	baseDir;
-	file;
-	activeMemoryTokens = /* @__PURE__ */ new Map();
-	accountSemaphores = /* @__PURE__ */ new Map();
-	runtimeActiveAccountIds = /* @__PURE__ */ new Map();
-	writeQueue = Promise.resolve();
-	constructor(baseDir = defaultPoolDir()) {
-		this.baseDir = baseDir;
-		this.file = join(baseDir, "pool.json");
-		try {
-			chmodSync(this.baseDir, 448);
-		} catch {}
-		this.data = this.load();
-		this.bootstrapDefaultAccount();
-		this.normalizeLegacyPrimary();
-	}
-	getBaseDir() {
-		return this.baseDir;
-	}
-	load() {
-		if (!existsSync(this.file)) return defaultPoolData();
-		const raw = readFileSync(this.file, "utf8");
-		try {
-			const parsed = JSON.parse(raw);
-			if (parsed && Array.isArray(parsed.accounts)) return {
-				...defaultPoolData(),
-				...parsed
-			};
-			throw new Error("Missing or invalid accounts array");
-		} catch (err) {
-			const corruptBackup = `${this.file}.corrupted`;
-			try {
-				if (existsSync(corruptBackup)) rmSync(corruptBackup, { force: true });
-				renameSync(this.file, corruptBackup);
-			} catch {
-				try {
-					renameSync(this.file, `${this.file}.corrupted.${Date.now()}`);
-				} catch {}
-			}
-			const empty = defaultPoolData();
-			this.data = empty;
-			return empty;
-		}
-	}
-	persist() {
-		const doWrite = () => {
-			try {
-				const dir = dirname(this.file);
-				mkdirSync(dir, { recursive: true });
-				try {
-					chmodSync(dir, 448);
-				} catch {}
-				const tmp = join(dir, `.pool.json.tmp.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}`);
-				writeFileSync(tmp, JSON.stringify(this.data, null, 2), {
-					encoding: "utf8",
-					mode: 384
-				});
-				try {
-					chmodSync(tmp, 384);
-				} catch {}
-				renameSync(tmp, this.file);
-			} catch {}
-		};
-		this.writeQueue = this.writeQueue.then(doWrite, doWrite);
-		doWrite();
-	}
-	/**
-	* Bootstraps the primary account on first start.
-	*/
-	bootstrapDefaultAccount() {
-		if (this.data.accounts.some((a) => a.systemHome)) return;
-		const primary = {
-			id: "acc_primary",
-			alias: "主账号 (系统登录)",
-			dir: "",
-			systemHome: true,
-			enabled: true,
-			createdAt: Date.now(),
-			cooldowns: {},
-			quotas: {}
-		};
-		this.data.accounts.unshift(primary);
-		this.data.primaryAccountId = primary.id;
-		this.persist();
-	}
-	normalizeLegacyPrimary() {
-		const primary = this.data.accounts.find((a) => a.id === "acc_primary");
-		if (!primary || primary.systemHome) return;
-		primary.dir = "";
-		primary.systemHome = true;
-		primary.alias = "主账号 (系统登录)";
-		this.data.primaryAccountId = primary.id;
-		this.persist();
-	}
-	getPoolData() {
-		return this.data;
-	}
-	setMemoryToken(id, token, expiresAt) {
-		this.activeMemoryTokens.set(id, {
-			token,
-			expiresAt: expiresAt ?? Date.now() + 33e5
-		});
-	}
-	getMemoryToken(id) {
-		const entry = this.activeMemoryTokens.get(id);
-		if (!entry) return null;
-		if (entry.expiresAt <= Date.now() + 1e4) {
-			this.activeMemoryTokens.delete(id);
-			return null;
-		}
-		return entry.token;
-	}
-	clearMemoryToken(id) {
-		this.activeMemoryTokens.delete(id);
-	}
-	async acquireAccount(id, maxConcurrent = 1) {
-		let sem = this.accountSemaphores.get(id);
-		if (!sem) {
-			sem = new Semaphore$1(() => maxConcurrent);
-			this.accountSemaphores.set(id, sem);
-		}
-		return sem.acquire();
-	}
-	getAccounts() {
-		return this.data.accounts;
-	}
-	getAccount(id) {
-		return this.data.accounts.find((a) => a.id === id);
-	}
-	createStagingSlot() {
-		const id = `acc_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
-		const dir = join(this.baseDir, `staging_${id}`);
-		const geminiDir = join(dir, ".gemini");
-		const tokenDir = join(geminiDir, "antigravity-cli");
-		mkdirSync(tokenDir, {
-			recursive: true,
-			mode: 448
-		});
-		try {
-			chmodSync(dir, 448);
-			chmodSync(geminiDir, 448);
-			chmodSync(tokenDir, 448);
-		} catch {}
-		return {
-			id,
-			dir
-		};
-	}
-	commitStagingAccount(id, dir, alias, email, proxyUrl) {
-		const finalDir = join(this.baseDir, id);
-		try {
-			if (existsSync(dir)) {
-				renameSync(dir, finalDir);
-				try {
-					chmodSync(finalDir, 448);
-				} catch {}
-			}
-		} catch {}
-		const count = this.data.accounts.length + 1;
-		const newAccount = {
-			id,
-			alias: alias || `备用 Google 账号 ${count}`,
-			dir: existsSync(finalDir) ? finalDir : dir,
-			...email ? { email } : {},
-			...proxyUrl ? { proxyUrl } : {},
-			enabled: true,
-			createdAt: Date.now(),
-			cooldowns: {},
-			quotas: {}
-		};
-		this.data.accounts.push(newAccount);
-		this.persist();
-		return newAccount;
-	}
-	cleanupStagingSlot(dir) {
-		try {
-			if (existsSync(dir)) rmSync(dir, {
-				recursive: true,
-				force: true
-			});
-		} catch {}
-	}
-	sweepStaleStaging() {
-		let removed = 0;
-		try {
-			for (const entry of readdirSync(this.baseDir)) {
-				if (!entry.startsWith("staging_")) continue;
-				rmSync(join(this.baseDir, entry), {
-					recursive: true,
-					force: true
-				});
-				removed++;
-			}
-		} catch {}
-		return removed;
-	}
-	sweepOldLogs(maxDays = 7) {
-		const maxAgeMs = Math.max(1, maxDays) * 864e5;
-		const now = Date.now();
-		let removed = 0;
-		const targetLogDirs = [join(homedir(), ".gemini", "antigravity-cli", "log")];
-		for (const acc of this.data.accounts) if (acc.dir) targetLogDirs.push(join(acc.dir, ".gemini", "antigravity-cli", "log"));
-		for (const logDir of targetLogDirs) {
-			if (!existsSync(logDir)) continue;
-			try {
-				const files = readdirSync(logDir);
-				for (const f of files) {
-					if (!f.startsWith("cli-") || !f.endsWith(".log")) continue;
-					const fp = join(logDir, f);
-					try {
-						if (now - statSync(fp).mtimeMs > maxAgeMs) {
-							rmSync(fp, { force: true });
-							removed++;
-						}
-					} catch {}
-				}
-			} catch {}
-		}
-		return removed;
-	}
-	createAccountSlot(alias) {
-		const id = `acc_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
-		const dir = join(this.baseDir, id);
-		const geminiDir = join(dir, ".gemini");
-		const tokenDir = join(geminiDir, "antigravity-cli");
-		mkdirSync(tokenDir, {
-			recursive: true,
-			mode: 448
-		});
-		try {
-			chmodSync(dir, 448);
-			chmodSync(geminiDir, 448);
-			chmodSync(tokenDir, 448);
-		} catch {}
-		const count = this.data.accounts.length + 1;
-		const newAccount = {
-			id,
-			alias: alias || `备用账号 ${count} (Account ${count})`,
-			dir,
-			enabled: true,
-			createdAt: Date.now(),
-			cooldowns: {},
-			quotas: {}
-		};
-		this.data.accounts.push(newAccount);
-		this.persist();
-		return newAccount;
-	}
-	deleteAccount(id) {
-		const idx = this.data.accounts.findIndex((a) => a.id === id);
-		if (idx === -1) return false;
-		const [removed] = this.data.accounts.splice(idx, 1);
-		if (removed) try {
-			if (existsSync(removed.dir)) rmSync(removed.dir, {
-				recursive: true,
-				force: true
-			});
-		} catch {}
-		if (this.data.primaryAccountId === id) this.data.primaryAccountId = void 0;
-		if (this.data.pinnedAccountId === id) this.data.pinnedAccountId = void 0;
-		for (const [fam, accId] of this.runtimeActiveAccountIds.entries()) if (accId === id) this.runtimeActiveAccountIds.delete(fam);
-		if (this.data.activeAccountIds) {
-			for (const [fam, accId] of Object.entries(this.data.activeAccountIds)) if (accId === id) delete this.data.activeAccountIds[fam];
-		}
-		this.persist();
-		return true;
-	}
-	setAccountProxy(id, proxyUrl) {
-		const acc = this.getAccount(id);
-		if (!acc) return false;
-		acc.proxyUrl = proxyUrl?.trim() ? proxyUrl.trim() : void 0;
-		this.persist();
-		return true;
-	}
-	setAccountAlias(id, alias) {
-		const acc = this.getAccount(id);
-		if (!acc) return false;
-		acc.alias = alias.trim();
-		this.persist();
-		return true;
-	}
-	setAccountEnabled(id, enabled) {
-		const acc = this.getAccount(id);
-		if (!acc) return false;
-		acc.enabled = enabled;
-		if (!enabled) {
-			for (const [fam, accId] of this.runtimeActiveAccountIds.entries()) if (accId === id) this.runtimeActiveAccountIds.delete(fam);
-			if (this.data.activeAccountIds) {
-				for (const [fam, accId] of Object.entries(this.data.activeAccountIds)) if (accId === id) delete this.data.activeAccountIds[fam];
-			}
-			if (this.data.pinnedAccountId === id) this.data.pinnedAccountId = void 0;
-			delete acc.pinned;
-		}
-		this.persist();
-		return true;
-	}
-	markAuthRequired(id, reason) {
-		const acc = this.getAccount(id);
-		if (!acc) return;
-		acc.authRequired = true;
-		acc.authError = reason || "Authentication expired or revoked (invalid_grant)";
-		for (const [fam, accId] of this.runtimeActiveAccountIds.entries()) if (accId === id) this.runtimeActiveAccountIds.delete(fam);
-		if (this.data.activeAccountIds) {
-			for (const [fam, accId] of Object.entries(this.data.activeAccountIds)) if (accId === id) delete this.data.activeAccountIds[fam];
-		}
-		this.persist();
-	}
-	resetAccountIdentity(id, newEmail) {
-		const acc = this.getAccount(id);
-		if (!acc) return;
-		acc.email = newEmail;
-		acc.cooldowns = {};
-		acc.quotas = {};
-		delete acc.authRequired;
-		delete acc.authError;
-		this.persist();
-	}
-	clearAuthRequired(id) {
-		const acc = this.getAccount(id);
-		if (!acc) return;
-		delete acc.authRequired;
-		delete acc.authError;
-		this.persist();
-	}
-	setPrimaryAccount(id) {
-		const idx = this.data.accounts.findIndex((a) => a.id === id);
-		if (idx === -1) return false;
-		this.data.primaryAccountId = id;
-		const [acc] = this.data.accounts.splice(idx, 1);
-		if (acc) this.data.accounts.unshift(acc);
-		this.data.activeAccountIds = {
-			google: id,
-			anthropic: id,
-			openai: id
-		};
-		this.runtimeActiveAccountIds.set("google", id);
-		this.runtimeActiveAccountIds.set("anthropic", id);
-		this.runtimeActiveAccountIds.set("openai", id);
-		this.persist();
-		return true;
-	}
-	pinAccount(id) {
-		if (!id) {
-			this.data.pinnedAccountId = void 0;
-			for (const acc of this.data.accounts) delete acc.pinned;
-			this.persist();
-			return true;
-		}
-		const acc = this.getAccount(id);
-		if (!acc || !acc.enabled) return false;
-		this.data.pinnedAccountId = id;
-		for (const a of this.data.accounts) if (a.id === id) a.pinned = true;
-		else delete a.pinned;
-		this.runtimeActiveAccountIds.set("google", id);
-		this.runtimeActiveAccountIds.set("anthropic", id);
-		this.runtimeActiveAccountIds.set("openai", id);
-		this.persist();
-		return true;
-	}
-	getPinnedAccount() {
-		if (this.data.pinnedAccountId) return this.getAccount(this.data.pinnedAccountId) ?? null;
-		return this.data.accounts.find((a) => a.pinned) ?? null;
-	}
-	reorderAccounts(ids) {
-		const map = new Map(this.data.accounts.map((a) => [a.id, a]));
-		const reordered = [];
-		for (const id of ids) {
-			const acc = map.get(id);
-			if (acc) {
-				reordered.push(acc);
-				map.delete(id);
-			}
-		}
-		for (const remaining of map.values()) reordered.push(remaining);
-		this.data.accounts = reordered;
-		this.persist();
-		return true;
-	}
-	setMode(mode) {
-		this.data.mode = mode;
-		this.persist();
-	}
-	updateAccountQuotas(id, quotas, email) {
-		const acc = this.getAccount(id);
-		if (!acc) return;
-		acc.quotas = {
-			...acc.quotas,
-			...quotas
-		};
-		if (email) acc.email = email;
-		this.persist();
-	}
-	recordFailure(id, family, reason, serverResetTime) {
-		const acc = this.getAccount(id);
-		if (!acc) return;
-		const failures = (acc.cooldowns[family]?.consecutiveFailures ?? 0) + 1;
-		let cooldownUntil;
-		const parsedDuration = parseResetDurationMs(serverResetTime || reason);
-		if (serverResetTime && !parsedDuration) {
-			const parsed = Date.parse(serverResetTime);
-			if (!Number.isNaN(parsed) && parsed > Date.now()) cooldownUntil = parsed + 1e4;
-			else cooldownUntil = Date.now() + Math.min(this.data.defaultCooldownMs * failures, this.data.maxCooldownMs);
-		} else if (parsedDuration && parsedDuration > 0) cooldownUntil = Date.now() + parsedDuration + 1e4;
-		else cooldownUntil = Date.now() + Math.min(this.data.defaultCooldownMs * failures, this.data.maxCooldownMs);
-		acc.cooldowns[family] = {
-			cooldownUntil,
-			reason,
-			consecutiveFailures: failures
-		};
-		this.persist();
-	}
-	recordSuccess(id, family) {
-		const acc = this.getAccount(id);
-		if (!acc) return;
-		acc.lastUsedAt = Date.now();
-		if (acc.authRequired) {
-			delete acc.authRequired;
-			delete acc.authError;
-		}
-		if (acc.cooldowns[family]) delete acc.cooldowns[family];
-		this.persist();
-	}
-	clearCooldown(id, family) {
-		if (id) {
-			const acc = this.getAccount(id);
-			if (!acc) return;
-			if (family) delete acc.cooldowns[family];
-			else acc.cooldowns = {};
-		} else for (const acc of this.data.accounts) if (family) delete acc.cooldowns[family];
-		else acc.cooldowns = {};
-		this.persist();
-	}
-	isAccountHealthy(account, family) {
-		if (!account.enabled || account.authRequired) return false;
-		const now = Date.now();
-		const cd = account.cooldowns[family];
-		if (cd && cd.cooldownUntil > now) return false;
-		const quota = account.quotas[family];
-		if (quota && typeof quota.remainingFraction === "number" && quota.remainingFraction <= .02) {
-			if (quota.resetTime) {
-				const resetMs = Date.parse(quota.resetTime);
-				if (!Number.isNaN(resetMs) && resetMs > now) return false;
-			}
-		}
-		if (quota && typeof quota.weeklyFraction === "number" && quota.weeklyFraction <= .01) {
-			if (quota.weeklyResetTime) {
-				const resetMs = Date.parse(quota.weeklyResetTime);
-				if (!Number.isNaN(resetMs) && resetMs > now) return false;
-			}
-		}
-		return true;
-	}
-	selectAccount(family) {
-		const candidates = this.data.accounts.filter((acc) => this.isAccountHealthy(acc, family));
-		if (candidates.length === 0) return null;
-		const pinned = this.getPinnedAccount();
-		if (pinned && candidates.some((c) => c.id === pinned.id)) {
-			this.runtimeActiveAccountIds.set(family, pinned.id);
-			return pinned;
-		}
-		if (this.data.mode === "round-robin" && candidates.length > 1) {
-			const chosen = candidates.slice().sort((a, b) => (a.lastUsedAt ?? 0) - (b.lastUsedAt ?? 0))[0] ?? null;
-			if (chosen) this.runtimeActiveAccountIds.set(family, chosen.id);
-			return chosen;
-		}
-		const activeId = this.runtimeActiveAccountIds.get(family) ?? this.data.activeAccountIds?.[family];
-		if (activeId) {
-			const activeCandidate = candidates.find((a) => a.id === activeId);
-			if (activeCandidate) {
-				this.runtimeActiveAccountIds.set(family, activeCandidate.id);
-				return activeCandidate;
-			}
-		}
-		let nextAccount = candidates[0];
-		if (activeId) {
-			const currentIndex = this.data.accounts.findIndex((a) => a.id === activeId);
-			if (currentIndex !== -1) {
-				const total = this.data.accounts.length;
-				for (let i = 1; i < total; i++) {
-					const checkAcc = this.data.accounts[(currentIndex + i) % total];
-					if (candidates.some((c) => c.id === checkAcc.id)) {
-						nextAccount = checkAcc;
-						break;
-					}
-				}
-			}
-		}
-		this.runtimeActiveAccountIds.set(family, nextAccount.id);
-		return nextAccount;
-	}
-	getEarliestResetCountdown(family) {
-		const now = Date.now();
-		let earliest = null;
-		for (const acc of this.data.accounts) {
-			if (!acc.enabled || acc.authRequired) continue;
-			let accReset = null;
-			const cd = acc.cooldowns[family];
-			if (cd && cd.cooldownUntil > now) accReset = Math.max(accReset ?? 0, cd.cooldownUntil);
-			const quota = acc.quotas[family];
-			if (quota && typeof quota.remainingFraction === "number" && quota.remainingFraction <= .02) {
-				if (quota.resetTime) {
-					const resetMs = Date.parse(quota.resetTime);
-					if (!Number.isNaN(resetMs) && resetMs > now) accReset = Math.max(accReset ?? 0, resetMs);
-				}
-			}
-			if (quota && typeof quota.weeklyFraction === "number" && quota.weeklyFraction <= .01) {
-				if (quota.weeklyResetTime) {
-					const resetMs = Date.parse(quota.weeklyResetTime);
-					if (!Number.isNaN(resetMs) && resetMs > now) accReset = Math.max(accReset ?? 0, resetMs);
-				}
-			}
-			if (accReset !== null) {
-				if (earliest === null || accReset < earliest) earliest = accReset;
-			}
-		}
-		return earliest !== null ? Math.max(0, earliest - now) : null;
-	}
-	getFamilyStatus(family) {
-		const accounts = this.data.accounts;
-		if (accounts.length === 0) return {
-			hasAccount: false,
-			suppressed: false,
-			reason: "no_accounts",
-			resetInMs: null
-		};
-		const enabledAccounts = accounts.filter((a) => a.enabled);
-		if (enabledAccounts.length === 0) return {
-			hasAccount: false,
-			suppressed: false,
-			reason: "disabled",
-			resetInMs: null
-		};
-		const authValidAccounts = enabledAccounts.filter((a) => !a.authRequired);
-		if (authValidAccounts.length === 0) return {
-			hasAccount: false,
-			suppressed: false,
-			reason: "auth_required",
-			resetInMs: null
-		};
-		if (this.selectAccount(family)) return {
-			hasAccount: true,
-			suppressed: false,
-			resetInMs: null
-		};
-		const resetInMs = this.getEarliestResetCountdown(family);
-		return {
-			hasAccount: true,
-			suppressed: true,
-			reason: authValidAccounts.some((a) => a.cooldowns[family] && a.cooldowns[family].cooldownUntil > Date.now()) ? "rate_limited" : "quota_exhausted",
-			resetInMs
-		};
-	}
-};
 //#endregion
 //#region packages/core/src/oauth.ts
 const AGY_PUBLIC_CLIENT_ID = ["1071006060591", "tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com"].join("-");
@@ -27547,7 +27724,7 @@ var QuotaService = class {
 		if (!accessToken) return null;
 		return this.fetchAvailableModels(accessToken, candidate.proxyUrl);
 	}
-	async refreshAccountQuota(account, force = false) {
+	async refreshAccountQuota(account, force = false, options) {
 		const now = Date.now();
 		if (!force && account.quotas) {
 			const latestUpdate = Math.max(...Object.values(account.quotas).map((q) => q?.updatedAt ?? 0));
@@ -27561,13 +27738,21 @@ var QuotaService = class {
 		}
 		const accessToken = await this.getValidAccessToken(account);
 		if (!accessToken) return null;
-		if (force) {
+		const isLightweight = Boolean(options?.lightweight || options?.summaryOnly);
+		if (force && !isLightweight) {
 			const info = await this.fetchUserInfo(accessToken, account.proxyUrl);
 			if (info?.email) email = info.email;
 		}
 		if (email && email !== account.email) this.pool.resetAccountIdentity(account.id, email);
-		const [summary, discovered] = await Promise.all([this.fetchQuotaSummary(accessToken, account.proxyUrl), this.fetchAvailableModels(accessToken, account.proxyUrl)]);
-		if (!email) {
+		let summary = null;
+		let discovered = null;
+		if (options?.summaryOnly) summary = await this.fetchQuotaSummary(accessToken, account.proxyUrl);
+		else {
+			const [sum, disc] = await Promise.all([this.fetchQuotaSummary(accessToken, account.proxyUrl), this.fetchAvailableModels(accessToken, account.proxyUrl)]);
+			summary = sum;
+			discovered = disc;
+		}
+		if (!email && !isLightweight) {
 			const info = await this.fetchUserInfo(accessToken, account.proxyUrl);
 			if (info?.email) email = info.email;
 		}
@@ -27636,8 +27821,17 @@ var QuotaService = class {
 			const fam = famKey;
 			if (familyQuotas[fam]) familyQuotas[fam].models = list;
 		}
+		if (options?.summaryOnly && account.quotas) {
+			for (const fam of Object.keys(familyQuotas)) if (familyQuotas[fam] && !familyQuotas[fam].models && account.quotas[fam]?.models) familyQuotas[fam].models = account.quotas[fam].models;
+		}
 		this.pool.updateAccountQuotas(account.id, familyQuotas, email);
 		return familyQuotas;
+	}
+	async refreshQuotaSummaryOnly(account) {
+		return this.refreshAccountQuota(account, true, {
+			lightweight: true,
+			summaryOnly: true
+		});
 	}
 	async selfHealQuarantinedAccounts() {
 		let healed = 0;
@@ -27761,6 +27955,1308 @@ var HeartbeatManager = class {
 	}
 };
 //#endregion
+//#region packages/core/src/stats/types.ts
+function maskEmail(email) {
+	if (!email || typeof email !== "string") return "";
+	const atIdx = email.indexOf("@");
+	if (atIdx <= 0) return email;
+	const user = email.slice(0, atIdx);
+	const domain = email.slice(atIdx);
+	if (user.length <= 2) return `${user[0]}***${domain}`;
+	return `${user.slice(0, 2)}***${domain}`;
+}
+//#endregion
+//#region packages/core/src/stats/buffer.ts
+var StatsBufferQueue = class StatsBufferQueue {
+	static DEFAULT_BATCH_SIZE = 500;
+	static DEFAULT_MAX_SESSION_QUEUE_SIZE = 5e3;
+	maxQueueSize;
+	maxSessionQueueSize;
+	batchSize;
+	flushIntervalMs;
+	storage;
+	onDrop;
+	onError;
+	requestQueue = [];
+	sessionQueue = /* @__PURE__ */ new Map();
+	timer = null;
+	activeFlushPromise = null;
+	hasPendingFlush = false;
+	isClosed = false;
+	constructor(options) {
+		if (options.maxQueueSize <= 0 || !Number.isFinite(options.maxQueueSize)) throw new Error(`Invalid maxQueueSize: ${options.maxQueueSize}. Must be a positive finite integer.`);
+		if (options.flushIntervalMs <= 0 || !Number.isFinite(options.flushIntervalMs)) throw new Error(`Invalid flushIntervalMs: ${options.flushIntervalMs}. Must be a positive finite integer.`);
+		if (options.batchSize !== void 0 && (options.batchSize <= 0 || !Number.isFinite(options.batchSize))) throw new Error(`Invalid batchSize: ${options.batchSize}. Must be a positive finite integer.`);
+		if (options.maxSessionQueueSize !== void 0 && (options.maxSessionQueueSize <= 0 || !Number.isFinite(options.maxSessionQueueSize))) throw new Error(`Invalid maxSessionQueueSize: ${options.maxSessionQueueSize}. Must be a positive finite integer.`);
+		this.maxQueueSize = Math.floor(options.maxQueueSize);
+		this.flushIntervalMs = Math.floor(options.flushIntervalMs);
+		this.batchSize = Math.floor(options.batchSize ?? StatsBufferQueue.DEFAULT_BATCH_SIZE);
+		this.maxSessionQueueSize = Math.floor(options.maxSessionQueueSize ?? Math.max(this.maxQueueSize, StatsBufferQueue.DEFAULT_MAX_SESSION_QUEUE_SIZE));
+		this.storage = options.storage;
+		this.onDrop = options.onDrop;
+		this.onError = options.onError;
+	}
+	start() {
+		if (this.timer !== null || this.isClosed) return;
+		this.timer = setInterval(() => {
+			this.flush().catch((error) => {
+				this.safeReportError(error, "interval-flush");
+			});
+		}, this.flushIntervalMs);
+		if (typeof this.timer.unref === "function") this.timer.unref();
+	}
+	stop() {
+		if (this.timer !== null) {
+			clearInterval(this.timer);
+			this.timer = null;
+		}
+	}
+	push(metric, _legacySession) {
+		if (this.isClosed) return;
+		if (this.requestQueue.length >= this.maxQueueSize) {
+			const dropped = this.requestQueue.shift();
+			if (dropped) {
+				if (dropped.sessionId) this.decrementSessionDelta(dropped);
+				if (this.onDrop) try {
+					this.onDrop([dropped], this.requestQueue.length);
+				} catch (error) {
+					this.safeReportError(error, "onDrop-handler");
+				}
+			}
+		}
+		this.requestQueue.push(metric);
+		if (metric.sessionId) {
+			const isSuccess = metric.status === "success";
+			const isFailed = metric.status === "error" || metric.status === "abort";
+			const delta = {
+				sessionId: metric.sessionId,
+				accountId: metric.accountId,
+				createdAt: metric.timestamp,
+				updatedAt: metric.timestamp,
+				requestCount: 1,
+				successCount: isSuccess ? 1 : 0,
+				failedCount: isFailed ? 1 : 0,
+				promptTokens: metric.promptTokens,
+				cachedTokens: metric.cachedTokens,
+				outputTokens: metric.outputTokens
+			};
+			this.applySessionDelta(delta);
+		}
+	}
+	async flush() {
+		while (this.activeFlushPromise !== null) {
+			this.hasPendingFlush = true;
+			await this.activeFlushPromise;
+		}
+		if (this.requestQueue.length === 0 && this.sessionQueue.size === 0) return;
+		const flushExecution = (async () => {
+			try {
+				await this.executeFlushLoop();
+			} finally {
+				this.activeFlushPromise = null;
+			}
+		})();
+		this.activeFlushPromise = flushExecution;
+		await flushExecution;
+		if (this.hasPendingFlush) {
+			this.hasPendingFlush = false;
+			await this.flush();
+		}
+	}
+	async close() {
+		this.isClosed = true;
+		this.stop();
+		await this.flush();
+	}
+	getQueueSize() {
+		return this.requestQueue.length;
+	}
+	getSessionQueueSize() {
+		return this.sessionQueue.size;
+	}
+	getPendingSessionDelta(sessionId) {
+		const found = this.sessionQueue.get(sessionId);
+		if (!found) return null;
+		return { ...found };
+	}
+	async executeFlushLoop() {
+		while (this.requestQueue.length > 0 || this.sessionQueue.size > 0) {
+			const requestsSlice = this.requestQueue.splice(0, this.batchSize);
+			const sessionDeltasSlice = [];
+			const sessionKeys = Array.from(this.sessionQueue.keys()).slice(0, this.batchSize);
+			for (const key of sessionKeys) {
+				const item = this.sessionQueue.get(key);
+				if (item) sessionDeltasSlice.push(item);
+				this.sessionQueue.delete(key);
+			}
+			let requestsPersisted = false;
+			let sessionsPersisted = false;
+			try {
+				if (requestsSlice.length > 0) {
+					await this.storage.saveRequestMetrics(requestsSlice);
+					requestsPersisted = true;
+				}
+				if (sessionDeltasSlice.length > 0) {
+					if (typeof this.storage.upsertSessionDeltas === "function") await this.storage.upsertSessionDeltas(sessionDeltasSlice);
+					else if (typeof this.storage.upsertSessionMetrics === "function") await this.storage.upsertSessionMetrics(this.deltasToSessionMetrics(sessionDeltasSlice));
+					sessionsPersisted = true;
+				}
+			} catch (storageError) {
+				this.safeReportError(storageError, "storage-flush");
+				const unpersistedRequests = requestsPersisted ? [] : requestsSlice;
+				const unpersistedSessions = sessionsPersisted ? [] : sessionDeltasSlice;
+				this.requeueOnError(unpersistedRequests, unpersistedSessions);
+				break;
+			}
+		}
+	}
+	applySessionDelta(delta) {
+		const existing = this.sessionQueue.get(delta.sessionId);
+		if (!existing) {
+			if (this.sessionQueue.size >= this.maxSessionQueueSize) {
+				const oldestKey = this.sessionQueue.keys().next().value;
+				if (oldestKey) {
+					const droppedSession = this.sessionQueue.get(oldestKey);
+					this.sessionQueue.delete(oldestKey);
+					if (this.onDrop && droppedSession) try {
+						this.onDrop([], this.requestQueue.length, [droppedSession]);
+					} catch (error) {
+						this.safeReportError(error, "onDrop-handler");
+					}
+				}
+			}
+			this.sessionQueue.set(delta.sessionId, { ...delta });
+		} else {
+			existing.accountId = delta.accountId;
+			existing.createdAt = Math.min(existing.createdAt, delta.createdAt);
+			existing.updatedAt = Math.max(existing.updatedAt, delta.updatedAt);
+			existing.requestCount += delta.requestCount;
+			existing.successCount += delta.successCount;
+			existing.failedCount += delta.failedCount;
+			existing.promptTokens += delta.promptTokens;
+			existing.cachedTokens += delta.cachedTokens;
+			existing.outputTokens += delta.outputTokens;
+		}
+	}
+	decrementSessionDelta(metric) {
+		if (!metric.sessionId) return;
+		const existing = this.sessionQueue.get(metric.sessionId);
+		if (!existing) return;
+		const isSuccess = metric.status === "success";
+		const isFailed = metric.status === "error" || metric.status === "abort";
+		existing.requestCount -= 1;
+		existing.successCount -= isSuccess ? 1 : 0;
+		existing.failedCount -= isFailed ? 1 : 0;
+		existing.promptTokens -= metric.promptTokens;
+		existing.cachedTokens -= metric.cachedTokens;
+		existing.outputTokens -= metric.outputTokens;
+		if (existing.requestCount <= 0) this.sessionQueue.delete(metric.sessionId);
+	}
+	requeueOnError(requests, sessions) {
+		for (const session of sessions) this.applySessionDelta(session);
+		const availableSlots = this.maxQueueSize - this.requestQueue.length;
+		if (availableSlots <= 0) {
+			if (requests.length > 0) {
+				for (const req of requests) this.decrementSessionDelta(req);
+				if (this.onDrop) try {
+					this.onDrop(requests, this.requestQueue.length);
+				} catch (error) {
+					this.safeReportError(error, "onDrop-handler");
+				}
+			}
+			return;
+		}
+		const allowed = requests.slice(0, availableSlots);
+		const excess = requests.slice(availableSlots);
+		this.requestQueue.unshift(...allowed);
+		if (excess.length > 0) {
+			for (const req of excess) this.decrementSessionDelta(req);
+			if (this.onDrop) try {
+				this.onDrop(excess, this.requestQueue.length);
+			} catch (error) {
+				this.safeReportError(error, "onDrop-handler");
+			}
+		}
+	}
+	deltasToSessionMetrics(deltas) {
+		return deltas.map((d) => {
+			const totalPromptTokens = Math.max(0, d.promptTokens);
+			const totalCachedTokens = Math.max(0, d.cachedTokens);
+			const cacheHitRate = totalPromptTokens > 0 ? totalCachedTokens / totalPromptTokens : 0;
+			return {
+				sessionId: d.sessionId,
+				accountId: d.accountId,
+				createdAt: d.createdAt,
+				updatedAt: d.updatedAt,
+				totalRequests: d.requestCount,
+				totalSuccess: d.successCount,
+				totalFailed: d.failedCount,
+				totalPromptTokens,
+				totalCachedTokens,
+				cacheHitRate
+			};
+		});
+	}
+	safeReportError(error, context) {
+		if (!this.onError) return;
+		try {
+			this.onError(error, context);
+		} catch {}
+	}
+};
+//#endregion
+//#region packages/core/src/stats/cleaner.ts
+var StatsRetentionCleaner = class StatsRetentionCleaner {
+	static MILLISECONDS_PER_DAY = 864e5;
+	storage;
+	retentionDays;
+	cleanupIntervalMs;
+	onCleanup;
+	onError;
+	timer = null;
+	activeCleanupPromise = null;
+	isClosed = false;
+	constructor(options) {
+		if (options.retentionDays <= 0 || !Number.isFinite(options.retentionDays)) throw new Error(`Invalid retentionDays: ${options.retentionDays}. Must be a positive finite number.`);
+		if (options.cleanupIntervalMs <= 0 || !Number.isFinite(options.cleanupIntervalMs)) throw new Error(`Invalid cleanupIntervalMs: ${options.cleanupIntervalMs}. Must be a positive finite integer.`);
+		this.storage = options.storage;
+		this.retentionDays = options.retentionDays;
+		this.cleanupIntervalMs = Math.floor(options.cleanupIntervalMs);
+		this.onCleanup = options.onCleanup;
+		this.onError = options.onError;
+	}
+	start() {
+		if (this.timer !== null || this.isClosed) return;
+		this.timer = setInterval(() => {
+			this.cleanup().catch((error) => {
+				this.safeReportError(error, "interval-cleanup");
+			});
+		}, this.cleanupIntervalMs);
+		if (typeof this.timer.unref === "function") this.timer.unref();
+	}
+	stop() {
+		if (this.timer !== null) {
+			clearInterval(this.timer);
+			this.timer = null;
+		}
+	}
+	async cleanup(referenceNow) {
+		if (this.activeCleanupPromise) return await this.activeCleanupPromise;
+		const cleanupExecution = (async () => {
+			try {
+				const cutoffTime = (referenceNow ?? Date.now()) - this.retentionDays * StatsRetentionCleaner.MILLISECONDS_PER_DAY;
+				const result = {
+					cutoffTime,
+					deletedRequests: await this.storage.deleteRequestsBefore(cutoffTime),
+					deletedSessions: await this.storage.deleteSessionsBefore(cutoffTime)
+				};
+				if (this.onCleanup) try {
+					this.onCleanup(result);
+				} catch (callbackError) {
+					this.safeReportError(callbackError, "onCleanup-handler");
+				}
+				return result;
+			} catch (error) {
+				this.safeReportError(error, "cleanup-execution");
+				throw error;
+			} finally {
+				this.activeCleanupPromise = null;
+			}
+		})();
+		this.activeCleanupPromise = cleanupExecution;
+		return await cleanupExecution;
+	}
+	async close() {
+		this.isClosed = true;
+		this.stop();
+		if (this.activeCleanupPromise) try {
+			await this.activeCleanupPromise;
+		} catch {}
+	}
+	safeReportError(error, context) {
+		if (!this.onError) return;
+		try {
+			this.onError(error, context);
+		} catch {}
+	}
+};
+//#endregion
+//#region packages/core/src/stats/storage/sqlite.ts
+const require$1 = createRequire(import.meta.url);
+function getDatabaseSyncClass() {
+	try {
+		return require$1("node:sqlite").DatabaseSync ?? null;
+	} catch {
+		return null;
+	}
+}
+function isSqliteAvailable() {
+	return getDatabaseSyncClass() !== null;
+}
+var SqliteStatsStorage = class {
+	db = null;
+	dbPath;
+	isClosed = false;
+	insertRequestStmt = null;
+	upsertSessionStmt = null;
+	upsertDeltaStmt = null;
+	getSessionStmt = null;
+	deleteRequestsStmt = null;
+	deleteSessionsStmt = null;
+	constructor(dbPath) {
+		let cleanPath = dbPath.trim();
+		if (cleanPath.startsWith("sqlite://")) cleanPath = cleanPath.slice(9);
+		else if (cleanPath.startsWith("file://")) cleanPath = cleanPath.slice(7);
+		this.dbPath = cleanPath;
+		const DatabaseClass = getDatabaseSyncClass();
+		if (!DatabaseClass) throw new Error("node:sqlite DatabaseSync is not available in the current Node.js runtime.");
+		if (this.dbPath !== ":memory:" && !this.dbPath.startsWith(":memory:")) {
+			const dir = dirname(this.dbPath);
+			try {
+				mkdirSync(dir, {
+					recursive: true,
+					mode: 448
+				});
+			} catch {}
+		}
+		this.db = new DatabaseClass(this.dbPath);
+		if (this.dbPath !== ":memory:" && !this.dbPath.startsWith(":memory:")) try {
+			chmodSync(this.dbPath, 384);
+		} catch {}
+		this.bootstrap();
+	}
+	bootstrap() {
+		if (!this.db) return;
+		if (this.dbPath !== ":memory:" && !this.dbPath.startsWith(":memory:")) try {
+			this.db.exec("PRAGMA journal_mode = WAL;");
+		} catch {}
+		this.db.exec("PRAGMA synchronous = NORMAL;");
+		this.db.exec(`
+      CREATE TABLE IF NOT EXISTS request_metrics (
+        requestId TEXT PRIMARY KEY,
+        sessionId TEXT,
+        accountId TEXT NOT NULL,
+        model TEXT NOT NULL,
+        timestamp INTEGER NOT NULL,
+        status TEXT NOT NULL,
+        latencyMs INTEGER NOT NULL,
+        ttftMs INTEGER,
+        cacheHit INTEGER NOT NULL,
+        promptTokens INTEGER NOT NULL,
+        cachedTokens INTEGER NOT NULL,
+        outputTokens INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_requests_timestamp ON request_metrics(timestamp DESC);
+      CREATE INDEX IF NOT EXISTS idx_requests_session ON request_metrics(sessionId);
+      CREATE INDEX IF NOT EXISTS idx_requests_account ON request_metrics(accountId);
+      CREATE INDEX IF NOT EXISTS idx_requests_latency ON request_metrics(latencyMs ASC);
+
+      CREATE TABLE IF NOT EXISTS session_metrics (
+        sessionId TEXT PRIMARY KEY,
+        accountId TEXT NOT NULL,
+        createdAt INTEGER NOT NULL,
+        updatedAt INTEGER NOT NULL,
+        totalRequests INTEGER NOT NULL,
+        totalSuccess INTEGER NOT NULL,
+        totalFailed INTEGER NOT NULL,
+        totalPromptTokens INTEGER NOT NULL,
+        totalCachedTokens INTEGER NOT NULL,
+        cacheHitRate REAL NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_sessions_updated ON session_metrics(updatedAt DESC);
+      CREATE INDEX IF NOT EXISTS idx_sessions_account ON session_metrics(accountId);
+    `);
+		try {
+			this.db.exec("ALTER TABLE request_metrics ADD COLUMN ttftMs INTEGER;");
+		} catch {}
+		this.insertRequestStmt = this.db.prepare(`
+      INSERT OR REPLACE INTO request_metrics (
+        requestId, sessionId, accountId, model, timestamp, status,
+        latencyMs, ttftMs, cacheHit, promptTokens, cachedTokens, outputTokens
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+		this.upsertSessionStmt = this.db.prepare(`
+      INSERT INTO session_metrics (
+        sessionId, accountId, createdAt, updatedAt,
+        totalRequests, totalSuccess, totalFailed,
+        totalPromptTokens, totalCachedTokens, cacheHitRate
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(sessionId) DO UPDATE SET
+        accountId = excluded.accountId,
+        createdAt = excluded.createdAt,
+        updatedAt = excluded.updatedAt,
+        totalRequests = excluded.totalRequests,
+        totalSuccess = excluded.totalSuccess,
+        totalFailed = excluded.totalFailed,
+        totalPromptTokens = excluded.totalPromptTokens,
+        totalCachedTokens = excluded.totalCachedTokens,
+        cacheHitRate = excluded.cacheHitRate
+    `);
+		this.upsertDeltaStmt = this.db.prepare(`
+      INSERT INTO session_metrics (
+        sessionId, accountId, createdAt, updatedAt,
+        totalRequests, totalSuccess, totalFailed,
+        totalPromptTokens, totalCachedTokens, cacheHitRate
+      ) VALUES (
+        ?, ?, ?, ?,
+        ?, ?, ?,
+        ?, ?,
+        CASE WHEN ? > 0 THEN CAST(? AS REAL) / ? ELSE 0.0 END
+      )
+      ON CONFLICT(sessionId) DO UPDATE SET
+        accountId = excluded.accountId,
+        createdAt = min(session_metrics.createdAt, excluded.createdAt),
+        updatedAt = max(session_metrics.updatedAt, excluded.updatedAt),
+        totalRequests = session_metrics.totalRequests + excluded.totalRequests,
+        totalSuccess = session_metrics.totalSuccess + excluded.totalSuccess,
+        totalFailed = session_metrics.totalFailed + excluded.totalFailed,
+        totalPromptTokens = session_metrics.totalPromptTokens + excluded.totalPromptTokens,
+        totalCachedTokens = session_metrics.totalCachedTokens + excluded.totalCachedTokens,
+        cacheHitRate = CASE 
+          WHEN (session_metrics.totalPromptTokens + excluded.totalPromptTokens) > 0 
+          THEN CAST(session_metrics.totalCachedTokens + excluded.totalCachedTokens AS REAL) / (session_metrics.totalPromptTokens + excluded.totalPromptTokens)
+          ELSE 0.0 
+        END
+    `);
+		this.getSessionStmt = this.db.prepare("SELECT * FROM session_metrics WHERE sessionId = ?");
+		this.deleteRequestsStmt = this.db.prepare("DELETE FROM request_metrics WHERE timestamp < ?");
+		this.deleteSessionsStmt = this.db.prepare("DELETE FROM session_metrics WHERE updatedAt < ?");
+	}
+	async init() {
+		this.assertNotClosed();
+	}
+	async close() {
+		if (!this.isClosed) {
+			this.isClosed = true;
+			if (this.db) {
+				try {
+					this.db.close();
+				} catch {}
+				this.db = null;
+			}
+		}
+	}
+	async saveRequestMetrics(metrics) {
+		this.assertNotClosed();
+		if (metrics.length === 0 || !this.db || !this.insertRequestStmt) return;
+		this.db.exec("BEGIN");
+		try {
+			for (const m of metrics) this.insertRequestStmt.run(m.requestId, m.sessionId ?? null, m.accountId, m.model, m.timestamp, m.status, m.latencyMs, m.ttftMs ?? null, m.cacheHit ? 1 : 0, m.promptTokens, m.cachedTokens, m.outputTokens);
+			this.db.exec("COMMIT");
+		} catch (err) {
+			this.db.exec("ROLLBACK");
+			throw err;
+		}
+	}
+	async upsertSessionMetrics(metrics) {
+		this.assertNotClosed();
+		if (metrics.length === 0 || !this.db || !this.upsertSessionStmt) return;
+		this.db.exec("BEGIN");
+		try {
+			for (const m of metrics) this.upsertSessionStmt.run(m.sessionId, m.accountId, m.createdAt, m.updatedAt, m.totalRequests, m.totalSuccess, m.totalFailed, m.totalPromptTokens, m.totalCachedTokens, m.cacheHitRate);
+			this.db.exec("COMMIT");
+		} catch (err) {
+			this.db.exec("ROLLBACK");
+			throw err;
+		}
+	}
+	async upsertSessionDeltas(deltas) {
+		this.assertNotClosed();
+		if (deltas.length === 0 || !this.db || !this.upsertDeltaStmt) return;
+		this.db.exec("BEGIN");
+		try {
+			for (const d of deltas) {
+				const promptTokens = Math.max(0, d.promptTokens);
+				const cachedTokens = Math.max(0, d.cachedTokens);
+				this.upsertDeltaStmt.run(d.sessionId, d.accountId, d.createdAt, d.updatedAt, d.requestCount, d.successCount, d.failedCount, promptTokens, cachedTokens, promptTokens, cachedTokens, promptTokens);
+			}
+			this.db.exec("COMMIT");
+		} catch (err) {
+			this.db.exec("ROLLBACK");
+			throw err;
+		}
+	}
+	async getSessionMetric(sessionId) {
+		this.assertNotClosed();
+		if (!this.getSessionStmt) return null;
+		const row = this.getSessionStmt.get(sessionId);
+		if (!row) return null;
+		return {
+			sessionId: String(row.sessionId),
+			accountId: String(row.accountId),
+			createdAt: Number(row.createdAt),
+			updatedAt: Number(row.updatedAt),
+			totalRequests: Number(row.totalRequests),
+			totalSuccess: Number(row.totalSuccess),
+			totalFailed: Number(row.totalFailed),
+			totalPromptTokens: Number(row.totalPromptTokens),
+			totalCachedTokens: Number(row.totalCachedTokens),
+			cacheHitRate: Number(row.cacheHitRate)
+		};
+	}
+	async deleteRequestsBefore(cutoffTime) {
+		this.assertNotClosed();
+		if (!this.deleteRequestsStmt) return 0;
+		const res = this.deleteRequestsStmt.run(cutoffTime);
+		return Number(res.changes ?? 0);
+	}
+	async deleteSessionsBefore(cutoffTime) {
+		this.assertNotClosed();
+		if (!this.deleteSessionsStmt) return 0;
+		const res = this.deleteSessionsStmt.run(cutoffTime);
+		return Number(res.changes ?? 0);
+	}
+	async queryRequests(filter) {
+		this.assertNotClosed();
+		if (!this.db) return [];
+		let query = "SELECT * FROM request_metrics WHERE 1=1";
+		const params = [];
+		if (filter?.sessionId) {
+			query += " AND sessionId = ?";
+			params.push(filter.sessionId);
+		}
+		if (filter?.accountId) {
+			query += " AND accountId = ?";
+			params.push(filter.accountId);
+		}
+		if (filter?.status) {
+			query += " AND status = ?";
+			params.push(filter.status);
+		}
+		if (filter?.since !== void 0) {
+			query += " AND timestamp >= ?";
+			params.push(filter.since);
+		}
+		if (filter?.until !== void 0) {
+			query += " AND timestamp <= ?";
+			params.push(filter.until);
+		}
+		query += " ORDER BY timestamp DESC";
+		if (filter?.limit !== void 0 && filter.limit >= 0) {
+			query += " LIMIT ?";
+			params.push(filter.limit);
+			if (filter?.offset !== void 0 && filter.offset >= 0) {
+				query += " OFFSET ?";
+				params.push(filter.offset);
+			}
+		}
+		return this.db.prepare(query).all(...params).map((r) => ({
+			requestId: String(r.requestId),
+			sessionId: r.sessionId ? String(r.sessionId) : null,
+			accountId: String(r.accountId),
+			model: String(r.model),
+			timestamp: Number(r.timestamp),
+			status: r.status,
+			latencyMs: Number(r.latencyMs),
+			ttftMs: r.ttftMs != null ? Number(r.ttftMs) : void 0,
+			cacheHit: Boolean(r.cacheHit),
+			promptTokens: Number(r.promptTokens),
+			cachedTokens: Number(r.cachedTokens),
+			outputTokens: Number(r.outputTokens)
+		}));
+	}
+	async countRequests(filter) {
+		this.assertNotClosed();
+		if (!this.db) return 0;
+		let query = "SELECT COUNT(*) as count FROM request_metrics WHERE 1=1";
+		const params = [];
+		if (filter?.sessionId) {
+			query += " AND sessionId = ?";
+			params.push(filter.sessionId);
+		}
+		if (filter?.accountId) {
+			query += " AND accountId = ?";
+			params.push(filter.accountId);
+		}
+		if (filter?.status) {
+			query += " AND status = ?";
+			params.push(filter.status);
+		}
+		if (filter?.since !== void 0) {
+			query += " AND timestamp >= ?";
+			params.push(filter.since);
+		}
+		if (filter?.until !== void 0) {
+			query += " AND timestamp <= ?";
+			params.push(filter.until);
+		}
+		const row = this.db.prepare(query).get(...params);
+		return Number(row?.count ?? 0);
+	}
+	async querySessions(filter) {
+		this.assertNotClosed();
+		if (!this.db) return [];
+		let query = "SELECT * FROM session_metrics WHERE 1=1";
+		const params = [];
+		if (filter?.accountId) {
+			query += " AND accountId = ?";
+			params.push(filter.accountId);
+		}
+		query += " ORDER BY updatedAt DESC";
+		if (filter?.limit !== void 0 && filter.limit >= 0) {
+			query += " LIMIT ?";
+			params.push(filter.limit);
+		}
+		return this.db.prepare(query).all(...params).map((r) => ({
+			sessionId: String(r.sessionId),
+			accountId: String(r.accountId),
+			createdAt: Number(r.createdAt),
+			updatedAt: Number(r.updatedAt),
+			totalRequests: Number(r.totalRequests),
+			totalSuccess: Number(r.totalSuccess),
+			totalFailed: Number(r.totalFailed),
+			totalPromptTokens: Number(r.totalPromptTokens),
+			totalCachedTokens: Number(r.totalCachedTokens),
+			cacheHitRate: Number(r.cacheHitRate)
+		}));
+	}
+	async getOverviewMetrics() {
+		this.assertNotClosed();
+		const emptyResult = {
+			overview: {
+				totalRequests: 0,
+				totalSuccess: 0,
+				totalFailed: 0,
+				totalAbort: 0,
+				totalTokens: 0,
+				totalPromptTokens: 0,
+				totalCachedTokens: 0,
+				totalOutputTokens: 0,
+				cacheHitRate: 0,
+				avgLatencyMs: 0,
+				avgTtftMs: 0,
+				p50LatencyMs: 0,
+				p90LatencyMs: 0
+			},
+			accounts: []
+		};
+		if (!this.db) return emptyResult;
+		const row = this.db.prepare(`SELECT
+          COUNT(*) as totalRequests,
+          SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) as totalSuccess,
+          SUM(CASE WHEN status = 'abort' THEN 1 ELSE 0 END) as totalAbort,
+          SUM(CASE WHEN status != 'success' AND status != 'abort' THEN 1 ELSE 0 END) as totalFailed,
+          SUM(promptTokens) as totalPromptTokens,
+          SUM(cachedTokens) as totalCachedTokens,
+          SUM(outputTokens) as totalOutputTokens,
+          AVG(latencyMs) as avgLatencyMs,
+          AVG(CASE WHEN ttftMs IS NOT NULL THEN ttftMs ELSE NULL END) as avgTtftMs
+        FROM request_metrics`).get();
+		const totalRequests = Number(row?.totalRequests ?? 0);
+		if (totalRequests === 0) return emptyResult;
+		const totalSuccess = Number(row?.totalSuccess ?? 0);
+		const totalAbort = Number(row?.totalAbort ?? 0);
+		const totalFailed = Number(row?.totalFailed ?? 0);
+		const totalPromptTokens = Number(row?.totalPromptTokens ?? 0);
+		const totalCachedTokens = Number(row?.totalCachedTokens ?? 0);
+		const totalOutputTokens = Number(row?.totalOutputTokens ?? 0);
+		const avgLatencyMs = Math.round(Number(row?.avgLatencyMs ?? 0));
+		const avgTtftMs = Math.round(Number(row?.avgTtftMs ?? 0));
+		const cacheHitRate = totalPromptTokens > 0 ? Number((totalCachedTokens / totalPromptTokens).toFixed(4)) : 0;
+		let p50LatencyMs = 0;
+		let p90LatencyMs = 0;
+		const off50 = Math.floor(totalRequests * .5);
+		const off90 = Math.floor(totalRequests * .9);
+		const p50Row = this.db.prepare("SELECT latencyMs FROM request_metrics ORDER BY latencyMs ASC LIMIT 1 OFFSET ?").get(off50);
+		if (p50Row) p50LatencyMs = Number(p50Row.latencyMs ?? 0);
+		const p90Row = this.db.prepare("SELECT latencyMs FROM request_metrics ORDER BY latencyMs ASC LIMIT 1 OFFSET ?").get(off90);
+		if (p90Row) p90LatencyMs = Number(p90Row.latencyMs ?? 0);
+		const accounts = this.db.prepare(`SELECT
+          accountId,
+          COUNT(*) as totalRequests,
+          SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) as successRequests,
+          SUM(CASE WHEN status != 'success' AND status != 'abort' THEN 1 ELSE 0 END) as failedRequests,
+          SUM(promptTokens) as promptTokens,
+          SUM(cachedTokens) as cachedTokens,
+          SUM(outputTokens) as outputTokens,
+          AVG(latencyMs) as avgLatencyMs
+        FROM request_metrics
+        GROUP BY accountId`).all().map((r) => {
+			const pTok = Number(r.promptTokens ?? 0);
+			const cTok = Number(r.cachedTokens ?? 0);
+			return {
+				accountId: String(r.accountId),
+				totalRequests: Number(r.totalRequests ?? 0),
+				successRequests: Number(r.successRequests ?? 0),
+				failedRequests: Number(r.failedRequests ?? 0),
+				promptTokens: pTok,
+				cachedTokens: cTok,
+				outputTokens: Number(r.outputTokens ?? 0),
+				cacheHitRate: pTok > 0 ? Number((cTok / pTok).toFixed(4)) : 0,
+				avgLatencyMs: Math.round(Number(r.avgLatencyMs ?? 0))
+			};
+		});
+		return {
+			overview: {
+				totalRequests,
+				totalSuccess,
+				totalFailed,
+				totalAbort,
+				totalTokens: totalPromptTokens + totalOutputTokens,
+				totalPromptTokens,
+				totalCachedTokens,
+				totalOutputTokens,
+				cacheHitRate,
+				avgLatencyMs,
+				avgTtftMs,
+				p50LatencyMs,
+				p90LatencyMs
+			},
+			accounts
+		};
+	}
+	async getAccountUsage() {
+		this.assertNotClosed();
+		if (!this.db) return [];
+		return this.db.prepare(`SELECT
+          accountId,
+          COUNT(*) as totalRequests,
+          SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) as successRequests,
+          SUM(CASE WHEN status != 'success' AND status != 'abort' THEN 1 ELSE 0 END) as failedRequests,
+          SUM(promptTokens) as promptTokens,
+          SUM(cachedTokens) as cachedTokens,
+          SUM(outputTokens) as outputTokens,
+          SUM(latencyMs) as totalLatencyMs,
+          MAX(timestamp) as lastUsed
+        FROM request_metrics
+        GROUP BY accountId`).all().map((r) => ({
+			accountId: String(r.accountId),
+			totalRequests: Number(r.totalRequests ?? 0),
+			successRequests: Number(r.successRequests ?? 0),
+			failedRequests: Number(r.failedRequests ?? 0),
+			promptTokens: Number(r.promptTokens ?? 0),
+			cachedTokens: Number(r.cachedTokens ?? 0),
+			outputTokens: Number(r.outputTokens ?? 0),
+			totalLatencyMs: Number(r.totalLatencyMs ?? 0),
+			lastUsed: r.lastUsed != null ? Number(r.lastUsed) : null
+		}));
+	}
+	async getAggregatedMetrics(intervalMs, since, until, limit = 1e3) {
+		this.assertNotClosed();
+		if (!this.db) return [];
+		const safeInterval = Math.max(1e3, intervalMs);
+		let query = `SELECT
+      CAST(timestamp / ? AS INTEGER) * ? as bucket,
+      COUNT(*) as requests,
+      SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) as successCount,
+      SUM(CASE WHEN status != 'success' AND status != 'abort' THEN 1 ELSE 0 END) as failedCount,
+      SUM(promptTokens) as promptTokens,
+      SUM(cachedTokens) as cachedTokens,
+      SUM(outputTokens) as outputTokens,
+      SUM(latencyMs) as totalLatencyMs,
+      SUM(CASE WHEN ttftMs IS NOT NULL THEN ttftMs ELSE 0 END) as totalTtftMs,
+      COUNT(ttftMs) as ttftCount
+    FROM request_metrics
+    WHERE 1=1`;
+		const params = [safeInterval, safeInterval];
+		if (since !== void 0) {
+			query += " AND timestamp >= ?";
+			params.push(since);
+		}
+		if (until !== void 0) {
+			query += " AND timestamp <= ?";
+			params.push(until);
+		}
+		query += " GROUP BY bucket ORDER BY bucket ASC LIMIT ?";
+		params.push(Math.max(1, limit));
+		return this.db.prepare(query).all(...params).map((r) => ({
+			bucket: Number(r.bucket),
+			requests: Number(r.requests ?? 0),
+			successCount: Number(r.successCount ?? 0),
+			failedCount: Number(r.failedCount ?? 0),
+			promptTokens: Number(r.promptTokens ?? 0),
+			cachedTokens: Number(r.cachedTokens ?? 0),
+			outputTokens: Number(r.outputTokens ?? 0),
+			totalLatencyMs: Number(r.totalLatencyMs ?? 0),
+			totalTtftMs: Number(r.totalTtftMs ?? 0),
+			ttftCount: Number(r.ttftCount ?? 0)
+		}));
+	}
+	assertNotClosed() {
+		if (this.isClosed || !this.db) throw new Error("SqliteStatsStorage has already been closed");
+	}
+};
+//#endregion
+//#region packages/core/src/stats/storage/memory.ts
+var MemoryStatsStorage = class {
+	requests = [];
+	sessions = /* @__PURE__ */ new Map();
+	isClosed = false;
+	async init() {
+		this.assertNotClosed();
+	}
+	async close() {
+		this.isClosed = true;
+		this.requests = [];
+		this.sessions.clear();
+	}
+	async saveRequestMetrics(metrics) {
+		this.assertNotClosed();
+		if (metrics.length === 0) return;
+		for (const metric of metrics) this.requests.push({ ...metric });
+	}
+	async upsertSessionMetrics(metrics) {
+		this.assertNotClosed();
+		if (metrics.length === 0) return;
+		for (const metric of metrics) this.sessions.set(metric.sessionId, { ...metric });
+	}
+	async upsertSessionDeltas(deltas) {
+		this.assertNotClosed();
+		if (deltas.length === 0) return;
+		for (const delta of deltas) {
+			const existing = this.sessions.get(delta.sessionId);
+			if (!existing) {
+				const totalPromptTokens = Math.max(0, delta.promptTokens);
+				const totalCachedTokens = Math.max(0, delta.cachedTokens);
+				const cacheHitRate = totalPromptTokens > 0 ? totalCachedTokens / totalPromptTokens : 0;
+				const newSession = {
+					sessionId: delta.sessionId,
+					accountId: delta.accountId,
+					createdAt: delta.createdAt,
+					updatedAt: delta.updatedAt,
+					totalRequests: delta.requestCount,
+					totalSuccess: delta.successCount,
+					totalFailed: delta.failedCount,
+					totalPromptTokens,
+					totalCachedTokens,
+					cacheHitRate
+				};
+				this.sessions.set(delta.sessionId, newSession);
+			} else {
+				const totalRequests = existing.totalRequests + delta.requestCount;
+				const totalSuccess = existing.totalSuccess + delta.successCount;
+				const totalFailed = existing.totalFailed + delta.failedCount;
+				const totalPromptTokens = existing.totalPromptTokens + delta.promptTokens;
+				const totalCachedTokens = existing.totalCachedTokens + delta.cachedTokens;
+				const cacheHitRate = totalPromptTokens > 0 ? totalCachedTokens / totalPromptTokens : 0;
+				const updatedSession = {
+					...existing,
+					accountId: delta.accountId,
+					createdAt: Math.min(existing.createdAt, delta.createdAt),
+					updatedAt: Math.max(existing.updatedAt, delta.updatedAt),
+					totalRequests,
+					totalSuccess,
+					totalFailed,
+					totalPromptTokens,
+					totalCachedTokens,
+					cacheHitRate
+				};
+				this.sessions.set(delta.sessionId, updatedSession);
+			}
+		}
+	}
+	async getSessionMetric(sessionId) {
+		this.assertNotClosed();
+		const found = this.sessions.get(sessionId);
+		if (!found) return null;
+		return { ...found };
+	}
+	async deleteRequestsBefore(cutoffTime) {
+		this.assertNotClosed();
+		const initialCount = this.requests.length;
+		this.requests = this.requests.filter((r) => r.timestamp >= cutoffTime);
+		return initialCount - this.requests.length;
+	}
+	async deleteSessionsBefore(cutoffTime) {
+		this.assertNotClosed();
+		let deletedCount = 0;
+		for (const [sessionId, session] of this.sessions.entries()) if (session.updatedAt < cutoffTime) {
+			this.sessions.delete(sessionId);
+			deletedCount++;
+		}
+		return deletedCount;
+	}
+	async queryRequests(filter) {
+		this.assertNotClosed();
+		let result = this.requests;
+		if (filter?.sessionId) result = result.filter((r) => r.sessionId === filter.sessionId);
+		if (filter?.accountId) result = result.filter((r) => r.accountId === filter.accountId);
+		if (filter?.status) result = result.filter((r) => r.status === filter.status);
+		if (filter?.since !== void 0) result = result.filter((r) => r.timestamp >= filter.since);
+		if (filter?.until !== void 0) result = result.filter((r) => r.timestamp <= filter.until);
+		result = [...result].sort((a, b) => b.timestamp - a.timestamp);
+		const offset = filter?.offset !== void 0 && filter.offset >= 0 ? filter.offset : 0;
+		if (offset > 0) result = result.slice(offset);
+		if (filter?.limit !== void 0 && filter.limit >= 0) result = result.slice(0, filter.limit);
+		return result.map((r) => ({ ...r }));
+	}
+	async countRequests(filter) {
+		this.assertNotClosed();
+		let result = this.requests;
+		if (filter?.sessionId) result = result.filter((r) => r.sessionId === filter.sessionId);
+		if (filter?.accountId) result = result.filter((r) => r.accountId === filter.accountId);
+		if (filter?.status) result = result.filter((r) => r.status === filter.status);
+		if (filter?.since !== void 0) result = result.filter((r) => r.timestamp >= filter.since);
+		if (filter?.until !== void 0) result = result.filter((r) => r.timestamp <= filter.until);
+		return result.length;
+	}
+	async querySessions(filter) {
+		this.assertNotClosed();
+		let list = Array.from(this.sessions.values());
+		if (filter?.accountId) list = list.filter((s) => s.accountId === filter.accountId);
+		list.sort((a, b) => b.updatedAt - a.updatedAt);
+		if (filter?.limit !== void 0 && filter.limit >= 0) list = list.slice(0, filter.limit);
+		return list.map((s) => ({ ...s }));
+	}
+	async getOverviewMetrics() {
+		this.assertNotClosed();
+		const emptyResult = {
+			overview: {
+				totalRequests: 0,
+				totalSuccess: 0,
+				totalFailed: 0,
+				totalAbort: 0,
+				totalTokens: 0,
+				totalPromptTokens: 0,
+				totalCachedTokens: 0,
+				totalOutputTokens: 0,
+				cacheHitRate: 0,
+				avgLatencyMs: 0,
+				avgTtftMs: 0,
+				p50LatencyMs: 0,
+				p90LatencyMs: 0
+			},
+			accounts: []
+		};
+		if (this.requests.length === 0) return emptyResult;
+		let totalSuccess = 0;
+		let totalFailed = 0;
+		let totalAbort = 0;
+		let totalPromptTokens = 0;
+		let totalCachedTokens = 0;
+		let totalOutputTokens = 0;
+		let totalLatencyMs = 0;
+		let totalTtftMs = 0;
+		let ttftCount = 0;
+		const latencies = [];
+		const accountMap = /* @__PURE__ */ new Map();
+		for (const r of this.requests) {
+			if (r.status === "success") totalSuccess++;
+			else if (r.status === "abort") totalAbort++;
+			else totalFailed++;
+			totalPromptTokens += r.promptTokens;
+			totalCachedTokens += r.cachedTokens;
+			totalOutputTokens += r.outputTokens;
+			totalLatencyMs += r.latencyMs;
+			latencies.push(r.latencyMs);
+			if (typeof r.ttftMs === "number") {
+				totalTtftMs += r.ttftMs;
+				ttftCount++;
+			}
+			let acc = accountMap.get(r.accountId);
+			if (!acc) {
+				acc = {
+					accountId: r.accountId,
+					totalRequests: 0,
+					successRequests: 0,
+					failedRequests: 0,
+					promptTokens: 0,
+					cachedTokens: 0,
+					outputTokens: 0,
+					totalLatencyMs: 0
+				};
+				accountMap.set(r.accountId, acc);
+			}
+			acc.totalRequests++;
+			if (r.status === "success") acc.successRequests++;
+			else acc.failedRequests++;
+			acc.promptTokens += r.promptTokens;
+			acc.cachedTokens += r.cachedTokens;
+			acc.outputTokens += r.outputTokens;
+			acc.totalLatencyMs += r.latencyMs;
+		}
+		latencies.sort((a, b) => a - b);
+		const totalRequests = this.requests.length;
+		const p50LatencyMs = latencies.length > 0 ? latencies[Math.floor(latencies.length * .5)] ?? 0 : 0;
+		const p90LatencyMs = latencies.length > 0 ? latencies[Math.floor(latencies.length * .9)] ?? 0 : 0;
+		const avgLatencyMs = totalRequests > 0 ? Math.round(totalLatencyMs / totalRequests) : 0;
+		const avgTtftMs = ttftCount > 0 ? Math.round(totalTtftMs / ttftCount) : 0;
+		const cacheHitRate = totalPromptTokens > 0 ? Number((totalCachedTokens / totalPromptTokens).toFixed(4)) : 0;
+		const accounts = Array.from(accountMap.values()).map((acc) => ({
+			accountId: acc.accountId,
+			totalRequests: acc.totalRequests,
+			successRequests: acc.successRequests,
+			failedRequests: acc.failedRequests,
+			promptTokens: acc.promptTokens,
+			cachedTokens: acc.cachedTokens,
+			outputTokens: acc.outputTokens,
+			cacheHitRate: acc.promptTokens > 0 ? Number((acc.cachedTokens / acc.promptTokens).toFixed(4)) : 0,
+			avgLatencyMs: acc.totalRequests > 0 ? Math.round(acc.totalLatencyMs / acc.totalRequests) : 0
+		}));
+		return {
+			overview: {
+				totalRequests,
+				totalSuccess,
+				totalFailed,
+				totalAbort,
+				totalTokens: totalPromptTokens + totalOutputTokens,
+				totalPromptTokens,
+				totalCachedTokens,
+				totalOutputTokens,
+				cacheHitRate,
+				avgLatencyMs,
+				avgTtftMs,
+				p50LatencyMs,
+				p90LatencyMs
+			},
+			accounts
+		};
+	}
+	async getAccountUsage() {
+		this.assertNotClosed();
+		const map = /* @__PURE__ */ new Map();
+		for (const r of this.requests) {
+			let u = map.get(r.accountId);
+			if (!u) {
+				u = {
+					accountId: r.accountId,
+					totalRequests: 0,
+					successRequests: 0,
+					failedRequests: 0,
+					promptTokens: 0,
+					cachedTokens: 0,
+					outputTokens: 0,
+					totalLatencyMs: 0,
+					lastUsed: null
+				};
+				map.set(r.accountId, u);
+			}
+			u.totalRequests++;
+			if (r.status === "success") u.successRequests++;
+			else u.failedRequests++;
+			u.promptTokens += r.promptTokens;
+			u.cachedTokens += r.cachedTokens;
+			u.outputTokens += r.outputTokens;
+			u.totalLatencyMs += r.latencyMs;
+			if (u.lastUsed === null || r.timestamp > u.lastUsed) u.lastUsed = r.timestamp;
+		}
+		return Array.from(map.values());
+	}
+	async getAggregatedMetrics(intervalMs, since, until, limit = 1e3) {
+		this.assertNotClosed();
+		const safeInterval = Math.max(1e3, intervalMs);
+		const bucketMap = /* @__PURE__ */ new Map();
+		for (const r of this.requests) {
+			if (since !== void 0 && r.timestamp < since) continue;
+			if (until !== void 0 && r.timestamp > until) continue;
+			const bKey = Math.floor(r.timestamp / safeInterval) * safeInterval;
+			let b = bucketMap.get(bKey);
+			if (!b) {
+				b = {
+					bucket: bKey,
+					requests: 0,
+					successCount: 0,
+					failedCount: 0,
+					promptTokens: 0,
+					cachedTokens: 0,
+					outputTokens: 0,
+					totalLatencyMs: 0,
+					totalTtftMs: 0,
+					ttftCount: 0
+				};
+				bucketMap.set(bKey, b);
+			}
+			b.requests++;
+			if (r.status === "success") b.successCount++;
+			else b.failedCount++;
+			b.promptTokens += r.promptTokens;
+			b.cachedTokens += r.cachedTokens;
+			b.outputTokens += r.outputTokens;
+			b.totalLatencyMs += r.latencyMs;
+			if (typeof r.ttftMs === "number") {
+				b.totalTtftMs += r.ttftMs;
+				b.ttftCount++;
+			}
+		}
+		return Array.from(bucketMap.values()).sort((a, b) => a.bucket - b.bucket).slice(0, Math.max(1, limit));
+	}
+	assertNotClosed() {
+		if (this.isClosed) throw new Error("MemoryStatsStorage has already been closed");
+	}
+};
+function createStatsStorage(config) {
+	if (!config || typeof config !== "object") throw new Error("StatsConfig must be a non-null object.");
+	const dbPath = config.dbPath?.trim();
+	if (!dbPath) throw new Error("Invalid dbPath: must be a non-empty string.");
+	if (dbPath === ":memory:" || dbPath.startsWith("memory://")) return new MemoryStatsStorage();
+	if (dbPath.includes("://") && !dbPath.startsWith("sqlite://") && !dbPath.startsWith("file://")) throw new Error(`Unsupported dbPath protocol: "${config.dbPath}". Only "memory://", ":memory:", or local SQLite files are currently supported by default storage factory.`);
+	if (isSqliteAvailable()) try {
+		return new SqliteStatsStorage(dbPath);
+	} catch (err) {
+		console.warn(`[cloudcode-link-core] Failed to initialize SqliteStatsStorage for "${dbPath}". Falling back to MemoryStatsStorage.`, err);
+		return new MemoryStatsStorage();
+	}
+	console.warn(`[cloudcode-link-core] node:sqlite is not available in current runtime. Falling back to MemoryStatsStorage for path "${config.dbPath}".`);
+	return new MemoryStatsStorage();
+}
+//#endregion
+//#region packages/core/src/stats/collector.ts
+var StatsCollector = class {
+	config;
+	storage;
+	buffer;
+	cleaner;
+	options;
+	isStarted = false;
+	isClosed = false;
+	constructor(config, storage, options) {
+		this.validateConfig(config);
+		this.config = Object.freeze({ ...config });
+		this.storage = storage ?? createStatsStorage(this.config);
+		this.options = options;
+		this.buffer = new StatsBufferQueue({
+			maxQueueSize: this.config.maxQueueSize,
+			maxSessionQueueSize: this.config.maxSessionQueueSize,
+			batchSize: this.config.batchSize,
+			flushIntervalMs: this.config.flushIntervalMs,
+			storage: this.storage,
+			onDrop: this.options?.onDrop,
+			onError: this.options?.onError
+		});
+		this.cleaner = new StatsRetentionCleaner({
+			storage: this.storage,
+			retentionDays: this.config.retentionDays,
+			cleanupIntervalMs: this.config.cleanupIntervalMs,
+			onCleanup: this.options?.onCleanup,
+			onError: this.options?.onError
+		});
+	}
+	start() {
+		if (this.isClosed || this.isStarted) return;
+		this.buffer.start();
+		this.cleaner.start();
+		this.isStarted = true;
+	}
+	recordRequest(input) {
+		if (this.isClosed) return;
+		try {
+			this.validateRecordInput(input);
+			const timestamp = typeof input.timestamp === "number" && Number.isFinite(input.timestamp) ? input.timestamp : Date.now();
+			const promptTokens = Math.max(0, Math.floor(input.promptTokens));
+			const cachedTokens = Math.max(0, Math.floor(input.cachedTokens));
+			const outputTokens = Math.max(0, Math.floor(input.outputTokens));
+			const latencyMs = Math.max(0, Math.floor(input.latencyMs));
+			const ttftMs = typeof input.ttftMs === "number" && Number.isFinite(input.ttftMs) ? Math.max(0, Math.floor(input.ttftMs)) : void 0;
+			const cacheHit = cachedTokens > 0;
+			const requestMetric = {
+				requestId: input.requestId,
+				sessionId: input.sessionId ?? null,
+				accountId: input.accountId,
+				model: input.model,
+				timestamp,
+				status: input.status,
+				latencyMs,
+				ttftMs,
+				cacheHit,
+				promptTokens,
+				cachedTokens,
+				outputTokens
+			};
+			this.buffer.push(requestMetric);
+		} catch (error) {
+			if (this.options?.onError) try {
+				this.options.onError(error, "recordRequest");
+			} catch {}
+		}
+	}
+	async flush() {
+		await this.buffer.flush();
+	}
+	async cleanup(referenceNow) {
+		return await this.cleaner.cleanup(referenceNow);
+	}
+	async close() {
+		if (this.isClosed) return;
+		this.isClosed = true;
+		this.isStarted = false;
+		this.cleaner.stop();
+		await this.buffer.close();
+		await this.storage.close();
+	}
+	async getSessionMetric(sessionId) {
+		const persisted = await this.storage.getSessionMetric(sessionId);
+		const pendingDelta = this.buffer.getPendingSessionDelta(sessionId);
+		if (!persisted && !pendingDelta) return null;
+		if (!persisted && pendingDelta) {
+			const totalPromptTokens = Math.max(0, pendingDelta.promptTokens);
+			const totalCachedTokens = Math.max(0, pendingDelta.cachedTokens);
+			const cacheHitRate = totalPromptTokens > 0 ? totalCachedTokens / totalPromptTokens : 0;
+			return {
+				sessionId: pendingDelta.sessionId,
+				accountId: pendingDelta.accountId,
+				createdAt: pendingDelta.createdAt,
+				updatedAt: pendingDelta.updatedAt,
+				totalRequests: pendingDelta.requestCount,
+				totalSuccess: pendingDelta.successCount,
+				totalFailed: pendingDelta.failedCount,
+				totalPromptTokens,
+				totalCachedTokens,
+				cacheHitRate
+			};
+		}
+		if (persisted && !pendingDelta) return { ...persisted };
+		if (persisted && pendingDelta) {
+			const totalRequests = persisted.totalRequests + pendingDelta.requestCount;
+			const totalSuccess = persisted.totalSuccess + pendingDelta.successCount;
+			const totalFailed = persisted.totalFailed + pendingDelta.failedCount;
+			const totalPromptTokens = persisted.totalPromptTokens + pendingDelta.promptTokens;
+			const totalCachedTokens = persisted.totalCachedTokens + pendingDelta.cachedTokens;
+			const cacheHitRate = totalPromptTokens > 0 ? totalCachedTokens / totalPromptTokens : 0;
+			return {
+				...persisted,
+				accountId: pendingDelta.accountId,
+				createdAt: Math.min(persisted.createdAt, pendingDelta.createdAt),
+				updatedAt: Math.max(persisted.updatedAt, pendingDelta.updatedAt),
+				totalRequests,
+				totalSuccess,
+				totalFailed,
+				totalPromptTokens,
+				totalCachedTokens,
+				cacheHitRate
+			};
+		}
+		return null;
+	}
+	getStorage() {
+		return this.storage;
+	}
+	getConfig() {
+		return this.config;
+	}
+	validateConfig(config) {
+		if (!config || typeof config !== "object") throw new Error("StatsConfig must be a non-null object.");
+		if (typeof config.retentionDays !== "number" || !Number.isFinite(config.retentionDays) || config.retentionDays <= 0) throw new Error(`Invalid retentionDays: ${config.retentionDays}. Must be a positive finite number.`);
+		if (typeof config.dbPath !== "string" || config.dbPath.trim().length === 0) throw new Error(`Invalid dbPath: "${config.dbPath}". Must be a non-empty string.`);
+		if (typeof config.flushIntervalMs !== "number" || !Number.isFinite(config.flushIntervalMs) || config.flushIntervalMs <= 0) throw new Error(`Invalid flushIntervalMs: ${config.flushIntervalMs}. Must be a positive finite integer.`);
+		if (typeof config.maxQueueSize !== "number" || !Number.isFinite(config.maxQueueSize) || config.maxQueueSize <= 0) throw new Error(`Invalid maxQueueSize: ${config.maxQueueSize}. Must be a positive finite integer.`);
+		if (config.maxSessionQueueSize !== void 0) {
+			if (typeof config.maxSessionQueueSize !== "number" || !Number.isFinite(config.maxSessionQueueSize) || config.maxSessionQueueSize <= 0) throw new Error(`Invalid maxSessionQueueSize: ${config.maxSessionQueueSize}. Must be a positive finite integer.`);
+		}
+		if (config.batchSize !== void 0) {
+			if (typeof config.batchSize !== "number" || !Number.isFinite(config.batchSize) || config.batchSize <= 0) throw new Error(`Invalid batchSize: ${config.batchSize}. Must be a positive finite integer.`);
+		}
+		if (typeof config.cleanupIntervalMs !== "number" || !Number.isFinite(config.cleanupIntervalMs) || config.cleanupIntervalMs <= 0) throw new Error(`Invalid cleanupIntervalMs: ${config.cleanupIntervalMs}. Must be a positive finite integer.`);
+	}
+	validateRecordInput(input) {
+		if (!input || typeof input !== "object") throw new Error("RecordRequestInput must be a valid non-null object.");
+		if (typeof input.requestId !== "string" || input.requestId.trim().length === 0) throw new Error("Invalid requestId: must be a non-empty string.");
+		if (typeof input.accountId !== "string" || input.accountId.trim().length === 0) throw new Error("Invalid accountId: must be a non-empty string.");
+		if (typeof input.model !== "string" || input.model.trim().length === 0) throw new Error("Invalid model: must be a non-empty string.");
+		if (![
+			"success",
+			"error",
+			"abort"
+		].includes(input.status)) throw new Error(`Invalid status: "${input.status}". Must be 'success', 'error', or 'abort'.`);
+		if (typeof input.latencyMs !== "number" || !Number.isFinite(input.latencyMs) || input.latencyMs < 0) throw new Error(`Invalid latencyMs: ${input.latencyMs}. Must be a non-negative finite number.`);
+		if (input.ttftMs !== void 0) {
+			if (typeof input.ttftMs !== "number" || !Number.isFinite(input.ttftMs) || input.ttftMs < 0) throw new Error(`Invalid ttftMs: ${input.ttftMs}. Must be a non-negative finite number.`);
+		}
+		if (typeof input.promptTokens !== "number" || !Number.isFinite(input.promptTokens) || input.promptTokens < 0) throw new Error(`Invalid promptTokens: ${input.promptTokens}. Must be a non-negative finite number.`);
+		if (typeof input.cachedTokens !== "number" || !Number.isFinite(input.cachedTokens) || input.cachedTokens < 0) throw new Error(`Invalid cachedTokens: ${input.cachedTokens}. Must be a non-negative finite number.`);
+		if (typeof input.outputTokens !== "number" || !Number.isFinite(input.outputTokens) || input.outputTokens < 0) throw new Error(`Invalid outputTokens: ${input.outputTokens}. Must be a non-negative finite number.`);
+	}
+};
+//#endregion
 //#region src/index.ts
 const name = "dsh-cloudcode-link";
 const inject = ["llm", "commands"];
@@ -27798,10 +29294,43 @@ function apply(ctx, entryConfig = {}) {
 	let dormantReason = null;
 	let lastRun = null;
 	const getConfig = () => resolveConfig(entryConfig);
-	const pool = new AccountPoolManager(process.env.CLOUDCODE_ACCOUNTS_DIR?.trim() || process.env.ANTIGRAVITY_ACCOUNTS_DIR?.trim() || join(dshHome(), "agy-accounts"));
+	const pool = new AccountPoolManager(process.env.CLOUDCODE_ACCOUNTS_DIR?.trim() || process.env.ANTIGRAVITY_ACCOUNTS_DIR?.trim() || join(dshHome(), "agy-accounts"), getConfig().lowQuotaThreshold);
 	const quota = new QuotaService(pool);
 	quota.selfHealQuarantinedAccounts().catch(() => void 0);
 	const sessionStore = new SessionStore(join(stateDir(), "sessions.json"));
+	const initialCfg = getConfig();
+	let statsStorage;
+	try {
+		if (isSqliteAvailable()) statsStorage = new SqliteStatsStorage(initialCfg.statsDbPath);
+		else {
+			log(`[stats] node:sqlite is not available, falling back to MemoryStatsStorage for ${initialCfg.statsDbPath}`);
+			statsStorage = new MemoryStatsStorage();
+		}
+	} catch (err) {
+		log(`[stats] failed to initialize SqliteStatsStorage: ${String(err)}, falling back to MemoryStatsStorage`);
+		statsStorage = new MemoryStatsStorage();
+	}
+	const statsCollector = new StatsCollector({
+		retentionDays: initialCfg.statsRetentionDays,
+		dbPath: initialCfg.statsDbPath,
+		flushIntervalMs: initialCfg.statsFlushIntervalMs,
+		maxQueueSize: initialCfg.statsBufferCapacity,
+		batchSize: initialCfg.statsBatchSize,
+		cleanupIntervalMs: initialCfg.statsRetentionCheckIntervalMs
+	}, statsStorage, {
+		onError: (err, context) => {
+			log(`[stats-collector-error] ${context}: ${String(err)}`);
+		},
+		onDrop: (dropped) => {
+			log(`[stats-buffer-drop] evicted ${dropped.length} oldest metrics due to capacity`);
+		}
+	});
+	if (initialCfg.statsEnabled) statsCollector.start();
+	ctx.on("dispose", async () => {
+		await statsCollector.close().catch((err) => {
+			log(`[stats] error closing statsCollector on dispose: ${String(err)}`);
+		});
+	});
 	const heartbeat = new HeartbeatManager({
 		getConfig,
 		quota,
@@ -27849,6 +29378,7 @@ function apply(ctx, entryConfig = {}) {
 		pool,
 		quota,
 		sessionStore,
+		statsCollector,
 		acquire: () => semaphore.acquire(),
 		log,
 		readImage,
@@ -27923,9 +29453,31 @@ function apply(ctx, entryConfig = {}) {
 			const d = webServer.register(route);
 			if (typeof d === "function") disposers.push(d);
 		};
+		const regBoth = (subPath, handler) => {
+			reg({
+				kind: "exact",
+				path: `/plugins/agy-link/${subPath}`,
+				handler
+			});
+			reg({
+				kind: "exact",
+				path: `/plugins/cloudcode-link/${subPath}`,
+				handler
+			});
+		};
 		const sendJson = (res, status, body) => {
 			res.writeHead(status, { "Content-Type": "application/json; charset=utf-8" });
 			res.end(JSON.stringify(body));
+		};
+		const parseQuery = (req) => {
+			const url = req?.url ?? "";
+			const qIdx = url.indexOf("?");
+			if (qIdx === -1) return {};
+			const search = url.slice(qIdx + 1);
+			const params = new URLSearchParams(search);
+			const result = {};
+			for (const [k, v] of params.entries()) result[k] = v;
+			return result;
 		};
 		const readBody = (req) => {
 			const r = req;
@@ -27946,265 +29498,486 @@ function apply(ctx, entryConfig = {}) {
 			const m = req.method;
 			return typeof m === "string" ? m.toUpperCase() : "GET";
 		};
-		reg({
-			kind: "exact",
-			path: "/plugins/agy-link/status",
-			handler: (_req, res) => {
-				(async () => {
-					const cfg = getConfig();
-					const cat = catalog.get();
-					const authStatus = await auth.resolvedStatus();
-					sendJson(res, 200, {
-						plugin: "dsh-agy-link",
-						transport: "direct",
-						dormantReason,
-						enabled: cfg.enabled,
-						defaultModel: cfg.defaultModel,
-						defaultEffort: cfg.defaultEffort,
-						askTool: cfg.askTool,
-						auth: authStatus,
-						poolAuth: poolAuth.status(),
-						pool: pool.getPoolData(),
-						catalog: {
-							source: cat.source,
-							count: cat.models.length,
-							lastError: cat.lastError ?? null
-						},
-						lastRun
-					});
-				})();
-			}
+		regBoth("status", (_req, res) => {
+			(async () => {
+				const cfg = getConfig();
+				const cat = catalog.get();
+				const authStatus = await auth.resolvedStatus();
+				sendJson(res, 200, {
+					plugin: "dsh-cloudcode-link",
+					transport: "direct",
+					dormantReason,
+					enabled: cfg.enabled,
+					defaultModel: cfg.defaultModel,
+					defaultEffort: cfg.defaultEffort,
+					askTool: cfg.askTool,
+					auth: authStatus,
+					poolAuth: poolAuth.status(),
+					pool: pool.getPoolData(),
+					catalog: {
+						source: cat.source,
+						count: cat.models.length,
+						lastError: cat.lastError ?? null
+					},
+					lastRun
+				});
+			})();
 		});
-		reg({
-			kind: "exact",
-			path: "/plugins/agy-link/catalog",
-			handler: (_req, res) => {
-				const current = catalog.get();
+		regBoth("catalog", (_req, res) => {
+			const current = catalog.get();
+			sendJson(res, 200, {
+				ok: true,
+				source: current.source,
+				count: current.models.length,
+				models: current.models
+			});
+		});
+		regBoth("pool", (_req, res) => {
+			sendJson(res, 200, pool.getPoolData());
+		});
+		regBoth("pool/begin-add", (req, res) => {
+			(async () => {
+				if (methodOf(req) !== "POST") {
+					sendJson(res, 405, { error: "POST only" });
+					return;
+				}
+				const body = await readBody(req);
+				const alias = typeof body.alias === "string" ? body.alias : void 0;
+				const proxyUrl = typeof body.proxyUrl === "string" ? body.proxyUrl : void 0;
+				const st = await poolAuth.begin(alias, proxyUrl);
+				sendJson(res, st.ok ? 200 : 500, st);
+			})();
+		});
+		regBoth("pool/complete-add", (req, res) => {
+			(async () => {
+				if (methodOf(req) !== "POST") {
+					sendJson(res, 405, { error: "POST only" });
+					return;
+				}
+				const body = await readBody(req);
+				const code = typeof body.code === "string" ? body.code : "";
+				if (!code) {
+					sendJson(res, 400, {
+						ok: false,
+						error: "missing code"
+					});
+					return;
+				}
+				const st = await poolAuth.submitCode(code);
+				sendJson(res, st.ok ? 200 : 400, {
+					ok: st.ok,
+					phase: st.phase,
+					message: st.message,
+					pool: pool.getPoolData()
+				});
+			})();
+		});
+		regBoth("pool/cancel-add", (req, res) => {
+			(async () => {
+				if (methodOf(req) !== "POST") {
+					sendJson(res, 405, { error: "POST only" });
+					return;
+				}
+				await readBody(req);
+				await poolAuth.cancel();
 				sendJson(res, 200, {
 					ok: true,
-					source: current.source,
-					count: current.models.length,
-					models: current.models
+					pool: pool.getPoolData()
 				});
-			}
+			})();
 		});
-		reg({
-			kind: "exact",
-			path: "/plugins/agy-link/pool",
-			handler: (_req, res) => {
-				sendJson(res, 200, pool.getPoolData());
-			}
+		regBoth("pool/remove", (req, res) => {
+			(async () => {
+				if (methodOf(req) !== "POST") {
+					sendJson(res, 405, { error: "POST only" });
+					return;
+				}
+				const body = await readBody(req);
+				const id = typeof body.id === "string" ? body.id : "";
+				pool.deleteAccount(id);
+				sendJson(res, 200, {
+					ok: true,
+					pool: pool.getPoolData()
+				});
+			})();
 		});
-		reg({
-			kind: "exact",
-			path: "/plugins/agy-link/pool/begin-add",
-			handler: (req, res) => {
-				(async () => {
-					if (methodOf(req) !== "POST") {
-						sendJson(res, 405, { error: "POST only" });
-						return;
-					}
-					const body = await readBody(req);
-					const alias = typeof body.alias === "string" ? body.alias : void 0;
-					const proxyUrl = typeof body.proxyUrl === "string" ? body.proxyUrl : void 0;
-					const st = await poolAuth.begin(alias, proxyUrl);
-					sendJson(res, st.ok ? 200 : 500, st);
-				})();
-			}
+		regBoth("pool/proxy", (req, res) => {
+			(async () => {
+				if (methodOf(req) !== "POST") {
+					sendJson(res, 405, { error: "POST only" });
+					return;
+				}
+				const body = await readBody(req);
+				const id = typeof body.id === "string" ? body.id : "";
+				const proxyUrl = typeof body.proxyUrl === "string" ? body.proxyUrl : void 0;
+				pool.setAccountProxy(id, proxyUrl);
+				sendJson(res, 200, {
+					ok: true,
+					pool: pool.getPoolData()
+				});
+			})();
 		});
-		reg({
-			kind: "exact",
-			path: "/plugins/agy-link/pool/complete-add",
-			handler: (req, res) => {
-				(async () => {
-					if (methodOf(req) !== "POST") {
-						sendJson(res, 405, { error: "POST only" });
-						return;
-					}
-					const body = await readBody(req);
-					const code = typeof body.code === "string" ? body.code : "";
-					if (!code) {
-						sendJson(res, 400, {
-							ok: false,
-							error: "missing code"
+		regBoth("pool/primary", (req, res) => {
+			(async () => {
+				if (methodOf(req) !== "POST") {
+					sendJson(res, 405, { error: "POST only" });
+					return;
+				}
+				const body = await readBody(req);
+				const id = typeof body.id === "string" ? body.id : "";
+				pool.setPrimaryAccount(id);
+				sendJson(res, 200, {
+					ok: true,
+					pool: pool.getPoolData()
+				});
+			})();
+		});
+		regBoth("pool/mode", (req, res) => {
+			(async () => {
+				if (methodOf(req) !== "POST") {
+					sendJson(res, 405, { error: "POST only" });
+					return;
+				}
+				const mode = (await readBody(req)).mode === "round-robin" ? "round-robin" : "sequential";
+				pool.setMode(mode);
+				sendJson(res, 200, {
+					ok: true,
+					pool: pool.getPoolData()
+				});
+			})();
+		});
+		regBoth("pool/refresh-quota", (req, res) => {
+			(async () => {
+				if (methodOf(req) !== "POST") {
+					sendJson(res, 405, { error: "POST only" });
+					return;
+				}
+				const body = await readBody(req);
+				const id = typeof body.id === "string" ? body.id : "";
+				if (id) {
+					const acc = pool.getAccount(id);
+					if (acc) await quota.refreshAccountQuota(acc, true);
+				} else await quota.refreshAllQuotas(true);
+				sendJson(res, 200, {
+					ok: true,
+					pool: pool.getPoolData()
+				});
+			})();
+		});
+		regBoth("pool/clear-cooldown", (req, res) => {
+			(async () => {
+				if (methodOf(req) !== "POST") {
+					sendJson(res, 405, { error: "POST only" });
+					return;
+				}
+				const body = await readBody(req);
+				const id = typeof body.id === "string" ? body.id : void 0;
+				const family = typeof body.family === "string" ? body.family : void 0;
+				pool.clearCooldown(id, family);
+				sendJson(res, 200, {
+					ok: true,
+					pool: pool.getPoolData()
+				});
+			})();
+		});
+		regBoth("config", (req, res) => {
+			(async () => {
+				if (methodOf(req) !== "POST") {
+					sendJson(res, 405, { error: "POST only" });
+					return;
+				}
+				const body = await readBody(req);
+				const key = typeof body.key === "string" ? body.key : "";
+				if (![
+					"defaultModel",
+					"defaultEffort",
+					"askTool",
+					"baseUrl"
+				].includes(key)) {
+					sendJson(res, 400, { error: "key not settable" });
+					return;
+				}
+				setOverride(key, body.value);
+				syncAskTool();
+				sendJson(res, 200, {
+					ok: true,
+					key,
+					value: body.value
+				});
+			})();
+		});
+		regBoth("stats/overview", (_req, res) => {
+			(async () => {
+				try {
+					if (statsStorage.getOverviewMetrics) {
+						const result = await statsStorage.getOverviewMetrics();
+						sendJson(res, 200, {
+							ok: true,
+							overview: result.overview,
+							accounts: result.accounts
 						});
 						return;
 					}
-					const st = await poolAuth.submitCode(code);
-					sendJson(res, st.ok ? 200 : 400, {
-						ok: st.ok,
-						phase: st.phase,
-						message: st.message,
-						pool: pool.getPoolData()
-					});
-				})();
-			}
-		});
-		reg({
-			kind: "exact",
-			path: "/plugins/agy-link/pool/cancel-add",
-			handler: (req, res) => {
-				(async () => {
-					if (methodOf(req) !== "POST") {
-						sendJson(res, 405, { error: "POST only" });
-						return;
+					const requests = await statsStorage.queryRequests?.({ limit: 5e3 }) ?? [];
+					let totalSuccess = 0;
+					let totalFailed = 0;
+					let totalAbort = 0;
+					let totalPromptTokens = 0;
+					let totalCachedTokens = 0;
+					let totalOutputTokens = 0;
+					let totalLatencyMs = 0;
+					let totalTtftMs = 0;
+					let ttftCount = 0;
+					const latencies = [];
+					const accountMap = /* @__PURE__ */ new Map();
+					for (const r of requests) {
+						if (r.status === "success") totalSuccess++;
+						else if (r.status === "abort") totalAbort++;
+						else totalFailed++;
+						totalPromptTokens += r.promptTokens;
+						totalCachedTokens += r.cachedTokens;
+						totalOutputTokens += r.outputTokens;
+						totalLatencyMs += r.latencyMs;
+						latencies.push(r.latencyMs);
+						if (typeof r.ttftMs === "number") {
+							totalTtftMs += r.ttftMs;
+							ttftCount++;
+						}
+						let acc = accountMap.get(r.accountId);
+						if (!acc) {
+							acc = {
+								accountId: r.accountId,
+								totalRequests: 0,
+								successRequests: 0,
+								failedRequests: 0,
+								promptTokens: 0,
+								cachedTokens: 0,
+								outputTokens: 0,
+								cacheHitRate: 0,
+								avgLatencyMs: 0
+							};
+							accountMap.set(r.accountId, acc);
+						}
+						acc.totalRequests++;
+						if (r.status === "success") acc.successRequests++;
+						else acc.failedRequests++;
+						acc.promptTokens += r.promptTokens;
+						acc.cachedTokens += r.cachedTokens;
+						acc.outputTokens += r.outputTokens;
+						acc.avgLatencyMs = Math.round(acc.avgLatencyMs + (r.latencyMs - acc.avgLatencyMs) / acc.totalRequests);
 					}
-					await readBody(req);
-					await poolAuth.cancel();
+					latencies.sort((a, b) => a - b);
+					const p50LatencyMs = latencies.length > 0 ? latencies[Math.floor(latencies.length * .5)] ?? 0 : 0;
+					const p90LatencyMs = latencies.length > 0 ? latencies[Math.floor(latencies.length * .9)] ?? 0 : 0;
+					const totalRequests = requests.length;
+					const avgLatencyMs = totalRequests > 0 ? Math.round(totalLatencyMs / totalRequests) : 0;
+					const avgTtftMs = ttftCount > 0 ? Math.round(totalTtftMs / ttftCount) : 0;
+					const cacheHitRate = totalPromptTokens > 0 ? Number((totalCachedTokens / totalPromptTokens).toFixed(4)) : 0;
+					for (const acc of accountMap.values()) acc.cacheHitRate = acc.promptTokens > 0 ? Number((acc.cachedTokens / acc.promptTokens).toFixed(4)) : 0;
 					sendJson(res, 200, {
 						ok: true,
-						pool: pool.getPoolData()
+						overview: {
+							totalRequests,
+							totalSuccess,
+							totalFailed,
+							totalAbort,
+							totalTokens: totalPromptTokens + totalOutputTokens,
+							totalPromptTokens,
+							totalCachedTokens,
+							totalOutputTokens,
+							cacheHitRate,
+							avgLatencyMs,
+							avgTtftMs,
+							p50LatencyMs,
+							p90LatencyMs
+						},
+						accounts: Array.from(accountMap.values())
 					});
-				})();
-			}
+				} catch (err) {
+					sendJson(res, 500, {
+						ok: false,
+						error: String(err)
+					});
+				}
+			})();
 		});
-		reg({
-			kind: "exact",
-			path: "/plugins/agy-link/pool/remove",
-			handler: (req, res) => {
-				(async () => {
-					if (methodOf(req) !== "POST") {
-						sendJson(res, 405, { error: "POST only" });
-						return;
-					}
-					const body = await readBody(req);
-					const id = typeof body.id === "string" ? body.id : "";
-					pool.deleteAccount(id);
+		regBoth("stats/requests", (req, res) => {
+			(async () => {
+				try {
+					const q = parseQuery(req);
+					const limitParam = q.limit ? parseInt(q.limit, 10) : 50;
+					const maxLimit = getConfig().apiMaxPageSize;
+					const limit = Number.isFinite(limitParam) && limitParam > 0 ? Math.min(limitParam, maxLimit) : 50;
+					const offsetParam = q.offset ? parseInt(q.offset, 10) : 0;
+					const offset = Number.isFinite(offsetParam) && offsetParam >= 0 ? offsetParam : 0;
+					const accountId = q.accountId?.trim() || void 0;
+					const sessionId = q.sessionId?.trim() || void 0;
+					const status = q.status === "success" || q.status === "error" || q.status === "abort" ? q.status : void 0;
+					const filter = {
+						limit,
+						offset,
+						accountId,
+						sessionId,
+						status
+					};
+					const items = await statsStorage.queryRequests?.(filter) ?? [];
+					const total = statsStorage.countRequests ? await statsStorage.countRequests({
+						accountId,
+						sessionId,
+						status
+					}) : items.length;
 					sendJson(res, 200, {
 						ok: true,
-						pool: pool.getPoolData()
+						requests: items,
+						total,
+						limit,
+						offset
 					});
-				})();
-			}
+				} catch (err) {
+					sendJson(res, 500, {
+						ok: false,
+						error: String(err)
+					});
+				}
+			})();
 		});
-		reg({
-			kind: "exact",
-			path: "/plugins/agy-link/pool/proxy",
-			handler: (req, res) => {
-				(async () => {
-					if (methodOf(req) !== "POST") {
-						sendJson(res, 405, { error: "POST only" });
-						return;
+		regBoth("stats/aggregated", (req, res) => {
+			(async () => {
+				try {
+					const q = parseQuery(req);
+					const interval = q.interval === "day" ? "day" : "hour";
+					const intervalMs = interval === "day" ? 864e5 : 36e5;
+					const since = q.since ? parseInt(q.since, 10) : void 0;
+					const until = q.until ? parseInt(q.until, 10) : void 0;
+					let buckets = [];
+					if (statsStorage.getAggregatedMetrics) buckets = await statsStorage.getAggregatedMetrics(intervalMs, since, until, 1e3);
+					else {
+						const requests = await statsStorage.queryRequests?.({
+							since,
+							until,
+							limit: 5e3
+						}) ?? [];
+						const bucketMap = /* @__PURE__ */ new Map();
+						for (const r of requests) {
+							const bKey = Math.floor(r.timestamp / intervalMs) * intervalMs;
+							let b = bucketMap.get(bKey);
+							if (!b) {
+								b = {
+									bucket: bKey,
+									requests: 0,
+									successCount: 0,
+									failedCount: 0,
+									promptTokens: 0,
+									cachedTokens: 0,
+									outputTokens: 0,
+									totalLatencyMs: 0,
+									totalTtftMs: 0,
+									ttftCount: 0
+								};
+								bucketMap.set(bKey, b);
+							}
+							b.requests++;
+							if (r.status === "success") b.successCount++;
+							else b.failedCount++;
+							b.promptTokens += r.promptTokens;
+							b.cachedTokens += r.cachedTokens;
+							b.outputTokens += r.outputTokens;
+							b.totalLatencyMs += r.latencyMs;
+							if (typeof r.ttftMs === "number") {
+								b.totalTtftMs += r.ttftMs;
+								b.ttftCount++;
+							}
+						}
+						buckets = Array.from(bucketMap.values()).sort((a, b) => a.bucket - b.bucket);
 					}
-					const body = await readBody(req);
-					const id = typeof body.id === "string" ? body.id : "";
-					const proxyUrl = typeof body.proxyUrl === "string" ? body.proxyUrl : void 0;
-					pool.setAccountProxy(id, proxyUrl);
+					const sortedBuckets = buckets.map((b) => ({
+						bucket: b.bucket,
+						interval,
+						requests: b.requests,
+						successCount: b.successCount,
+						failedCount: b.failedCount,
+						promptTokens: b.promptTokens,
+						cachedTokens: b.cachedTokens,
+						outputTokens: b.outputTokens,
+						cacheHitRate: b.promptTokens > 0 ? Number((b.cachedTokens / b.promptTokens).toFixed(4)) : 0,
+						avgLatencyMs: b.requests > 0 ? Math.round(b.totalLatencyMs / b.requests) : 0,
+						avgTtftMs: b.ttftCount > 0 ? Math.round(b.totalTtftMs / b.ttftCount) : 0
+					}));
 					sendJson(res, 200, {
 						ok: true,
-						pool: pool.getPoolData()
+						interval,
+						data: sortedBuckets
 					});
-				})();
-			}
+				} catch (err) {
+					sendJson(res, 500, {
+						ok: false,
+						error: String(err)
+					});
+				}
+			})();
 		});
-		reg({
-			kind: "exact",
-			path: "/plugins/agy-link/pool/primary",
-			handler: (req, res) => {
-				(async () => {
-					if (methodOf(req) !== "POST") {
-						sendJson(res, 405, { error: "POST only" });
-						return;
+		regBoth("stats/accounts-usage", (_req, res) => {
+			(async () => {
+				try {
+					const usageList = statsStorage.getAccountUsage ? await statsStorage.getAccountUsage() : [];
+					const accountUsageMap = /* @__PURE__ */ new Map();
+					for (const u of usageList) accountUsageMap.set(u.accountId, u);
+					const accounts = pool.getAccounts();
+					const seen = /* @__PURE__ */ new Set();
+					const result = accounts.map((acc) => {
+						seen.add(acc.id);
+						const u = accountUsageMap.get(acc.id);
+						const totalReq = u?.totalRequests ?? 0;
+						const promptTok = u?.promptTokens ?? 0;
+						const cachedTok = u?.cachedTokens ?? 0;
+						return {
+							accountId: acc.id,
+							alias: acc.alias,
+							email: acc.email ? maskEmail(acc.email) : void 0,
+							enabled: acc.enabled,
+							authRequired: acc.authRequired,
+							totalRequests: totalReq,
+							successRequests: u?.successRequests ?? 0,
+							failedRequests: u?.failedRequests ?? 0,
+							promptTokens: promptTok,
+							cachedTokens: cachedTok,
+							outputTokens: u?.outputTokens ?? 0,
+							cacheHitRate: promptTok > 0 ? Number((cachedTok / promptTok).toFixed(4)) : 0,
+							avgLatencyMs: totalReq > 0 ? Math.round((u?.totalLatencyMs ?? 0) / totalReq) : 0,
+							lastUsed: u?.lastUsed ?? null
+						};
+					});
+					for (const [id, u] of accountUsageMap.entries()) if (!seen.has(id)) {
+						const promptTok = u.promptTokens ?? 0;
+						const cachedTok = u.cachedTokens ?? 0;
+						result.push({
+							accountId: id,
+							alias: id,
+							email: void 0,
+							enabled: false,
+							authRequired: false,
+							totalRequests: u.totalRequests,
+							successRequests: u.successRequests,
+							failedRequests: u.failedRequests,
+							promptTokens: promptTok,
+							cachedTokens: cachedTok,
+							outputTokens: u.outputTokens,
+							cacheHitRate: promptTok > 0 ? Number((cachedTok / promptTok).toFixed(4)) : 0,
+							avgLatencyMs: u.totalRequests > 0 ? Math.round(u.totalLatencyMs / u.totalRequests) : 0,
+							lastUsed: u.lastUsed
+						});
 					}
-					const body = await readBody(req);
-					const id = typeof body.id === "string" ? body.id : "";
-					pool.setPrimaryAccount(id);
 					sendJson(res, 200, {
 						ok: true,
-						pool: pool.getPoolData()
+						accounts: result
 					});
-				})();
-			}
-		});
-		reg({
-			kind: "exact",
-			path: "/plugins/agy-link/pool/mode",
-			handler: (req, res) => {
-				(async () => {
-					if (methodOf(req) !== "POST") {
-						sendJson(res, 405, { error: "POST only" });
-						return;
-					}
-					const mode = (await readBody(req)).mode === "round-robin" ? "round-robin" : "sequential";
-					pool.setMode(mode);
-					sendJson(res, 200, {
-						ok: true,
-						pool: pool.getPoolData()
+				} catch (err) {
+					sendJson(res, 500, {
+						ok: false,
+						error: String(err)
 					});
-				})();
-			}
-		});
-		reg({
-			kind: "exact",
-			path: "/plugins/agy-link/pool/refresh-quota",
-			handler: (req, res) => {
-				(async () => {
-					if (methodOf(req) !== "POST") {
-						sendJson(res, 405, { error: "POST only" });
-						return;
-					}
-					const body = await readBody(req);
-					const id = typeof body.id === "string" ? body.id : "";
-					if (id) {
-						const acc = pool.getAccount(id);
-						if (acc) await quota.refreshAccountQuota(acc, true);
-					} else await quota.refreshAllQuotas(true);
-					sendJson(res, 200, {
-						ok: true,
-						pool: pool.getPoolData()
-					});
-				})();
-			}
-		});
-		reg({
-			kind: "exact",
-			path: "/plugins/agy-link/pool/clear-cooldown",
-			handler: (req, res) => {
-				(async () => {
-					if (methodOf(req) !== "POST") {
-						sendJson(res, 405, { error: "POST only" });
-						return;
-					}
-					const body = await readBody(req);
-					const id = typeof body.id === "string" ? body.id : void 0;
-					const family = typeof body.family === "string" ? body.family : void 0;
-					pool.clearCooldown(id, family);
-					sendJson(res, 200, {
-						ok: true,
-						pool: pool.getPoolData()
-					});
-				})();
-			}
-		});
-		reg({
-			kind: "exact",
-			path: "/plugins/agy-link/config",
-			handler: (req, res) => {
-				(async () => {
-					if (methodOf(req) !== "POST") {
-						sendJson(res, 405, { error: "POST only" });
-						return;
-					}
-					const body = await readBody(req);
-					const key = typeof body.key === "string" ? body.key : "";
-					if (![
-						"defaultModel",
-						"defaultEffort",
-						"askTool",
-						"baseUrl"
-					].includes(key)) {
-						sendJson(res, 400, { error: "key not settable" });
-						return;
-					}
-					setOverride(key, body.value);
-					syncAskTool();
-					sendJson(res, 200, {
-						ok: true,
-						key,
-						value: body.value
-					});
-				})();
-			}
+				}
+			})();
 		});
 		return () => {
 			for (const d of disposers) try {

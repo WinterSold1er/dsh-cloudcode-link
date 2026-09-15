@@ -87,6 +87,17 @@ export function resolveConfig(
     contextWindowDefault: asNum(get('contextWindowDefault')) ?? base.contextWindowDefault,
     maxTokensDefault: asNum(get('maxTokensDefault')) ?? base.maxTokensDefault,
     quotaPollIntervalMs: asNum(get('quotaPollIntervalMs')) ?? base.quotaPollIntervalMs,
+    sessionStartQuotaRefreshMinIntervalMs:
+      asNum(get('sessionStartQuotaRefreshMinIntervalMs')) ?? base.sessionStartQuotaRefreshMinIntervalMs,
+    statsEnabled: asBool(get('statsEnabled')) ?? base.statsEnabled,
+    statsDbPath: asString(get('statsDbPath')) ?? base.statsDbPath,
+    statsBufferCapacity: asNum(get('statsBufferCapacity')) ?? base.statsBufferCapacity,
+    statsBatchSize: asNum(get('statsBatchSize')) ?? base.statsBatchSize,
+    statsFlushIntervalMs: asNum(get('statsFlushIntervalMs')) ?? base.statsFlushIntervalMs,
+    statsRetentionDays: asNum(get('statsRetentionDays')) ?? base.statsRetentionDays,
+    statsRetentionCheckIntervalMs: asNum(get('statsRetentionCheckIntervalMs')) ?? base.statsRetentionCheckIntervalMs,
+    lowQuotaThreshold: asNum(get('lowQuotaThreshold')) ?? base.lowQuotaThreshold,
+    apiMaxPageSize: asNum(get('apiMaxPageSize')) ?? base.apiMaxPageSize,
     modelsCacheTtlMs: asNum(get('modelsCacheTtlMs')) ?? base.modelsCacheTtlMs,
     baseUrl: asString(get('baseUrl')) ?? base.baseUrl,
     endpointCandidates: Array.isArray(get('endpointCandidates'))
@@ -159,6 +170,55 @@ export function resolveConfig(
   if (envHeartbeatInterval !== undefined) {
     const n = asNum(envHeartbeatInterval)
     if (n !== undefined) cfg.heartbeatIntervalMs = Math.max(30_000, n)
+  }
+
+  // Stats environment overrides
+  const envStatsDbPath = env.DSH_CLOUDCODE_DB_PATH ?? env.DSH_AGY_DB_PATH
+  if (envStatsDbPath) cfg.statsDbPath = envStatsDbPath
+  const envStatsEnabled = env.DSH_CLOUDCODE_STATS_ENABLED ?? env.DSH_AGY_STATS_ENABLED
+  if (envStatsEnabled !== undefined) {
+    const b = asBool(envStatsEnabled)
+    if (b !== undefined) cfg.statsEnabled = b
+  }
+  const envStatsBufferCapacity = env.DSH_CLOUDCODE_STATS_BUFFER_CAPACITY
+  if (envStatsBufferCapacity !== undefined) {
+    const n = asNum(envStatsBufferCapacity)
+    if (n !== undefined) cfg.statsBufferCapacity = Math.max(1, n)
+  }
+  const envStatsBatchSize = env.DSH_CLOUDCODE_STATS_BATCH_SIZE
+  if (envStatsBatchSize !== undefined) {
+    const n = asNum(envStatsBatchSize)
+    if (n !== undefined) cfg.statsBatchSize = Math.max(1, n)
+  }
+  const envStatsFlushIntervalMs = env.DSH_CLOUDCODE_STATS_FLUSH_INTERVAL_MS
+  if (envStatsFlushIntervalMs !== undefined) {
+    const n = asNum(envStatsFlushIntervalMs)
+    if (n !== undefined) cfg.statsFlushIntervalMs = Math.max(10, n)
+  }
+  const envStatsRetentionDays = env.DSH_CLOUDCODE_STATS_RETENTION_DAYS
+  if (envStatsRetentionDays !== undefined) {
+    const n = asNum(envStatsRetentionDays)
+    if (n !== undefined) cfg.statsRetentionDays = Math.max(1, n)
+  }
+  const envStatsRetentionCheckMs = env.DSH_CLOUDCODE_STATS_RETENTION_CHECK_INTERVAL_MS
+  if (envStatsRetentionCheckMs !== undefined) {
+    const n = asNum(envStatsRetentionCheckMs)
+    if (n !== undefined) cfg.statsRetentionCheckIntervalMs = Math.max(1000, n)
+  }
+  const envLowQuotaThreshold = env.DSH_CLOUDCODE_LOW_QUOTA_THRESHOLD
+  if (envLowQuotaThreshold !== undefined) {
+    const n = asNum(envLowQuotaThreshold)
+    if (n !== undefined) cfg.lowQuotaThreshold = Math.max(0, Math.min(1, n))
+  }
+  const envSessionRefreshMin = env.DSH_CLOUDCODE_SESSION_START_QUOTA_REFRESH_MIN_INTERVAL_MS
+  if (envSessionRefreshMin !== undefined) {
+    const n = asNum(envSessionRefreshMin)
+    if (n !== undefined) cfg.sessionStartQuotaRefreshMinIntervalMs = Math.max(1000, n)
+  }
+  const envApiMaxPageSize = env.DSH_CLOUDCODE_API_MAX_PAGE_SIZE
+  if (envApiMaxPageSize !== undefined) {
+    const n = asNum(envApiMaxPageSize)
+    if (n !== undefined) cfg.apiMaxPageSize = Math.max(1, n)
   }
 
   return cfg

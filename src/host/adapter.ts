@@ -29,6 +29,7 @@ import type { SessionStore } from './sessions.ts'
 import { convertTools } from './schema-converter.ts'
 import { convertMessages, type ImageReader } from './message-converter.ts'
 import { mapSseStreamToChunks } from './sse-mapper.ts'
+import type { StatsCollector, RequestMetricStatus } from './stats.ts'
 
 export interface AgyAdapterDeps {
   getConfig: () => PluginConfig
@@ -36,6 +37,7 @@ export interface AgyAdapterDeps {
   pool?: AccountPoolManager
   quota?: QuotaService
   sessionStore?: SessionStore
+  statsCollector?: StatsCollector
   /** Shared semaphore for cross-session concurrency. */
   acquire?: () => Promise<() => void>
   log?: (msg: string) => void
@@ -49,10 +51,56 @@ export interface AgyAdapterDeps {
 
 export class AgyAdapter extends LlmAdapter {
   private readonly deps: AgyAdapterDeps
+  /** Last forced quota refresh timestamp (per process, for session-start refresh). */
+  private lastSessionStartQuotaRefresh = 0
 
   constructor(deps: AgyAdapterDeps) {
     super()
     this.deps = deps
+  }
+
+  /**
+   * Force a live refresh of every healthy account's 5h quota before choosing a
+   * fresh account (brand-new session, or mid-session failover when the bound
+   * account went unhealthy). This makes the round-robin selection pick the
+   * account with the most remaining 5h quota instead of relying on a stale
+   * 15-min background poll.
+   *
+   * Critically, this is called ONLY when bound/pinned affinity did NOT already
+   * resolve an account — so an established session stays pinned to its account
+   * and never re-selects, preserving CloudCode KV cache hits.
+   *
+   * Throttled per-process so rapid consecutive selections don't hammer every
+   * account with a fresh HTTPS quota fetch.
+   */
+  private async refreshQuotasForSelection(family: ModelFamily): Promise<void> {
+    const pool = this.deps.pool
+    const quota = this.deps.quota
+    if (!pool || !quota) return
+    const now = Date.now()
+    const cfg = this.deps.getConfig()
+    const minInterval = Math.max(1_000, cfg.sessionStartQuotaRefreshMinIntervalMs)
+    if (now - this.lastSessionStartQuotaRefresh < minInterval) return
+    this.lastSessionStartQuotaRefresh = now
+
+    const targets = pool.getAccounts().filter((acc) => {
+      if (!acc.enabled || acc.authRequired) return false
+      const cd = acc.cooldowns[family]
+      if (cd && cd.cooldownUntil > now) return false
+      return true
+    })
+    if (targets.length === 0) return
+
+    await Promise.allSettled(
+      targets.map((acc) =>
+        quota
+          .refreshQuotaSummaryOnly(acc)
+          .catch((err: unknown) => {
+            this.deps.log?.(`[quota-refresh] failed for ${acc.id}: ${String(err)}`)
+            return null
+          }),
+      ),
+    )
   }
 
   override providerInfo(provider: string): LlmProviderInfo {
@@ -192,8 +240,15 @@ export class AgyAdapter extends LlmAdapter {
             }
           }
 
-          // Priority 3: Sticky Sequential / Pool selection
+          // Priority 3: Sticky Sequential / Pool selection.
+          // Only reached when the session has no healthy pinned/bound account
+          // (i.e. a brand-new session or a session whose previous account
+          // just went unhealthy). Before picking, force a live quota refresh so
+          // we prefer the account with the most remaining 5h quota. We deliberately
+          // do NOT refresh when Bound affinity already resolved an account —
+          // that guarantees a session stays pinned to ONE account for cache hits.
           if (!account) {
+            await this.refreshQuotasForSelection(family)
             account = this.deps.pool.selectAccount(family)
           }
 
@@ -253,6 +308,47 @@ export class AgyAdapter extends LlmAdapter {
           releaseAccount = await this.deps.pool.acquireAccount(account.id, cfg.maxConcurrent)
         }
 
+        const requestStartTime = Date.now()
+        let firstChunkTime: number | null = null
+        let promptTokens = 0
+        let cachedTokens = 0
+        let outputTokens = 0
+        let envelope: { requestId: string; sessionId: string; labels: Record<string, string> } | null = null
+        let streamStarted = false
+        let runOk = false
+        let recorded = false
+
+        const recordTelemetry = (statusOverride?: RequestMetricStatus) => {
+          if (recorded) return
+          if (!envelope) return
+          if (!this.deps.statsCollector || !this.deps.getConfig().statsEnabled) return
+          recorded = true
+
+          const requestDuration = Date.now() - requestStartTime
+          const ttftMs =
+            firstChunkTime !== null ? Math.max(0, firstChunkTime - requestStartTime) : requestDuration
+          const status: RequestMetricStatus =
+            statusOverride ?? (options.signal?.aborted ? 'abort' : runOk ? 'success' : 'error')
+
+          try {
+            this.deps.statsCollector.recordRequest({
+              requestId: envelope.requestId,
+              sessionId: rawSessionId ?? null,
+              accountId,
+              model: wireModel,
+              timestamp: requestStartTime,
+              status,
+              latencyMs: requestDuration,
+              ttftMs,
+              promptTokens,
+              cachedTokens,
+              outputTokens,
+            })
+          } catch (err) {
+            this.deps.log?.(`Failed to record request stats: ${String(err)}`)
+          }
+        }
+
         try {
           // 3. Resolve valid access token
           let token: string | null = null
@@ -287,11 +383,12 @@ export class AgyAdapter extends LlmAdapter {
           // 4. Ensure project ID & build request envelope
           const proxyUrl = account?.proxyUrl
           const customEndpoints = this.deps.endpointCandidates
-          const envelope = antigravityRequestEnvelope(wireModel, isClaude, {
+          const env = antigravityRequestEnvelope(wireModel, isClaude, {
             sessionId: rawSessionId,
             trajectoryId,
             step,
           })
+          envelope = env
           const projectId = await ensureProject(
             token,
             account?.alias || account?.id || 'antigravity-default',
@@ -318,12 +415,12 @@ export class AgyAdapter extends LlmAdapter {
               },
               ...(convertedTools ? { tools: convertedTools } : {}),
               ...(convertedTools ? { toolConfig: { functionCallingConfig: { mode: 'AUTO' } } } : {}),
-              sessionId: envelope.sessionId,
-              labels: envelope.labels,
+              sessionId: env.sessionId,
+              labels: env.labels,
             },
             requestType: 'AGENT',
             userAgent: 'ANTIGRAVITY',
-            requestId: envelope.requestId,
+            requestId: env.requestId,
           }
 
           // 5. Connect and stream
@@ -342,6 +439,7 @@ export class AgyAdapter extends LlmAdapter {
               this.deps.log?.(`CloudCode connection error on account ${accountId}: ${String(err)}, trying next`)
               continue
             }
+            recordTelemetry(options.signal?.aborted ? 'abort' : 'error')
             yield {
               type: 'finish',
               reason: {
@@ -376,6 +474,8 @@ export class AgyAdapter extends LlmAdapter {
               }
             }
 
+            recordTelemetry(options.signal?.aborted ? 'abort' : 'error')
+
             yield {
               type: 'finish',
               reason: {
@@ -390,18 +490,42 @@ export class AgyAdapter extends LlmAdapter {
           }
 
           // 7. Consume SSE chunks
-          let runOk = true
-          for await (const chunk of mapSseStreamToChunks(res, options.signal, () => {
-            hasEmitted = true
-          })) {
-            yield chunk as StreamChunk
-            if (chunk.type === 'finish') {
-              const finish = (chunk as { reason?: { kind?: string } }).reason
-              if (finish?.kind === 'error') {
-                runOk = false
+          streamStarted = true
+          runOk = true
+          try {
+            for await (const chunk of mapSseStreamToChunks(res, options.signal, () => {
+              hasEmitted = true
+              if (firstChunkTime === null) {
+                firstChunkTime = Date.now()
+              }
+            })) {
+              if (firstChunkTime === null) {
+                firstChunkTime = Date.now()
+              }
+              yield chunk as StreamChunk
+              if (chunk.type === 'usage' && (chunk as { usage?: any }).usage) {
+                const u = (chunk as { usage?: any }).usage
+                const cTokens = typeof u.cacheReadTokens === 'number' ? u.cacheReadTokens : 0
+                const inTokens = typeof u.inputTokens === 'number' ? u.inputTokens : 0
+                cachedTokens = cTokens
+                promptTokens = inTokens + cTokens
+                outputTokens = typeof u.outputTokens === 'number' ? u.outputTokens : 0
+              }
+              if (chunk.type === 'finish') {
+                const finish = (chunk as { reason?: { kind?: string } }).reason
+                if (finish?.kind === 'error') {
+                  runOk = false
+                }
               }
             }
+          } catch (streamErr) {
+            runOk = false
+            throw streamErr
+          } finally {
+            recordTelemetry()
           }
+
+          const requestDuration = Date.now() - requestStartTime
 
           if (runOk) {
             if (this.deps.pool && account) {
@@ -410,14 +534,14 @@ export class AgyAdapter extends LlmAdapter {
             this.deps.onRun?.({
               ok: true,
               code: 'OK',
-              durationMs: Date.now() - startTime,
+              durationMs: requestDuration,
               model: wireModel,
             })
           } else {
             this.deps.onRun?.({
               ok: false,
               code: 'STREAM_ERROR',
-              durationMs: Date.now() - startTime,
+              durationMs: requestDuration,
               model: wireModel,
             })
           }
@@ -425,6 +549,9 @@ export class AgyAdapter extends LlmAdapter {
           // Successful turn completed
           return
         } finally {
+          if (streamStarted && !recorded) {
+            recordTelemetry()
+          }
           if (releaseAccount) releaseAccount()
         }
       }

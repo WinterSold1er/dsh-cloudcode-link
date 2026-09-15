@@ -1,5 +1,7 @@
 // Shared vocabulary for dsh-cloudcode-link: plugin config, provider-route ids,
 // stable error codes, and the CloudCode direct API types.
+import { join } from 'node:path'
+import { defaultPoolDir } from '../host/pool.ts'
 
 export const PROVIDER_ID = 'antigravity'
 export const PLUGIN_ID = 'cloudcode-link'
@@ -25,6 +27,26 @@ export interface PluginConfig {
   maxTokensDefault: number
   /** Background quota polling interval in ms (default 15 min; clamped >= 60s). */
   quotaPollIntervalMs: number
+  /** Min interval between forced live quota refreshes on new-session start (default 10s). */
+  sessionStartQuotaRefreshMinIntervalMs: number
+  /** Whether request telemetry metrics collection is enabled (default true). */
+  statsEnabled: boolean
+  /** SQLite database file path for stats metrics persistence. */
+  statsDbPath: string
+  /** Maximum capacity of in-memory metrics buffer before oldest eviction (default 2048). */
+  statsBufferCapacity: number
+  /** Batch size for persistent disk writes (default 100). */
+  statsBatchSize: number
+  /** In-memory metrics flush interval in milliseconds (default 2000). */
+  statsFlushIntervalMs: number
+  /** Retention period in days for metrics history (default 30). */
+  statsRetentionDays: number
+  /** Interval in milliseconds for retention cleanup sweeps (default 3600000). */
+  statsRetentionCheckIntervalMs: number
+  /** Quota fraction below which an account is considered low-quota (default 0.05). */
+  lowQuotaThreshold: number
+  /** Maximum page size for stats queries (default 100). */
+  apiMaxPageSize: number
   fallbackModels: readonly FallbackModelDef[]
   askTool: boolean
   /** Opt-out and suppress Google Cloud Code / Antigravity telemetry tracking. */
@@ -104,6 +126,16 @@ export function defaultConfig(): PluginConfig {
     contextWindowDefault: 1_048_576,
     maxTokensDefault: 65_536,
     quotaPollIntervalMs: 15 * 60_000,
+    sessionStartQuotaRefreshMinIntervalMs: 10_000,
+    statsEnabled: true,
+    statsDbPath: join(defaultPoolDir(), 'stats.db'),
+    statsBufferCapacity: 2048,
+    statsBatchSize: 100,
+    statsFlushIntervalMs: 2000,
+    statsRetentionDays: 30,
+    statsRetentionCheckIntervalMs: 3_600_000,
+    lowQuotaThreshold: 0.05,
+    apiMaxPageSize: 100,
     fallbackModels: DEFAULT_FALLBACK_MODELS,
     askTool: false,
     disableTelemetry: true,

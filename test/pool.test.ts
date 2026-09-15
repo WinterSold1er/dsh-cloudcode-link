@@ -168,7 +168,7 @@ test('Corrupt pool.json backs up to .corrupted and self-heals to empty configura
   assert.doesNotThrow(() => {
     const pool = new AccountPoolManager(dir)
     assert.equal(pool.getAccounts().length, 1)
-    assert.equal(pool.getAccounts()[0].id, 'acc_primary')
+    assert.equal(pool.getAccounts()[0]!.id, 'acc_primary')
   })
   const files = readdirSync(dir)
   assert.ok(files.some((f) => f.includes('.corrupted')))

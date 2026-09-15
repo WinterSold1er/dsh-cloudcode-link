@@ -8,3 +8,13 @@ research/
 
 # agy credential dirs (never commit)
 .gemini/
+
+# local ide / assistant configs
+.claude/
+.codex/
+.cursor/
+.mcp.json
+.vectrignore
+.vscode/
+CLAUDE.md
+

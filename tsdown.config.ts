@@ -17,7 +17,9 @@ export default defineConfig([
     dts: true,
     clean: true,
     fixedExtension: false,
-    external: hostExternals,
+    deps: {
+      neverBundle: hostExternals,
+    },
   },
   {
     entry: { client: "src/client/index.ts" },
@@ -28,7 +30,9 @@ export default defineConfig([
     dts: false,
     clean: false,
     fixedExtension: false,
-    external: [/^@deepseek-ai\//, "react"],
+    deps: {
+      neverBundle: [/^@deepseek-ai\//, "react", "react-dom"],
+    },
     outputOptions: {
       entryFileNames: "client.js",
       banner: `window.__ModuleLoader__.load({ id: "dsh-cloudcode-link", factory: (require) => {`,
