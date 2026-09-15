@@ -386,6 +386,17 @@ describe('QA End-to-End (E2E) Comprehensive Verification Suite', () => {
         })
         const selected2 = pool.selectAccount('google')
         assert.equal(selected2?.id, accC.id)
+
+        // Equal quota rotation (all accounts have identical remaining quota, e.g. 100%)
+        pool.updateAccountQuotas(accPrimary.id, { google: { remainingFraction: 1.0 } })
+        pool.updateAccountQuotas(accB.id, { google: { remainingFraction: 1.0 } })
+        pool.updateAccountQuotas(accC.id, { google: { remainingFraction: 1.0 } })
+
+        // Currently activeId was accC, so next in circular order must be accPrimary -> accB -> accC -> accPrimary
+        assert.equal(pool.selectAccount('google')?.id, accPrimary.id)
+        assert.equal(pool.selectAccount('google')?.id, accB.id)
+        assert.equal(pool.selectAccount('google')?.id, accC.id)
+        assert.equal(pool.selectAccount('google')?.id, accPrimary.id)
       } finally {
         rmSync(poolDir, { recursive: true, force: true })
       }

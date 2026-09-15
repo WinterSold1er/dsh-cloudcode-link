@@ -628,11 +628,16 @@ var AccountPoolManager = class {
 			return pinned;
 		}
 		if (this.data.mode === "round-robin" && candidates.length > 1) {
+			const activeId = this.runtimeActiveAccountIds.get(family) ?? this.data.activeAccountIds?.[family];
+			const lastIndex = activeId ? this.data.accounts.findIndex((a) => a.id === activeId) : -1;
+			const total = this.data.accounts.length;
 			const chosen = candidates.slice().sort((a, b) => {
 				const aFrac = a.quotas[family]?.remainingFraction ?? 1;
 				const bFrac = b.quotas[family]?.remainingFraction ?? 1;
-				if (bFrac !== aFrac) return bFrac - aFrac;
-				return candidates.indexOf(a) - candidates.indexOf(b);
+				if (Math.abs(bFrac - aFrac) >= .001) return bFrac - aFrac;
+				const aIndex = this.data.accounts.indexOf(a);
+				const bIndex = this.data.accounts.indexOf(b);
+				return (lastIndex !== -1 ? (aIndex - lastIndex - 1 + total) % total : aIndex) - (lastIndex !== -1 ? (bIndex - lastIndex - 1 + total) % total : bIndex);
 			})[0];
 			this.runtimeActiveAccountIds.set(family, chosen.id);
 			return chosen;

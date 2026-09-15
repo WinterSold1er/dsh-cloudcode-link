@@ -129,6 +129,26 @@ test('Sequential Drain: family-scoped rate limit fallback', () => {
   assert.equal(pool.selectAccount('anthropic')?.id, accA.id)
 })
 
+test('Quota-Aware Selection: equal quota (100%) rotates in round-robin order', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'agy-pool-quota-eq-'))
+  const pool = new AccountPoolManager(dir)
+  pool.setMode('round-robin')
+  const accA = pool.getAccounts()[0]!
+  const accB = pool.createAccountSlot('Account B')
+  const accC = pool.createAccountSlot('Account C')
+
+  // All accounts have 100% quota
+  pool.updateAccountQuotas(accA.id, { google: { remainingFraction: 1.0 } })
+  pool.updateAccountQuotas(accB.id, { google: { remainingFraction: 1.0 } })
+  pool.updateAccountQuotas(accC.id, { google: { remainingFraction: 1.0 } })
+
+  // Selection rotates: accA -> accB -> accC -> accA
+  assert.equal(pool.selectAccount('google')?.id, accA.id)
+  assert.equal(pool.selectAccount('google')?.id, accB.id)
+  assert.equal(pool.selectAccount('google')?.id, accC.id)
+  assert.equal(pool.selectAccount('google')?.id, accA.id)
+})
+
 test('Sticky Sequential Drain: stays on current active account until it runs out', () => {
   const dir = mkdtempSync(join(tmpdir(), 'agy-pool-sticky-'))
   const pool = new AccountPoolManager(dir)
