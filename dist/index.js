@@ -51,7 +51,8 @@ const DEFAULT_FALLBACK_MODELS$1 = [
 			"low",
 			"medium",
 			"high"
-		]
+		],
+		inputModalities: ["text", "image"]
 	},
 	{
 		id: "gemini-3.7-flash",
@@ -60,7 +61,8 @@ const DEFAULT_FALLBACK_MODELS$1 = [
 			"low",
 			"medium",
 			"high"
-		]
+		],
+		inputModalities: ["text", "image"]
 	},
 	{
 		id: "gemini-3.6-flash",
@@ -69,7 +71,8 @@ const DEFAULT_FALLBACK_MODELS$1 = [
 			"low",
 			"medium",
 			"high"
-		]
+		],
+		inputModalities: ["text", "image"]
 	},
 	{
 		id: "gemini-3.5-flash",
@@ -78,24 +81,29 @@ const DEFAULT_FALLBACK_MODELS$1 = [
 			"low",
 			"medium",
 			"high"
-		]
+		],
+		inputModalities: ["text", "image"]
 	},
 	{
 		id: "gemini-3.1-pro",
 		name: "Gemini 3.1 Pro",
-		efforts: ["low", "high"]
+		efforts: ["low", "high"],
+		inputModalities: ["text", "image"]
 	},
 	{
 		id: "claude-sonnet-4-6",
-		name: "Claude Sonnet 4.6 (Thinking)"
+		name: "Claude Sonnet 4.6 (Thinking)",
+		inputModalities: ["text", "image"]
 	},
 	{
 		id: "claude-opus-4-6-thinking",
-		name: "Claude Opus 4.6 (Thinking)"
+		name: "Claude Opus 4.6 (Thinking)",
+		inputModalities: ["text", "image"]
 	},
 	{
 		id: "gpt-oss-120b-medium",
-		name: "GPT-OSS 120B (Medium)"
+		name: "GPT-OSS 120B (Medium)",
+		inputModalities: ["text"]
 	}
 ];
 function parseResetDurationMs(text) {
@@ -746,7 +754,8 @@ const DEFAULT_FALLBACK_MODELS = [
 			"low",
 			"medium",
 			"high"
-		]
+		],
+		inputModalities: ["text", "image"]
 	},
 	{
 		id: "gemini-3.7-flash",
@@ -755,7 +764,8 @@ const DEFAULT_FALLBACK_MODELS = [
 			"low",
 			"medium",
 			"high"
-		]
+		],
+		inputModalities: ["text", "image"]
 	},
 	{
 		id: "gemini-3.6-flash",
@@ -764,7 +774,8 @@ const DEFAULT_FALLBACK_MODELS = [
 			"low",
 			"medium",
 			"high"
-		]
+		],
+		inputModalities: ["text", "image"]
 	},
 	{
 		id: "gemini-3.5-flash",
@@ -773,24 +784,29 @@ const DEFAULT_FALLBACK_MODELS = [
 			"low",
 			"medium",
 			"high"
-		]
+		],
+		inputModalities: ["text", "image"]
 	},
 	{
 		id: "gemini-3.1-pro",
 		name: "Gemini 3.1 Pro",
-		efforts: ["low", "high"]
+		efforts: ["low", "high"],
+		inputModalities: ["text", "image"]
 	},
 	{
 		id: "claude-sonnet-4-6",
-		name: "Claude Sonnet 4.6 (Thinking)"
+		name: "Claude Sonnet 4.6 (Thinking)",
+		inputModalities: ["text", "image"]
 	},
 	{
 		id: "claude-opus-4-6-thinking",
-		name: "Claude Opus 4.6 (Thinking)"
+		name: "Claude Opus 4.6 (Thinking)",
+		inputModalities: ["text", "image"]
 	},
 	{
 		id: "gpt-oss-120b-medium",
-		name: "GPT-OSS 120B (Medium)"
+		name: "GPT-OSS 120B (Medium)",
+		inputModalities: ["text"]
 	}
 ];
 function defaultConfig() {
@@ -1127,6 +1143,10 @@ const EFFORT_SUFFIXES = [
 	"medium",
 	"high"
 ];
+function getInputModalitiesForModel(modelId) {
+	if (resolveModelSlug(modelId).toLowerCase().startsWith("gpt-oss-")) return ["text"];
+	return ["text", "image"];
+}
 function deriveEffortsForModel(modelId) {
 	const id = modelId.toLowerCase();
 	if (id === "gemini-3.1-pro" || id.startsWith("gemini-3.1-pro")) return ["low", "high"];
@@ -1150,7 +1170,8 @@ function foldEfforts(raw) {
 			verbatim.push({
 				id: r.slug,
 				name: r.label,
-				efforts: null
+				efforts: null,
+				inputModalities: getInputModalitiesForModel(r.slug)
 			});
 			continue;
 		}
@@ -1188,7 +1209,8 @@ function foldEfforts(raw) {
 		if (!folded) verbatim.push({
 			id: r.slug,
 			name: r.label,
-			efforts: null
+			efforts: null,
+			inputModalities: getInputModalitiesForModel(r.slug)
 		});
 	}
 	const folded = [];
@@ -1197,7 +1219,8 @@ function foldEfforts(raw) {
 		folded.push({
 			id,
 			name: v.label !== "" ? v.label : id,
-			efforts: efforts.length > 0 ? efforts : null
+			efforts: efforts.length > 0 ? efforts : null,
+			inputModalities: getInputModalitiesForModel(id)
 		});
 	}
 	const rawOrder = new Map(raw.map((r, i) => [r.slug, i]));
@@ -1218,7 +1241,8 @@ function buildFallbackCatalog(defs) {
 	return defs.filter((d) => Boolean(d && typeof d.id === "string" && d.id.trim() !== "")).map((d) => ({
 		id: d.id.trim(),
 		name: typeof d.name === "string" && d.name.trim() !== "" ? d.name.trim() : d.id.trim(),
-		efforts: Array.isArray(d.efforts) && d.efforts.length > 0 ? d.efforts.filter((e) => typeof e === "string" && e.trim() !== "") : null
+		efforts: Array.isArray(d.efforts) && d.efforts.length > 0 ? d.efforts.filter((e) => typeof e === "string" && e.trim() !== "") : null,
+		inputModalities: d.inputModalities ?? getInputModalitiesForModel(d.id)
 	}));
 }
 function mergeDiscoveredWithFallback(discovered, fallbackDefs = DEFAULT_FALLBACK_MODELS$1) {
@@ -26204,7 +26228,8 @@ var AgyAdapter = class extends LlmAdapter {
 		return this.deps.catalog.get().models.map((m) => ({
 			provider,
 			id: m.id,
-			name: m.name
+			name: m.name,
+			inputModalities: m.inputModalities ?? getInputModalitiesForModel(m.id)
 		}));
 	}
 	async resolveModel(provider, model, _signal) {
@@ -26215,10 +26240,12 @@ var AgyAdapter = class extends LlmAdapter {
 		const isGptOss = wireModel.startsWith("gpt-oss-");
 		const contextWindow = isClaude || isGptOss ? 2e5 : wireModel.startsWith("gemini-") || wireModel.includes("3.5") || wireModel.includes("3.6") || wireModel.includes("3.7") || wireModel.includes("3.8") ? 1048576 : cfg.contextWindowDefault;
 		const maxTokens = getMaxOutputTokens(model, wireModel);
+		const inputModalities = entry?.inputModalities ?? getInputModalitiesForModel(wireModel);
 		const resolved = {
 			provider,
 			id: model,
 			name: entry ? entry.name : model,
+			inputModalities,
 			context: { contextWindow },
 			defaultMaxTokens: maxTokens
 		};

@@ -312,11 +312,38 @@ test('resolveModel preserves 3.8 efforts, context window and max output tokens',
   assert.equal(resolved.name, 'Gemini 3.8 Flash')
   assert.equal(resolved.context?.contextWindow, 1_048_576)
   assert.equal(resolved.defaultMaxTokens, 65536)
+  assert.deepEqual(resolved.inputModalities, ['text', 'image'])
   assert.deepEqual(
     resolved.reasoning?.efforts?.map((e) => e.name),
     ['low', 'medium', 'high'],
   )
   assert.equal(resolved.reasoning?.defaultEffort, 'high')
+})
+
+test('resolveModel and listModels populate inputModalities for multimodal and text-only models', async () => {
+  const catalog = new ModelCatalog(undefined, DEFAULT_FALLBACK_MODELS, 60_000)
+  const adapter = new AgyAdapter({
+    getConfig: () => defaultConfig(),
+    catalog,
+  })
+
+  const gemini = await adapter.resolveModel('antigravity', 'gemini-3.8-flash')
+  assert.deepEqual(gemini.inputModalities, ['text', 'image'])
+
+  const claude = await adapter.resolveModel('antigravity', 'claude-sonnet-4-6')
+  assert.deepEqual(claude.inputModalities, ['text', 'image'])
+
+  const gptOss = await adapter.resolveModel('antigravity', 'gpt-oss-120b-medium')
+  assert.deepEqual(gptOss.inputModalities, ['text'])
+
+  const list = await adapter.listModels('antigravity')
+  const geminiInList = list.find((m) => m.id === 'gemini-3.8-flash')
+  assert.ok(geminiInList)
+  assert.deepEqual(geminiInList?.inputModalities, ['text', 'image'])
+
+  const gptInList = list.find((m) => m.id === 'gpt-oss-120b-medium')
+  assert.ok(gptInList)
+  assert.deepEqual(gptInList?.inputModalities, ['text'])
 })
 
 test('ModelCatalog discovers models from CloudCode DiscoveredModelsResponse and merges with fallback', async () => {

@@ -14,6 +14,7 @@ import {
   defaultEffortFor,
   findEntry,
   getAntigravityRequestModelId,
+  getInputModalitiesForModel,
   getMaxOutputTokens,
   getThinkingConfig,
   ModelCatalog,
@@ -117,6 +118,7 @@ export class AgyAdapter extends LlmAdapter {
       provider,
       id: m.id,
       name: m.name,
+      inputModalities: m.inputModalities ?? getInputModalitiesForModel(m.id),
     }))
   }
 
@@ -143,11 +145,13 @@ export class AgyAdapter extends LlmAdapter {
           ? 1_048_576
           : cfg.contextWindowDefault
     const maxTokens = getMaxOutputTokens(model, wireModel)
+    const inputModalities = entry?.inputModalities ?? getInputModalitiesForModel(wireModel)
 
     const resolved: LlmResolvedModelInfo = {
       provider,
       id: model,
       name: entry ? entry.name : model,
+      inputModalities,
       context: { contextWindow },
       defaultMaxTokens: maxTokens,
     }
