@@ -11,8 +11,10 @@ import type { GeminiContent } from '../src/host/client.ts'
  * must end with a `user` turn. Previously both only guaranteed the FIRST turn
  * was `user`, so every shape below could emit a trailing `model` turn.
  *
- * The padding turn is either the literal `Continue.` text (trailing model text)
- * or a `functionResponse` answering the trailing model `functionCall`.
+ * The closing turn is either the literal `Continue.` text (trailing model text)
+ * or a `functionResponse` that closes the trailing model `functionCall`; when
+ * no result was recorded, that response uses the error channel — the converter
+ * never invents a successful tool output.
  */
 const PADDING_TEXT = 'Continue.'
 
@@ -103,17 +105,19 @@ describe('Trailing-turn padding: CloudCode contents must end with a user turn', 
       assert.deepEqual(lastTurn(contents), { role: 'user', parts: [{ text: PADDING_TEXT }] })
     })
 
-    it('pads case "unknown block type": trailing user message with only {type:"agent_message"} contributes no part', async () => {
+    it('keeps the text of a trailing unknown block instead of dropping it and padding', async () => {
       const contents = await convertMessages([
         { role: 'assistant', content: [{ type: 'text', text: 'model text' }] },
         { role: 'user', content: [{ type: 'agent_message', text: 'unmapped block' }] },
       ])
 
       assertEndsWithUser(contents, 'trailing unknown-block user message')
-      assert.deepEqual(lastTurn(contents), { role: 'user', parts: [{ text: PADDING_TEXT }] })
+      // Unmapped blocks are no longer dropped: their readable text is forwarded.
+      assert.deepEqual(lastTurn(contents), { role: 'user', parts: [{ text: 'unmapped block' }] })
+      assert.deepEqual(contents[0], { role: 'user', parts: [{ text: 'Hello' }] })
     })
 
-    it('pads case "OpenAI {role:tool} result": trailing tool result is not converted, so the tool-call model turn is last', async () => {
+    it('converts a legacy {role:"tool"} result into its real functionResponse, so no padding is needed', async () => {
       const contents = await convertMessages([
         { role: 'user', content: 'Call the tool' },
         { role: 'assistant', content: [{ type: 'tool-call', id: 'call_tool_1', name: 'bash', arguments: { command: 'ls' } }] },
@@ -124,13 +128,15 @@ describe('Trailing-turn padding: CloudCode contents must end with a user turn', 
       const part = lastTurn(contents).parts[0] as any
       assert.ok(
         'functionResponse' in part,
-        'an unanswered tool call must be closed by a functionResponse padding turn',
+        'a tool result must be converted into the functionResponse that answers its call',
       )
       assert.equal(part.functionResponse.name, 'bash')
       assert.equal(part.functionResponse.id, 'call_tool_1')
+      // The tool's own output reaches the model; nothing is invented here.
+      assert.equal(part.functionResponse.response.output, 'file.txt')
     })
 
-    it('pads case "{role:system} reminder": trailing system message is ignored by the converter', async () => {
+    it('routes a trailing {role:"system"} reminder to the system slot and still closes the model turn', async () => {
       const contents = await convertMessages([
         { role: 'user', content: 'question' },
         { role: 'assistant', content: [{ type: 'text', text: 'answer' }] },
@@ -216,7 +222,10 @@ describe('Trailing-turn padding: CloudCode contents must end with a user turn', 
       // A call without an id gets a name-only functionResponse (no id key at all).
       assert.equal('id' in responses[2]!.functionResponse, false)
       for (const p of responses) {
-        assert.equal(typeof p.functionResponse.response.output, 'string')
+        // No result was ever recorded: the call is closed through the error
+        // channel, never with an invented successful output.
+        assert.equal(typeof p.functionResponse.response.error, 'string')
+        assert.equal('output' in p.functionResponse.response, false)
       }
     })
 

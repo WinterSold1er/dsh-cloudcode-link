@@ -25696,6 +25696,12 @@ function convertTools(tools, useLegacyParameters = false) {
 }
 //#endregion
 //#region packages/core/src/message-converter.ts
+/** Text used when a model turn survives conversion with no readable part. */
+const OMITTED_PLACEHOLDER = "(thought omitted)";
+/** Text that closes a trailing model turn which requested no tool call. */
+const CONTINUE_TEXT = "Continue.";
+/** Error-channel text for a tool call the harness never produced a result for. */
+const NO_RESULT_NOTICE = "No result was recorded for this tool call: the harness did not execute it in this request.";
 const base64SignaturePattern = /^[A-Za-z0-9+/]+={0,2}$/;
 function isValidThoughtSignature(signature) {
 	if (!signature || typeof signature !== "string" || signature.length === 0) return false;
@@ -25714,6 +25720,92 @@ function detectImageMimeType(bytes) {
 function sanitizeText(text) {
 	return String(text ?? "").replace(/[\uD800-\uDFFF]/g, "�");
 }
+function asRecord(value) {
+	return typeof value === "object" && value !== null && !Array.isArray(value) ? value : void 0;
+}
+function messageRole(message) {
+	return String(asRecord(message)?.role ?? "");
+}
+/** Normalized content blocks of one message: string shorthand becomes one text block. */
+function rawBlocks(message) {
+	const content = asRecord(message)?.content;
+	if (typeof content === "string") return content.length > 0 ? [{
+		type: "text",
+		text: content
+	}] : [];
+	if (!Array.isArray(content)) return content === void 0 || content === null ? [] : [{
+		type: "text",
+		text: String(content)
+	}];
+	const blocks = [];
+	for (const block of content) {
+		const record = asRecord(block);
+		if (record) blocks.push(record);
+	}
+	return blocks;
+}
+function blockType(block) {
+	return String(block.type ?? "");
+}
+function isToolCallBlock(block) {
+	const type = blockType(block);
+	return type === "tool-call" || type === "tool_call";
+}
+/** Provider-issued Gemini signature, read tolerantly across the spellings seen on the wire. */
+function readSignature(block) {
+	for (const key of [
+		"thoughtSignature",
+		"thought_signature",
+		"textSignature",
+		"thinkingSignature"
+	]) {
+		const value = block[key];
+		if (isValidThoughtSignature(value)) return value;
+	}
+}
+/** Best-effort readable text of a block this adapter has no mapping for. */
+function unknownBlockText(block) {
+	if (typeof block.text === "string" && block.text.length > 0) return block.text;
+	if (typeof block.content === "string" && block.content.length > 0) return block.content;
+}
+function parseJsonArguments(raw, warnings) {
+	if (typeof raw === "object" && raw !== null && !Array.isArray(raw)) return raw;
+	if (raw === void 0 || raw === null) return {};
+	if (typeof raw !== "string") {
+		warnings.push(`tool-call arguments of unsupported type "${typeof raw}" were sent as {}`);
+		return {};
+	}
+	const trimmed = raw.trim();
+	if (trimmed.length === 0) return {};
+	try {
+		const parsed = JSON.parse(trimmed);
+		if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) return parsed;
+		warnings.push(`tool-call arguments are JSON but not an object ("${trimmed.slice(0, 40)}"); sent as {}`);
+		return {};
+	} catch {
+		warnings.push(`tool-call arguments are not valid JSON ("${trimmed.slice(0, 40)}"); sent as {}`);
+		return {};
+	}
+}
+function textOfBlocks(blocks) {
+	const texts = [];
+	for (const block of blocks) if (blockType(block) === "text" && typeof block.text === "string") texts.push(block.text);
+	return texts.join("\n");
+}
+/** Legacy `{result}` / `{content}` payload of a tool_result block, as text. */
+function legacyResultText(raw) {
+	if (typeof raw === "string") return raw;
+	if (Array.isArray(raw)) {
+		const blocks = [];
+		for (const entry of raw) {
+			const record = asRecord(entry);
+			if (record) blocks.push(record);
+		}
+		return textOfBlocks(blocks);
+	}
+	if (raw === void 0 || raw === null) return "";
+	return JSON.stringify(raw);
+}
 function appendTurn(contents, role, parts) {
 	if (!parts.length) return;
 	const last = contents[contents.length - 1];
@@ -25723,143 +25815,360 @@ function appendTurn(contents, role, parts) {
 		parts
 	});
 }
-function parseJsonArguments(raw) {
-	if (typeof raw === "object" && raw !== null && !Array.isArray(raw)) return raw;
-	if (typeof raw === "string") try {
-		const parsed = JSON.parse(raw);
-		if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) return parsed;
-	} catch {}
-	return {};
+async function inlineImagePart(block, readImage, warnings, context) {
+	const data = block.data;
+	if (data !== void 0 && data !== null) {
+		const buf = Buffer.isBuffer(data) ? data : typeof data === "string" ? Buffer.from(data, "base64") : Buffer.from(data);
+		if (buf.length === 0) {
+			warnings.push(`${context}: image block carried no bytes; dropped`);
+			return;
+		}
+		return { inlineData: {
+			mimeType: typeof block.mimeType === "string" && block.mimeType ? block.mimeType : detectImageMimeType(buf),
+			data: buf.toString("base64")
+		} };
+	}
+	const attachment = asRecord(block.attachment);
+	if (!attachment) {
+		warnings.push(`${context}: image block has neither inline bytes nor an attachment; dropped`);
+		return;
+	}
+	if (block.offloaded === true) {
+		warnings.push(`${context}: offloaded image skipped (the placeholder text already represents it)`);
+		return;
+	}
+	if (!readImage) {
+		warnings.push(`${context}: image attachment present but no image reader is configured; dropped`);
+		return;
+	}
+	try {
+		const bytes = await readImage(attachment);
+		if (!bytes || bytes.length === 0) {
+			warnings.push(`${context}: image attachment could not be read; dropped`);
+			return;
+		}
+		const buf = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes);
+		return { inlineData: {
+			mimeType: typeof attachment.mimeType === "string" && attachment.mimeType ? attachment.mimeType : detectImageMimeType(buf),
+			data: buf.toString("base64")
+		} };
+	} catch (error) {
+		warnings.push(`${context}: image attachment read failed (${String(error)}); dropped`);
+		return;
+	}
 }
-function extractToolResultText(blocks) {
-	if (typeof blocks === "string") return blocks;
-	if (!Array.isArray(blocks)) return String(blocks ?? "");
-	const texts = [];
-	for (const b of blocks) if (b && typeof b === "object" && "type" in b && b.type === "text") texts.push(String(b.text ?? ""));
-	return texts.join("\n");
+async function imageParts(blocks, readImage, warnings, context) {
+	const parts = [];
+	for (const block of blocks) {
+		if (blockType(block) !== "image") continue;
+		const part = await inlineImagePart(block, readImage, warnings, context);
+		if (part) parts.push(part);
+	}
+	return parts;
 }
 /**
-* Maps conversation messages into Google CloudCode GeminiContent turns.
+* Attribute one tool result to the call it answers.
+*
+* A provider-issued `toolCallId` is authoritative. Without one, a unique
+* unanswered call in the immediately preceding model turn is used; anything
+* less certain is reported instead of guessed.
 */
-async function convertMessages(messages, readImage, runtimeModel = "gemini-3.7-flash") {
-	const contents = [];
-	const toolNameByCallId = /* @__PURE__ */ new Map();
-	for (const msg of messages) if (msg.role === "assistant" && Array.isArray(msg.content)) {
-		for (const block of msg.content) if (block.type === "tool_call" || block.type === "tool-call") {
-			const tc = block;
-			if (tc.id && tc.name) toolNameByCallId.set(tc.id, tc.name);
+function claimCall(context, rawCallId) {
+	const callId = typeof rawCallId === "string" && rawCallId.length > 0 ? rawCallId : void 0;
+	if (callId && context.answeredIds.has(callId)) return {
+		kind: "duplicate",
+		callId
+	};
+	if (callId) {
+		const index = context.pending.findIndex((call) => call.id === callId);
+		if (index >= 0) {
+			const [call] = context.pending.splice(index, 1);
+			context.answeredIds.add(callId);
+			return {
+				kind: "matched",
+				call,
+				responseId: callId
+			};
+		}
+		return {
+			kind: "unmatched",
+			callId
+		};
+	}
+	if (context.pending.length === 1) {
+		const [call] = context.pending.splice(0, 1);
+		if (call?.id) context.answeredIds.add(call.id);
+		return {
+			kind: "matched",
+			call
+		};
+	}
+	return context.pending.length > 1 ? {
+		kind: "ambiguous",
+		candidates: context.pending.length
+	} : { kind: "unmatched" };
+}
+function functionResponsePart(name, responseId, text, isError) {
+	return { functionResponse: {
+		name,
+		...responseId ? { id: responseId } : {},
+		response: isError ? { error: text || "Tool error" } : { output: text }
+	} };
+}
+/** Observation text used when a result cannot be attached to a call. */
+function observationText(name, text) {
+	return `[Observation from \`${String(name ?? "tool")}\`:\n${text}]`;
+}
+/**
+* Shared handler for DSH v4 `role:'tool'` messages and legacy `tool_result`
+* blocks: always produces readable parts, never a fabricated output.
+*/
+function buildResultParts(payload, context) {
+	const claim = claimCall(context, payload.callId);
+	const knownName = typeof payload.callId === "string" ? context.toolNameByCallId.get(payload.callId) : void 0;
+	const name = payload.toolName || knownName || (claim.kind === "matched" ? claim.call.name : void 0);
+	switch (claim.kind) {
+		case "matched": return [functionResponsePart(claim.call.name, claim.responseId ?? claim.call.id, payload.text, payload.isError), ...payload.images];
+		case "duplicate":
+			context.warnings.push(`duplicate tool result for call "${claim.callId}"; forwarded as an observation instead of a second functionResponse`);
+			return [{ text: observationText(name, payload.text) }, ...payload.images];
+		case "ambiguous":
+			context.warnings.push(`ambiguous tool result: ${claim.candidates} unanswered calls and no toolCallId; forwarded as an observation`);
+			return [{ text: observationText(name, payload.text) }, ...payload.images];
+		case "unmatched": {
+			const label = claim.callId ? `tool result for unknown call "${claim.callId}" has no matching call in the preceding model turn; forwarded as an observation` : "tool result has no matching tool call; forwarded as an observation";
+			context.warnings.push(label);
+			return [{ text: observationText(name, payload.text) }, ...payload.images];
 		}
 	}
-	for (const msg of messages) if (msg.role === "user") {
-		const parts = [];
-		const blocks = typeof msg.content === "string" ? [{
-			type: "text",
-			text: msg.content
-		}] : msg.content || [];
-		for (const block of blocks) if (block.type === "text") {
-			const text = block.text;
+}
+async function convertToolMessage(message, context, readImage) {
+	const record = asRecord(message) ?? {};
+	const blocks = rawBlocks(message);
+	const text = textOfBlocks(blocks);
+	const images = await imageParts(blocks, readImage, context.warnings, "tool result");
+	return buildResultParts({
+		text,
+		isError: record.isError === true,
+		callId: record.toolCallId,
+		images
+	}, context);
+}
+async function convertUserBlocks(blocks, context, readImage) {
+	const parts = [];
+	for (const block of blocks) switch (blockType(block)) {
+		case "text": {
+			const text = typeof block.text === "string" ? block.text : "";
 			if (text) parts.push({ text: sanitizeText(text) });
-		} else if (block.type === "image") {
-			const imgBlock = block;
-			if (imgBlock.data) {
-				const buf = Buffer.isBuffer(imgBlock.data) ? imgBlock.data : typeof imgBlock.data === "string" ? Buffer.from(imgBlock.data, "base64") : Buffer.from(imgBlock.data);
-				parts.push({ inlineData: {
-					mimeType: imgBlock.mimeType || detectImageMimeType(buf),
-					data: buf.toString("base64")
-				} });
-			} else if (readImage && imgBlock.attachment) try {
-				const bytes = await readImage(imgBlock.attachment);
-				if (bytes && bytes.length > 0) {
-					const buf = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes);
-					const mimeType = imgBlock.attachment.mimeType || detectImageMimeType(buf);
-					parts.push({ inlineData: {
-						mimeType,
-						data: buf.toString("base64")
-					} });
-				}
-			} catch {}
-		} else if (block.type === "tool_result" || block.type === "tool-result") {
-			const tr = block;
-			const callId = tr.id || tr.toolCallId || "";
-			const toolName = tr.toolName || toolNameByCallId.get(callId) || "tool";
-			const rawContent = tr.content ?? tr.result;
-			const resultText = extractToolResultText(rawContent);
-			const resp = tr.isError ? { error: resultText || "Tool error" } : { output: resultText || "" };
-			parts.push({ functionResponse: {
-				name: toolName,
-				response: resp,
-				...callId ? { id: callId } : {}
-			} });
-			if (readImage && Array.isArray(rawContent)) {
-				for (const sub of rawContent) if (sub.type === "image") {
-					const subImg = sub;
-					if (subImg.attachment) try {
-						const bytes = await readImage(subImg.attachment);
-						if (bytes && bytes.length > 0) {
-							const buf = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes);
-							const mimeType = detectImageMimeType(buf);
-							parts.push({ inlineData: {
-								mimeType,
-								data: buf.toString("base64")
-							} });
-						}
-					} catch {}
-				}
-			}
+			break;
 		}
-		appendTurn(contents, "user", parts);
-	} else if (msg.role === "assistant") {
-		const parts = [];
-		const blocks = typeof msg.content === "string" ? [{
-			type: "text",
-			text: msg.content
-		}] : msg.content || [];
-		let turnThoughtSignature;
-		for (const b of blocks) {
-			const sig = b.thoughtSignature || b.thought_signature || b.textSignature || b.thinkingSignature;
-			if (isValidThoughtSignature(sig)) {
-				turnThoughtSignature = sig;
+		case "tool_result":
+		case "tool-result": {
+			const callId = block.toolCallId ?? block.id;
+			const legacyImages = await imageParts(Array.isArray(block.content) ? block.content.flatMap((entry) => {
+				const record = asRecord(entry);
+				return record ? [record] : [];
+			}) : [], readImage, context.warnings, "tool result");
+			const text = block.content !== void 0 ? legacyResultText(block.content) : legacyResultText(block.result);
+			parts.push(...buildResultParts({
+				text,
+				isError: block.isError === true,
+				callId,
+				toolName: typeof block.toolName === "string" ? block.toolName : void 0,
+				images: legacyImages
+			}, context));
+			break;
+		}
+		case "image": {
+			const part = await inlineImagePart(block, readImage, context.warnings, "user");
+			if (part) parts.push(part);
+			break;
+		}
+		default: {
+			const text = unknownBlockText(block);
+			context.warnings.push(`user block "${blockType(block)}" has no mapping${text ? "; its text was forwarded" : " and no readable text; dropped"}`);
+			if (text) parts.push({ text: sanitizeText(text) });
+		}
+	}
+	return parts;
+}
+async function convertAssistantBlocks(blocks, readImage, warnings) {
+	const parts = [];
+	let turnSignature;
+	for (const block of blocks) {
+		const signature = readSignature(block);
+		if (signature) {
+			turnSignature = signature;
+			break;
+		}
+	}
+	for (const block of blocks) switch (blockType(block)) {
+		case "text": {
+			const text = typeof block.text === "string" ? block.text : "";
+			if (!text) break;
+			const signature = readSignature(block);
+			parts.push({
+				text: sanitizeText(text),
+				...signature ? { thoughtSignature: signature } : {}
+			});
+			break;
+		}
+		case "reasoning": {
+			const text = typeof block.text === "string" ? block.text : "";
+			if (!text) break;
+			const signature = readSignature(block);
+			if (signature) parts.push({
+				thought: true,
+				text: sanitizeText(text),
+				thoughtSignature: signature
+			});
+			else warnings.push("reasoning block without a valid thoughtSignature was dropped (Gemini 3 requires signed thoughts)");
+			break;
+		}
+		case "tool-call":
+		case "tool_call": {
+			const name = typeof block.name === "string" ? block.name : "";
+			if (!name) {
+				warnings.push("tool-call block without a name was dropped");
 				break;
 			}
-		}
-		for (const block of blocks) if (block.type === "text") {
-			const text = block.text;
-			const sig = block.thoughtSignature || block.thought_signature || block.textSignature;
-			if (text) parts.push({
-				text: sanitizeText(text),
-				...isValidThoughtSignature(sig) ? { thoughtSignature: sig } : {}
-			});
-		} else if (block.type === "reasoning") {
-			const reasoning = block.text;
-			const sig = block.thoughtSignature || block.thought_signature || block.thinkingSignature;
-			if (reasoning) {
-				if (isValidThoughtSignature(sig)) parts.push({
-					thought: true,
-					text: sanitizeText(reasoning),
-					thoughtSignature: sig
-				});
-			}
-		} else if (block.type === "tool_call" || block.type === "tool-call") {
-			const tc = block;
-			const sig = block.thoughtSignature || block.thought_signature || turnThoughtSignature;
+			const id = typeof block.id === "string" && block.id.length > 0 ? block.id : void 0;
+			const signature = readSignature(block) ?? turnSignature;
 			const functionCall = {
-				name: tc.name,
-				args: parseJsonArguments(tc.arguments),
-				...tc.id ? { id: tc.id } : {}
+				name,
+				args: parseJsonArguments(block.arguments, warnings),
+				...id ? { id } : {}
 			};
 			parts.push({
 				functionCall,
-				...isValidThoughtSignature(sig) ? { thoughtSignature: sig } : {}
+				...signature ? { thoughtSignature: signature } : {}
 			});
+			break;
 		}
-		if (parts.length === 0) parts.push({ text: "(thought omitted)" });
-		appendTurn(contents, "model", parts);
+		case "image": {
+			const part = await inlineImagePart(block, readImage, warnings, "assistant");
+			if (part) parts.push(part);
+			break;
+		}
+		default: {
+			const text = unknownBlockText(block);
+			warnings.push(`assistant block "${blockType(block)}" has no mapping${text ? "; its text was forwarded" : " and no readable text; dropped"}`);
+			if (text) parts.push({ text: sanitizeText(text) });
+		}
 	}
-	if (contents.length > 0 && contents[0]?.role === "model") contents.unshift({
-		role: "user",
-		parts: [{ text: "Hello" }]
+	return parts;
+}
+/** Fold a system/developer message into the Gemini system instruction. */
+function collectSystemBlocks(role, blocks, systemTexts, warnings) {
+	for (const block of blocks) {
+		const type = blockType(block);
+		switch (type) {
+			case "text": {
+				const text = typeof block.text === "string" ? block.text : "";
+				if (text) systemTexts.push(sanitizeText(text));
+				break;
+			}
+			case "tool-addition":
+			case "tool-removal":
+				warnings.push(`${role} message carries a ${type} block ("${String(block.toolName ?? "?")}") that cannot be represented: this adapter always declares the complete tool list`);
+				break;
+			default: {
+				const text = unknownBlockText(block);
+				warnings.push(`${role} block "${type}" has no mapping${text ? "; its text was moved into the system instruction" : " and no readable text; dropped"}`);
+				if (text) systemTexts.push(sanitizeText(text));
+			}
+		}
+	}
+}
+/**
+* Project one DSH message list into the CloudCode request shape.
+*
+* @param messages - DSH `RequestMessage[]` (roles system/developer/user/assistant/tool).
+* @param options - Image reader, wire model id, and any one-shot system prompt.
+* @returns Contents, the system instruction, and every mapping loss observed.
+*/
+async function convertRequest(messages, options = {}) {
+	const warnings = [];
+	const contents = [];
+	const systemTexts = [];
+	const readImage = options.readImage;
+	const list = Array.isArray(messages) ? messages : [];
+	if (typeof options.system === "string" && options.system.length > 0) systemTexts.push(sanitizeText(options.system));
+	const toolNameByCallId = /* @__PURE__ */ new Map();
+	for (const message of list) {
+		if (messageRole(message) !== "assistant") continue;
+		for (const block of rawBlocks(message)) {
+			if (!isToolCallBlock(block)) continue;
+			const id = typeof block.id === "string" ? block.id : "";
+			const name = typeof block.name === "string" ? block.name : "";
+			if (id && name) toolNameByCallId.set(id, name);
+		}
+	}
+	const context = {
+		pending: [],
+		toolNameByCallId,
+		answeredIds: /* @__PURE__ */ new Set(),
+		warnings
+	};
+	for (const message of list) {
+		const role = messageRole(message);
+		const blocks = rawBlocks(message);
+		if (role === "system" || role === "developer") {
+			collectSystemBlocks(role, blocks, systemTexts, warnings);
+			continue;
+		}
+		if (role === "assistant") {
+			const parts = await convertAssistantBlocks(blocks, readImage, warnings);
+			context.pending = parts.flatMap((part) => "functionCall" in part ? [{
+				id: part.functionCall.id,
+				name: part.functionCall.name
+			}] : []);
+			appendTurn(contents, "model", parts.length ? parts : [{ text: OMITTED_PLACEHOLDER }]);
+			continue;
+		}
+		if (role === "tool") {
+			appendTurn(contents, "user", await convertToolMessage(message, context, readImage));
+			continue;
+		}
+		if (role === "user") {
+			appendTurn(contents, "user", await convertUserBlocks(blocks, context, readImage));
+			continue;
+		}
+		warnings.push(`unmapped message role "${role}"; its content was forwarded as a user turn`);
+		appendTurn(contents, "user", await convertUserBlocks(blocks, context, readImage));
+	}
+	return {
+		contents: sanitizeTopology(contents, warnings),
+		...systemTexts.length ? { systemInstruction: { parts: systemTexts.map((text) => ({ text })) } } : {},
+		warnings: aggregateWarnings(warnings)
+	};
+}
+/** Collapse identical losses into one counted line, preserving first-seen order. */
+function aggregateWarnings(warnings) {
+	const counts = /* @__PURE__ */ new Map();
+	const order = [];
+	for (const warning of warnings) {
+		if (!counts.has(warning)) order.push(warning);
+		counts.set(warning, (counts.get(warning) ?? 0) + 1);
+	}
+	return order.map((warning) => {
+		const count = counts.get(warning) ?? 1;
+		return count > 1 ? `${warning} (x${count})` : warning;
 	});
-	return sanitizeTopology(contents);
+}
+/**
+* Compatibility wrapper returning only contents.
+*
+* @param messages - DSH message list.
+* @param readImage - Attachment reader for image blocks.
+* @param runtimeModel - Wire model id (diagnostics only).
+* @returns CloudCode contents with every topology invariant enforced.
+*/
+async function convertMessages(messages, readImage, runtimeModel = "gemini-3.7-flash") {
+	return (await convertRequest(messages, {
+		readImage,
+		runtimeModel
+	})).contents;
 }
 function hasMatchingFunctionCall(modelTurn, fr) {
 	if (!modelTurn || modelTurn.role !== "model") return false;
@@ -25871,61 +26180,103 @@ function hasMatchingFunctionCall(modelTurn, fr) {
 	});
 }
 /**
-* Topologically sanitizes conversation turns:
-* 1. History model messages: strip thought:true if signature is missing or invalid.
-*    If all thoughts in a model turn are stripped, insert placeholder '(thought omitted)'.
-* 2. Unpaired / orphan functionResponse: only retain structured functionResponse if preceding
-*    turn is 'model' with matching functionCall; otherwise degrade to text observation block.
+* Enforce every CloudCode topology invariant on already-built contents:
+*
+* 1. Model turns keep only signed thoughts; an empty model turn keeps a
+*    placeholder so the turn itself survives.
+* 2. A `functionResponse` is kept only when the preceding model turn has the
+*    matching call; a duplicate is dropped; anything unmatched degrades to a
+*    text observation so its content stays visible.
+* 3. Contents start with a `user` turn.
+* 4. Contents end with a `user` turn. A trailing model turn that requested
+*    tools is closed with `functionResponse` error notices (never a fabricated
+*    successful output); a trailing model turn without calls gets `Continue.`.
+*
+* @param contents - Projected contents, mutated into a repaired copy.
+* @param warnings - Optional sink for every repair that lost or rewrote input.
+* @returns Repaired contents.
 */
-function sanitizeTopology(contents) {
+function sanitizeTopology(contents, warnings = []) {
 	const result = [];
-	for (let i = 0; i < contents.length; i++) {
-		const turn = contents[i];
+	for (const turn of contents) {
 		if (turn.role === "model") {
 			const cleanParts = [];
 			for (const part of turn.parts) if ("thought" in part && part.thought) {
 				if (isValidThoughtSignature(part.thoughtSignature)) cleanParts.push(part);
+				else warnings.push("thought part without a valid signature was dropped");
 			} else cleanParts.push(part);
-			if (cleanParts.length === 0) cleanParts.push({ text: "(thought omitted)" });
+			if (cleanParts.length === 0) cleanParts.push({ text: OMITTED_PLACEHOLDER });
 			result.push({
 				role: "model",
 				parts: cleanParts
 			});
-		} else {
-			const prevTurn = result[result.length - 1];
-			const cleanParts = [];
-			for (const part of turn.parts) if ("functionResponse" in part && part.functionResponse) {
-				const fr = part.functionResponse;
-				if (hasMatchingFunctionCall(prevTurn, fr)) cleanParts.push(part);
-				else {
-					const output = typeof fr.response === "object" && fr.response !== null ? "output" in fr.response && typeof fr.response.output === "string" ? fr.response.output : "error" in fr.response && typeof fr.response.error === "string" ? fr.response.error : JSON.stringify(fr.response) : String(fr.response ?? "");
-					cleanParts.push({ text: `[Observation from \`${fr.name}\`:\n${output}]` });
-				}
-			} else cleanParts.push(part);
-			if (cleanParts.length > 0) result.push({
-				role: "user",
-				parts: cleanParts
-			});
+			continue;
 		}
+		const prevTurn = result[result.length - 1];
+		const cleanParts = [];
+		const answered = /* @__PURE__ */ new Set();
+		for (const part of turn.parts) {
+			if (!("functionResponse" in part) || !part.functionResponse) {
+				cleanParts.push(part);
+				continue;
+			}
+			const fr = part.functionResponse;
+			const label = `${fr.name}"${fr.id ? ` (id ${fr.id})` : ""}`;
+			if (!hasMatchingFunctionCall(prevTurn, fr)) {
+				warnings.push(`functionResponse for "${label} has no matching call in the preceding model turn; degraded to a text observation`);
+				const output = typeof fr.response === "object" && fr.response !== null ? "output" in fr.response && typeof fr.response.output === "string" ? fr.response.output : "error" in fr.response && typeof fr.response.error === "string" ? fr.response.error : JSON.stringify(fr.response) : String(fr.response ?? "");
+				cleanParts.push({ text: observationText(fr.name, output) });
+				continue;
+			}
+			const key = fr.id ?? fr.name;
+			if (answered.has(key)) {
+				warnings.push(`duplicate functionResponse for "${label}; dropped`);
+				continue;
+			}
+			answered.add(key);
+			cleanParts.push(part);
+		}
+		if (cleanParts.length > 0) result.push({
+			role: "user",
+			parts: cleanParts
+		});
 	}
 	if (result.length > 0 && result[0]?.role === "model") result.unshift({
 		role: "user",
 		parts: [{ text: "Hello" }]
 	});
-	const lastTurn = result[result.length - 1];
-	if (lastTurn?.role === "model") {
-		const responses = [];
-		for (const part of lastTurn.parts) if ("functionCall" in part && part.functionCall) responses.push({ functionResponse: {
-			name: part.functionCall.name,
-			...part.functionCall.id ? { id: part.functionCall.id } : {},
-			response: { output: "Tool was not executed in this request; no result available." }
-		} });
-		result.push({
+	for (let index = 0; index < result.length; index++) {
+		const turn = result[index];
+		if (turn.role !== "model") continue;
+		const calls = turn.parts.flatMap((part) => "functionCall" in part ? [part.functionCall] : []);
+		if (calls.length === 0) continue;
+		const next = result[index + 1];
+		const existing = next?.role === "user" ? next.parts.flatMap((part) => "functionResponse" in part ? [part.functionResponse] : []) : [];
+		const missing = calls.filter((call) => !answeredByAny(call, existing));
+		if (missing.length === 0) continue;
+		const notices = missing.map((call) => {
+			warnings.push(`tool call "${call.name}"${call.id ? ` (id ${call.id})` : ""} has no recorded result; closed with an error notice`);
+			return { functionResponse: {
+				name: call.name,
+				...call.id ? { id: call.id } : {},
+				response: { error: NO_RESULT_NOTICE }
+			} };
+		});
+		if (next?.role === "user") next.parts.push(...notices);
+		else result.splice(index + 1, 0, {
 			role: "user",
-			parts: responses.length > 0 ? responses : [{ text: "Continue." }]
+			parts: notices
 		});
 	}
+	if (result[result.length - 1]?.role === "model") result.push({
+		role: "user",
+		parts: [{ text: CONTINUE_TEXT }]
+	});
 	return result;
+}
+/** True when some response answers this exact call (id match wins, else name). */
+function answeredByAny(call, responses) {
+	return responses.some((fr) => fr.id && call.id ? fr.id === call.id : fr.name === call.name);
 }
 //#endregion
 //#region packages/core/src/sse-mapper.ts
