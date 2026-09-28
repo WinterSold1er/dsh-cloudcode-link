@@ -113,7 +113,9 @@ describe('6 Root Causes of Cache Misses Fixes (FR-01 to FR-06, AC-01 to AC-06)',
       ]
 
       const converted = await convertMessages(messages)
-      assert.equal(converted.length, 2)
+      // Trailing model turn is padded with a user turn (CloudCode rejects model-terminated requests).
+      assert.equal(converted.length, 3)
+      assert.equal(converted[2]!.role, 'user')
 
       const modelParts = converted[1]!.parts
       // Should have exactly 2 parts: signed thought and final text. Unsigned reasoning must NOT appear as text!

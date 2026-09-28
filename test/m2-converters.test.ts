@@ -217,7 +217,7 @@ describe('M2: Converters & Sanitizer', () => {
       assert.equal((userParts[1] as any).text, '[Observation from `orphan_tool`:\norphan content]')
     })
 
-    it('prepends user hello if conversation starts with model', async () => {
+    it('prepends user hello AND pads a trailing user turn if conversation starts with model', async () => {
       const msgs: Message[] = [
         {
           id: 'm2' as any,
@@ -228,10 +228,12 @@ describe('M2: Converters & Sanitizer', () => {
       ]
 
       const contents = await convertMessages(msgs)
-      assert.equal(contents.length, 2)
+      // CloudCode rejects requests ending with a model turn: [user hello, model, user pad]
+      assert.equal(contents.length, 3)
       assert.equal(contents[0]!.role, 'user')
       assert.equal((contents[0]!.parts[0] as { text: string }).text, 'Hello')
       assert.equal(contents[1]!.role, 'model')
+      assert.equal(contents[2]!.role, 'user')
     })
 
     it('convertMessages handles empty messages array and empty content safely', async () => {
@@ -345,7 +347,8 @@ describe('M2: Converters & Sanitizer', () => {
       ]
 
       const contents = await convertMessages(msgs)
-      assert.equal(contents.length, 2)
+      // The unsigned tool-call is unanswered, so a trailing user functionResponse turn is appended.
+      assert.equal(contents.length, 3)
       const modelParts = contents[1]!.parts
       // Unsigned reasoning is completely discarded, never degraded to plain text (FR-03)
       assert.equal(modelParts.length, 1)
@@ -353,6 +356,12 @@ describe('M2: Converters & Sanitizer', () => {
       const funcPart = modelParts[0] as any
       assert.ok(funcPart.functionCall)
       assert.equal(funcPart.thoughtSignature, undefined)
+      // Padding turn closes the unanswered call instead of leaving a trailing model turn.
+      assert.equal(contents[2]!.role, 'user')
+      const padPart = contents[2]!.parts[0] as any
+      assert.ok('functionResponse' in padPart)
+      assert.equal(padPart.functionResponse.name, 'bash')
+      assert.equal(padPart.functionResponse.id, 'call_unsigned')
     })
   })
 

@@ -274,7 +274,9 @@ describe('QA Adversarial Verification Suite: Boundary, Failure Paths & Externali
       ]
 
       const converted = await convertMessages(messages)
-      assert.equal(converted.length, 2)
+      // Trailing model turn is padded with a user turn (CloudCode rejects model-terminated requests).
+      assert.equal(converted.length, 3)
+      assert.equal(converted[2]!.role, 'user')
       const modelParts = converted[1]!.parts
 
       // Strictly 2 parts: valid thought part + answer text part.
