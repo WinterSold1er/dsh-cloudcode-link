@@ -7,8 +7,11 @@ import {
   findEntry,
   foldEfforts,
   getAntigravityRequestModelId,
+  getFallbackRuntimeModel,
   getThinkingConfig,
+  isInternalModel,
   parseModelsOutput,
+  prettifyModelSlug,
   resolveModelSlug,
 } from '../src/host/models.ts'
 import { AgyAdapter } from '../src/host/adapter.ts'
@@ -60,14 +63,22 @@ test('parseModelsOutput handles dotted current-gen slugs', () => {
   assert.deepEqual(base?.efforts, ['medium'])
 })
 
-test('fallback catalog carries the current model line-up incl. 3.8 and 3.7', () => {
+test('fallback catalog carries the current model line-up incl. 4, 3.8 and 3.7', () => {
   const cat = buildFallbackCatalog(DEFAULT_FALLBACK_MODELS)
   const ids = cat.map((e) => e.id)
+  assert.ok(ids.includes('gemini-4-flash'), '4 flash present')
+  assert.ok(ids.includes('gemini-4-pro'), '4 pro present')
   assert.ok(ids.includes('gemini-3.8-flash'), '3.8 flash present')
   assert.ok(ids.includes('gemini-3.7-flash'), '3.7 flash present')
   assert.ok(ids.includes('gemini-3.6-flash'))
   assert.ok(ids.includes('claude-opus-4-6-thinking'))
   assert.ok(ids.includes('gpt-oss-120b-medium'))
+  const f4 = findEntry({ source: 'fallback', models: cat, discoveredAt: 0 }, 'gemini-4-flash')
+  assert.deepEqual(f4?.efforts, ['low', 'medium', 'high'])
+  assert.deepEqual(f4?.inputModalities, ['text', 'image'])
+  const f4p = findEntry({ source: 'fallback', models: cat, discoveredAt: 0 }, 'gemini-4-pro')
+  assert.deepEqual(f4p?.efforts, ['low', 'medium', 'high'])
+  assert.deepEqual(f4p?.inputModalities, ['text', 'image'])
   const f38 = findEntry({ source: 'fallback', models: cat, discoveredAt: 0 }, 'gemini-3.8-flash')
   assert.deepEqual(f38?.efforts, ['low', 'medium', 'high'])
   const f37 = findEntry({ source: 'fallback', models: cat, discoveredAt: 0 }, 'gemini-3.7-flash')
@@ -149,7 +160,11 @@ test('bare gemini base without siblings gets no efforts', () => {
 
 test('buildFallbackCatalog carries configurable efforts', () => {
   const cat = buildFallbackCatalog(DEFAULT_FALLBACK_MODELS)
-  assert.equal(cat.length, 8)
+  assert.equal(cat.length, 10)
+  const flash4 = cat.find((e) => e.id === 'gemini-4-flash')
+  assert.deepEqual(flash4?.efforts, ['low', 'medium', 'high'])
+  const pro4 = cat.find((e) => e.id === 'gemini-4-pro')
+  assert.deepEqual(pro4?.efforts, ['low', 'medium', 'high'])
   const flash38 = cat.find((e) => e.id === 'gemini-3.8-flash')
   assert.deepEqual(flash38?.efforts, ['low', 'medium', 'high'])
   const flash = cat.find((e) => e.id === 'gemini-3.7-flash')
@@ -480,5 +495,117 @@ test('AgyAdapter listModels and resolveModel with dynamic discovery', async () =
   const entry = findEntry(catalog.get(), 'gemini-3.9-flash-tiered')
   assert.equal(entry?.id, 'gemini-3.9-flash')
 })
+
+test('Gemini 4 aliases, routing, thinking, and adapter resolution', async () => {
+  // Alias resolution
+  assert.equal(resolveModelSlug('gemini-4'), 'gemini-4-flash')
+  assert.equal(resolveModelSlug('gemini-4.0'), 'gemini-4-flash')
+  assert.equal(resolveModelSlug('gemini-4-flash'), 'gemini-4-flash')
+  assert.equal(resolveModelSlug('gemini-4-pro'), 'gemini-4-pro')
+
+  // Antigravity request model routing
+  assert.equal(getAntigravityRequestModelId('gemini-4-flash', 'high'), 'gemini-4-flash-high')
+  assert.equal(getAntigravityRequestModelId('gemini-4-flash', 'medium'), 'gemini-4-flash-medium')
+  assert.equal(getAntigravityRequestModelId('gemini-4-flash', 'low'), 'gemini-4-flash-low')
+  assert.equal(getAntigravityRequestModelId('gemini-4-flash', 'off'), 'gemini-4-flash-low')
+  assert.equal(getAntigravityRequestModelId('gemini-4-flash'), 'gemini-4-flash-low')
+  assert.equal(getAntigravityRequestModelId('gemini-4', 'high'), 'gemini-4-flash-high')
+  assert.equal(getAntigravityRequestModelId('gemini-4-pro', 'high'), 'gemini-4-pro-high')
+
+  // Thinking config
+  assert.deepEqual(getThinkingConfig('gemini-4-flash', 'high'), {
+    includeThoughts: true,
+    thinkingLevel: 'HIGH',
+  })
+  assert.deepEqual(getThinkingConfig('gemini-4-flash', 'low'), {
+    includeThoughts: true,
+    thinkingLevel: 'LOW',
+  })
+  assert.deepEqual(getThinkingConfig('gemini-4-pro', 'medium'), {
+    includeThoughts: true,
+    thinkingLevel: 'MEDIUM',
+  })
+
+  // Adapter resolveModel from fallback
+  const catalog = new ModelCatalog(undefined, DEFAULT_FALLBACK_MODELS, 60_000)
+  const adapter = new AgyAdapter({
+    getConfig: () => defaultConfig(),
+    catalog,
+  })
+
+  const resFlash4 = await adapter.resolveModel('antigravity', 'gemini-4-flash')
+  assert.equal(resFlash4.id, 'gemini-4-flash')
+  assert.equal(resFlash4.name, 'Gemini 4 Flash')
+  assert.deepEqual(
+    resFlash4.reasoning?.efforts?.map((e) => e.name),
+    ['low', 'medium', 'high'],
+  )
+  assert.equal(resFlash4.context?.contextWindow, 1_048_576)
+
+  const resPro4 = await adapter.resolveModel('antigravity', 'gemini-4-pro')
+  assert.equal(resPro4.id, 'gemini-4-pro')
+  assert.equal(resPro4.name, 'Gemini 4 Pro')
+  assert.deepEqual(
+    resPro4.reasoning?.efforts?.map((e) => e.name),
+    ['low', 'medium', 'high'],
+  )
+
+  // Dynamic discovery with tiered Gemini 4 and internal noise filtering
+  const mockDiscover = async () => ({
+    models: {
+      'gemini-4-flash-tiered': {
+        quotaInfo: { remainingFraction: 1 },
+      },
+      'chat_20706': {
+        quotaInfo: { remainingFraction: 1 },
+      },
+      'tab_jump_flash_lite_preview': {
+        quotaInfo: { remainingFraction: 1 },
+      },
+    },
+  })
+  const dynamicCatalog = new ModelCatalog(mockDiscover, DEFAULT_FALLBACK_MODELS, 60_000)
+  await dynamicCatalog.refreshIfNeeded()
+  const dynamicModels = dynamicCatalog.get().models
+  const dynamicIds = dynamicModels.map((m) => m.id)
+
+  assert.ok(dynamicIds.includes('gemini-4-flash'))
+  assert.ok(!dynamicIds.includes('chat_20706'), 'internal chat_\\d+ must be filtered')
+  assert.ok(!dynamicIds.includes('tab_jump_flash_lite_preview'), 'tab preview must be filtered')
+
+  const foldedG4 = dynamicModels.find((m) => m.id === 'gemini-4-flash')
+  assert.equal(foldedG4?.name, 'Gemini 4 Flash')
+  assert.deepEqual(foldedG4?.efforts, ['low', 'medium', 'high'])
+})
+
+test('prettifyModelSlug formats slugs into human readable names', () => {
+  assert.equal(prettifyModelSlug('gemini-4-flash'), 'Gemini 4 Flash')
+  assert.equal(prettifyModelSlug('gemini-4-pro'), 'Gemini 4 Pro')
+  assert.equal(prettifyModelSlug('claude-sonnet-4-6'), 'Claude Sonnet 4.6')
+  assert.equal(prettifyModelSlug('gpt-oss-120b-medium'), 'GPT OSS 120B Medium')
+  assert.equal(prettifyModelSlug('gemini-3.8-flash'), 'Gemini 3.8 Flash')
+  assert.equal(prettifyModelSlug(''), '')
+})
+
+test('isInternalModel identifies internal editor, tab, and chat preview models', () => {
+  assert.equal(isInternalModel('chat_20706'), true)
+  assert.equal(isInternalModel('chat_23310'), true)
+  assert.equal(isInternalModel('tab_jump_flash_lite_preview'), true)
+  assert.equal(isInternalModel('tab_flash_lite_preview'), true)
+  assert.equal(isInternalModel('tab-anything'), true)
+  assert.equal(isInternalModel('model_preview'), true)
+  assert.equal(isInternalModel('model-preview'), true)
+  assert.equal(isInternalModel('gemini-4-flash'), false)
+  assert.equal(isInternalModel('gemini-4-pro'), false)
+  assert.equal(isInternalModel('claude-sonnet-4-6'), false)
+})
+
+test('getFallbackRuntimeModel supports Gemini 4 failover to 3.8', () => {
+  assert.equal(getFallbackRuntimeModel('gemini-4-flash'), 'gemini-3.8-flash-low')
+  assert.equal(getFallbackRuntimeModel('gemini-4-flash-high'), 'gemini-3.8-flash-high')
+  assert.equal(getFallbackRuntimeModel('gemini-4-flash-tiered', 'high'), 'gemini-3.8-flash-high')
+  assert.equal(getFallbackRuntimeModel('gemini-4-flash-tiered'), 'gemini-3.8-flash-low')
+})
+
 
 

@@ -45,6 +45,26 @@ function defaultPoolData() {
 //#region packages/core/src/types/config-types.ts
 const DEFAULT_FALLBACK_MODELS$1 = [
 	{
+		id: "gemini-4-flash",
+		name: "Gemini 4 Flash",
+		efforts: [
+			"low",
+			"medium",
+			"high"
+		],
+		inputModalities: ["text", "image"]
+	},
+	{
+		id: "gemini-4-pro",
+		name: "Gemini 4 Pro",
+		efforts: [
+			"low",
+			"medium",
+			"high"
+		],
+		inputModalities: ["text", "image"]
+	},
+	{
 		id: "gemini-3.8-flash",
 		name: "Gemini 3.8 Flash",
 		efforts: [
@@ -748,6 +768,26 @@ const DEFAULT_ENDPOINT_CANDIDATES = [
 ];
 const DEFAULT_FALLBACK_MODELS = [
 	{
+		id: "gemini-4-flash",
+		name: "Gemini 4 Flash",
+		efforts: [
+			"low",
+			"medium",
+			"high"
+		],
+		inputModalities: ["text", "image"]
+	},
+	{
+		id: "gemini-4-pro",
+		name: "Gemini 4 Pro",
+		efforts: [
+			"low",
+			"medium",
+			"high"
+		],
+		inputModalities: ["text", "image"]
+	},
+	{
 		id: "gemini-3.8-flash",
 		name: "Gemini 3.8 Flash",
 		efforts: [
@@ -1049,6 +1089,21 @@ function resolveConfig(entry, env = process.env, overrides = readOverrides()) {
 }
 //#endregion
 //#region packages/core/src/models.ts
+function prettifyModelSlug(slug) {
+	if (!slug) return "";
+	return slug.trim().replace(/(\d+)-(\d+)/g, "$1.$2").split(/[-_]+/).map((token) => {
+		const lower = token.toLowerCase();
+		if (lower === "gpt") return "GPT";
+		if (lower === "oss") return "OSS";
+		if (/^\d+b$/i.test(lower)) return lower.toUpperCase();
+		if (/^\d+(?:\.\d+)?$/.test(token)) return token;
+		return token.charAt(0).toUpperCase() + token.slice(1).toLowerCase();
+	}).join(" ");
+}
+function isInternalModel(slug) {
+	const s = slug.trim().toLowerCase();
+	return /^chat_\d+$/i.test(s) || /^tab[_-]/i.test(s) || /_preview$/i.test(s) || /-preview$/i.test(s);
+}
 /** Parse `agy models` stdout: JSON shapes first, then two-column text. */
 function parseModelsOutput(stdout) {
 	const text = stdout.trim();
@@ -1062,14 +1117,17 @@ function parseModelsOutput(stdout) {
 		const t = line.trim();
 		if (t === "" || t.startsWith("Fetching") || t.startsWith("Error") || /^(please sign in|warning|tip:)/i.test(t)) continue;
 		const m = t.match(/^(\S+)(?:\t+|\s{2,})(.+)$/);
-		if (m && m[1] !== void 0 && m[2] !== void 0) out.push({
-			slug: m[1],
-			label: m[2].trim()
-		});
-		else if (/^\S+$/.test(t)) out.push({
-			slug: t,
-			label: t
-		});
+		if (m && m[1] !== void 0 && m[2] !== void 0) {
+			if (!isInternalModel(m[1])) out.push({
+				slug: m[1],
+				label: m[2].trim()
+			});
+		} else if (/^\S+$/.test(t)) {
+			if (!isInternalModel(t)) out.push({
+				slug: t,
+				label: prettifyModelSlug(t)
+			});
+		}
 	}
 	return dedupeBySlug(out);
 }
@@ -1082,9 +1140,10 @@ function dedupeBySlug(raw) {
 		const slug = r.slug.trim();
 		if (slug === "" || seen.has(slug)) continue;
 		seen.add(slug);
+		const label = typeof r.label === "string" && r.label.trim() !== "" && r.label.trim() !== slug ? r.label.trim() : prettifyModelSlug(slug);
 		out.push({
 			slug,
-			label: typeof r.label === "string" && r.label.trim() !== "" ? r.label.trim() : slug
+			label
 		});
 	}
 	return out;
@@ -1098,10 +1157,13 @@ function extractModelList(parsed) {
 			const out = [];
 			for (const [key, val] of Object.entries(o.models)) {
 				if (!key || typeof key !== "string") continue;
+				const trimmedKey = key.trim();
+				if (isInternalModel(trimmedKey)) continue;
 				const v = val && typeof val === "object" ? val : {};
-				const label = typeof v.displayName === "string" && v.displayName.trim() !== "" ? v.displayName.trim() : typeof v.display_name === "string" && v.display_name.trim() !== "" ? v.display_name.trim() : typeof v.modelName === "string" && v.modelName.trim() !== "" ? v.modelName.trim() : typeof v.name === "string" && v.name.trim() !== "" ? v.name.trim() : key;
+				const rawLabel = typeof v.displayName === "string" && v.displayName.trim() !== "" ? v.displayName.trim() : typeof v.display_name === "string" && v.display_name.trim() !== "" ? v.display_name.trim() : typeof v.modelName === "string" && v.modelName.trim() !== "" ? v.modelName.trim() : typeof v.name === "string" && v.name.trim() !== "" ? v.name.trim() : "";
+				const label = rawLabel !== "" && rawLabel !== trimmedKey ? rawLabel : prettifyModelSlug(trimmedKey);
 				out.push({
-					slug: key.trim(),
+					slug: trimmedKey,
 					label
 				});
 			}
@@ -1121,19 +1183,25 @@ function extractModelList(parsed) {
 	const out = [];
 	for (const item of arr) {
 		if (typeof item === "string") {
+			const trimmed = item.trim();
+			if (isInternalModel(trimmed)) continue;
 			out.push({
-				slug: item,
-				label: item
+				slug: trimmed,
+				label: prettifyModelSlug(trimmed)
 			});
 			continue;
 		}
 		if (!item || typeof item !== "object") continue;
 		const o = item;
 		const slugV = o.slug ?? o.id ?? o.name ?? o.model;
-		const labelV = o.label ?? o.display_name ?? o.displayName ?? o.title ?? slugV;
-		if (typeof slugV === "string" && slugV !== "") out.push({
-			slug: slugV,
-			label: typeof labelV === "string" ? labelV : slugV
+		if (typeof slugV !== "string" || slugV.trim() === "") continue;
+		const trimmedSlug = slugV.trim();
+		if (isInternalModel(trimmedSlug)) continue;
+		const rawLabel = o.label ?? o.display_name ?? o.displayName ?? o.title;
+		const labelStr = typeof rawLabel === "string" && rawLabel.trim() !== "" && rawLabel.trim() !== trimmedSlug ? rawLabel.trim() : prettifyModelSlug(trimmedSlug);
+		out.push({
+			slug: trimmedSlug,
+			label: labelStr
 		});
 	}
 	return out;
@@ -1150,7 +1218,7 @@ function getInputModalitiesForModel(modelId) {
 function deriveEffortsForModel(modelId) {
 	const id = modelId.toLowerCase();
 	if (id === "gemini-3.1-pro" || id.startsWith("gemini-3.1-pro")) return ["low", "high"];
-	if (id.startsWith("gemini-3.")) return [
+	if (/^gemini-(?:[3-9]|\d{2,})(?:[.-]|$)/i.test(id)) return [
 		"low",
 		"medium",
 		"high"
@@ -1167,9 +1235,10 @@ function foldEfforts(raw) {
 	const slugSet = new Set(raw.map((r) => r.slug));
 	for (const r of raw) {
 		if (!r.slug.startsWith("gemini")) {
+			const displayLabel = r.label && r.label.trim() !== "" && r.label.trim() !== r.slug ? r.label.trim() : prettifyModelSlug(r.slug);
 			verbatim.push({
 				id: r.slug,
-				name: r.label,
+				name: displayLabel,
 				efforts: null,
 				inputModalities: getInputModalitiesForModel(r.slug)
 			});
@@ -1179,8 +1248,9 @@ function foldEfforts(raw) {
 			const base = r.slug.slice(0, -7);
 			const inferredEfforts = deriveEffortsForModel(base);
 			const cleanLabel = stripTieredLabel(r.label);
+			const displayLabel = cleanLabel !== "" && cleanLabel !== base && cleanLabel !== r.slug ? cleanLabel : prettifyModelSlug(base);
 			const entry = bases.get(base) ?? {
-				label: cleanLabel !== "" ? cleanLabel : base,
+				label: displayLabel,
 				efforts: /* @__PURE__ */ new Set()
 			};
 			if (inferredEfforts) for (const eff of inferredEfforts) entry.efforts.add(eff);
@@ -1195,8 +1265,10 @@ function foldEfforts(raw) {
 				const hasBare = slugSet.has(base);
 				const hasSibling = raw.some((x) => x.slug.startsWith(base + "-") && EFFORT_SUFFIXES.some((e) => x.slug.endsWith("-" + e)) && x.slug !== r.slug);
 				if (hasBare || hasSibling) {
+					const stripped = stripEffortLabel(r.label, eff);
+					const displayLabel = stripped !== "" && stripped !== base && stripped !== r.slug ? stripped : prettifyModelSlug(base);
 					const entry = bases.get(base) ?? {
-						label: stripEffortLabel(r.label, eff),
+						label: displayLabel,
 						efforts: /* @__PURE__ */ new Set()
 					};
 					entry.efforts.add(eff);
@@ -1206,19 +1278,22 @@ function foldEfforts(raw) {
 				}
 			}
 		}
-		if (!folded) verbatim.push({
-			id: r.slug,
-			name: r.label,
-			efforts: null,
-			inputModalities: getInputModalitiesForModel(r.slug)
-		});
+		if (!folded) {
+			const displayLabel = r.label && r.label.trim() !== "" && r.label.trim() !== r.slug ? r.label.trim() : prettifyModelSlug(r.slug);
+			verbatim.push({
+				id: r.slug,
+				name: displayLabel,
+				efforts: null,
+				inputModalities: getInputModalitiesForModel(r.slug)
+			});
+		}
 	}
 	const folded = [];
 	for (const [id, v] of bases) {
 		const efforts = EFFORT_SUFFIXES.filter((e) => v.efforts.has(e));
 		folded.push({
 			id,
-			name: v.label !== "" ? v.label : id,
+			name: v.label !== "" && v.label !== id ? v.label : prettifyModelSlug(id),
 			efforts: efforts.length > 0 ? efforts : null,
 			inputModalities: getInputModalitiesForModel(id)
 		});
@@ -1353,6 +1428,7 @@ var ModelCatalog = class {
 };
 function resolveModelSlug(id) {
 	const s = id.trim().toLowerCase();
+	if (s === "gemini-4" || s === "gemini-4.0") return "gemini-4-flash";
 	if (s === "claude-opus-4-6" || s === "claude-opus-4-8" || s === "claude-opus" || s === "claude-opus-4.6" || s === "claude-opus-4-5" || s === "opus") return "claude-opus-4-6-thinking";
 	if (s === "claude-sonnet" || s === "claude-sonnet-4.6" || s === "claude-sonnet-4-5" || s === "sonnet") return "claude-sonnet-4-6";
 	if (s === "gpt-oss-120b" || s === "gpt-oss-20b" || s === "gpt-oss") return "gpt-oss-120b-medium";
@@ -1521,7 +1597,7 @@ function getAntigravityRequestModelId(modelId, effort) {
 	const r = ANTIGRAVITY_ROUTING[resolvedId] ?? ANTIGRAVITY_ROUTING[modelId];
 	if (!r) {
 		const isWireModel = resolvedId.endsWith("-low") || resolvedId.endsWith("-medium") || resolvedId.endsWith("-high") || resolvedId.endsWith("-tiered") || resolvedId.endsWith("-extra-low") || resolvedId.endsWith("-thinking");
-		if (resolvedId.startsWith("gemini-3.") && !isWireModel) {
+		if (/^gemini-(?:[3-9]|\d{2,})(?:[.-]|$)/i.test(resolvedId) && !isWireModel) {
 			if (effort && effort !== "off" && [
 				"low",
 				"medium",
@@ -1542,7 +1618,7 @@ function googleLevel(effort) {
 	return "LOW";
 }
 function getThinkingConfig(modelId, effort) {
-	if (modelId === "gemini-3.8-flash" || modelId === "gemini-3.7-flash" || modelId === "gemini-3.6-flash" || modelId.startsWith("gemini-3.") && !modelId.startsWith("gemini-3.5") && !modelId.startsWith("gemini-3.1")) return {
+	if (modelId === "gemini-3.8-flash" || modelId === "gemini-3.7-flash" || modelId === "gemini-3.6-flash" || /^gemini-(?:[3-9]|\d{2,})(?:[.-]|$)/i.test(modelId) && !modelId.startsWith("gemini-3.5") && !modelId.startsWith("gemini-3.1")) return {
 		includeThoughts: true,
 		thinkingLevel: googleLevel(effort)
 	};
