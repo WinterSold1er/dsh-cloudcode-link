@@ -110,8 +110,6 @@ export const DEFAULT_ENDPOINT_CANDIDATES: readonly string[] = [
 
 // Full fallback line-up
 export const DEFAULT_FALLBACK_MODELS: readonly FallbackModelDef[] = [
-  { id: 'gemini-4-flash', name: 'Gemini 4 Flash', efforts: ['low', 'medium', 'high'], inputModalities: ['text', 'image'] },
-  { id: 'gemini-4-pro', name: 'Gemini 4 Pro', efforts: ['low', 'medium', 'high'], inputModalities: ['text', 'image'] },
   { id: 'gemini-3.8-flash', name: 'Gemini 3.8 Flash', efforts: ['low', 'medium', 'high'], inputModalities: ['text', 'image'] },
   { id: 'gemini-3.7-flash', name: 'Gemini 3.7 Flash', efforts: ['low', 'medium', 'high'], inputModalities: ['text', 'image'] },
   { id: 'gemini-3.6-flash', name: 'Gemini 3.6 Flash', efforts: ['low', 'medium', 'high'], inputModalities: ['text', 'image'] },

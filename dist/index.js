@@ -45,26 +45,6 @@ function defaultPoolData() {
 //#region packages/core/src/types/config-types.ts
 const DEFAULT_FALLBACK_MODELS$1 = [
 	{
-		id: "gemini-4-flash",
-		name: "Gemini 4 Flash",
-		efforts: [
-			"low",
-			"medium",
-			"high"
-		],
-		inputModalities: ["text", "image"]
-	},
-	{
-		id: "gemini-4-pro",
-		name: "Gemini 4 Pro",
-		efforts: [
-			"low",
-			"medium",
-			"high"
-		],
-		inputModalities: ["text", "image"]
-	},
-	{
 		id: "gemini-3.8-flash",
 		name: "Gemini 3.8 Flash",
 		efforts: [
@@ -768,26 +748,6 @@ const DEFAULT_ENDPOINT_CANDIDATES = [
 ];
 const DEFAULT_FALLBACK_MODELS = [
 	{
-		id: "gemini-4-flash",
-		name: "Gemini 4 Flash",
-		efforts: [
-			"low",
-			"medium",
-			"high"
-		],
-		inputModalities: ["text", "image"]
-	},
-	{
-		id: "gemini-4-pro",
-		name: "Gemini 4 Pro",
-		efforts: [
-			"low",
-			"medium",
-			"high"
-		],
-		inputModalities: ["text", "image"]
-	},
-	{
 		id: "gemini-3.8-flash",
 		name: "Gemini 3.8 Flash",
 		efforts: [
@@ -1428,7 +1388,6 @@ var ModelCatalog = class {
 };
 function resolveModelSlug(id) {
 	const s = id.trim().toLowerCase();
-	if (s === "gemini-4" || s === "gemini-4.0") return "gemini-4-flash";
 	if (s === "claude-opus-4-6" || s === "claude-opus-4-8" || s === "claude-opus" || s === "claude-opus-4.6" || s === "claude-opus-4-5" || s === "opus") return "claude-opus-4-6-thinking";
 	if (s === "claude-sonnet" || s === "claude-sonnet-4.6" || s === "claude-sonnet-4-5" || s === "sonnet") return "claude-sonnet-4-6";
 	if (s === "gpt-oss-120b" || s === "gpt-oss-20b" || s === "gpt-oss") return "gpt-oss-120b-medium";
