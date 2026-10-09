@@ -834,10 +834,15 @@ body.dark,
 				const [statsOverview, setStatsOverview] = useState(null);
 				const [statsLoading, setStatsLoading] = useState(false);
 				const [showAuditDrawer, setShowAuditDrawer] = useState(false);
+				const [auditTab, setAuditTab] = useState("requests");
 				const [auditRequests, setAuditRequests] = useState([]);
 				const [auditTotal, setAuditTotal] = useState(0);
 				const [auditPage, setAuditPage] = useState(0);
 				const [auditLoading, setAuditLoading] = useState(false);
+				const [auditSessions, setAuditSessions] = useState([]);
+				const [auditSessionsTotal, setAuditSessionsTotal] = useState(0);
+				const [auditSessionsPage, setAuditSessionsPage] = useState(0);
+				const [auditSessionsLoading, setAuditSessionsLoading] = useState(false);
 				const fetchStatsOverview = async () => {
 					try {
 						setStatsLoading(true);
@@ -866,6 +871,24 @@ body.dark,
 						}
 					} catch {} finally {
 						setAuditLoading(false);
+					}
+				};
+				const fetchAuditSessions = async (page = 0) => {
+					try {
+						setAuditSessionsLoading(true);
+						const limit = 20;
+						const offset = page * limit;
+						const res = await fetchWithFallback(`${API_PREFIX}/stats/sessions?limit=${limit}&offset=${offset}`);
+						if (res && res.ok) {
+							const data = await res.json();
+							if (data && data.ok) {
+								setAuditSessions(data.sessions || []);
+								setAuditSessionsTotal(data.total || 0);
+								setAuditSessionsPage(page);
+							}
+						}
+					} catch {} finally {
+						setAuditSessionsLoading(false);
 					}
 				};
 				useEffect(() => {
@@ -1486,8 +1509,6 @@ body.dark,
 					const totalReq = o?.totalRequests ?? 0;
 					const successCount = o?.totalSuccess ?? 0;
 					const failCount = o?.totalFailed ?? 0;
-					const cacheRate = typeof o?.cacheHitRate === "number" ? Math.max(0, Math.min(100, o.cacheHitRate * 100)) : 0;
-					const cacheColor = cacheRate > 30 ? "#10b981" : cacheRate >= 10 ? "#f59e0b" : "#94a3b8";
 					const avgLat = o?.avgLatencyMs ?? 0;
 					const avgTtft = o?.avgTtftMs ?? 0;
 					const p90 = o?.p90LatencyMs ?? 0;
@@ -1538,11 +1559,13 @@ body.dark,
 						},
 						onClick: () => {
 							setShowAuditDrawer(true);
+							fetchStatsOverview();
 							fetchAuditRequests(0);
+							fetchAuditSessions(0);
 						}
 					}, [uiIcon("activity", 11), " 请求审计明细"]))), h("div", { style: {
 						display: "grid",
-						gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))",
+						gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))",
 						gap: "10px"
 					} }, h("div", { style: S.statBox }, h("div", { style: S.statLabel }, "请求总数"), h("div", { style: S.statValue }, formatNumber(totalReq)), h("div", { style: S.statSub }, h("span", { style: {
 						color: "#10b981",
@@ -1550,13 +1573,20 @@ body.dark,
 					} }, `${formatNumber(successCount)} 成功`), failCount > 0 ? h("span", { style: {
 						color: "#ef4444",
 						marginLeft: "6px"
-					} }, `${formatNumber(failCount)} 异常`) : null)), h("div", { style: S.statBox }, h("div", { style: S.statLabel }, "缓存命中率 (Cache Hit %)"), h("div", { style: {
-						...S.statValue,
-						color: cacheColor
-					} }, `${cacheRate.toFixed(1)}%`), h("div", { style: S.statSub }, `节省: ${formatCompactTokens(o?.totalCachedTokens ?? 0)} tokens`)), h("div", { style: S.statBox }, h("div", { style: S.statLabel }, "Token 汇总 (P / C / O)"), h("div", { style: S.statValue }, formatCompactTokens(o?.totalTokens ?? 0)), h("div", { style: S.statSub }, `P: ${formatCompactTokens(o?.totalPromptTokens ?? 0)} · O: ${formatCompactTokens(o?.totalOutputTokens ?? 0)}`)), h("div", { style: S.statBox }, h("div", { style: S.statLabel }, "平均耗时 / TTFT"), h("div", { style: S.statValue }, `${formatNumber(avgLat)} ms`), h("div", { style: S.statSub }, `TTFT: ${formatNumber(avgTtft)} ms · P90: ${formatNumber(p90)} ms`))));
+					} }, `${formatNumber(failCount)} 异常`) : null)), h("div", { style: S.statBox }, h("div", { style: S.statLabel }, "平均耗时 / TTFT"), h("div", { style: S.statValue }, `${formatNumber(avgLat)} ms`), h("div", { style: S.statSub }, `TTFT: ${formatNumber(avgTtft)} ms · P90: ${formatNumber(p90)} ms`))));
 				};
 				const renderAuditDrawer = () => {
 					if (!showAuditDrawer) return null;
+					const o = statsOverview;
+					const totalReq = o?.totalRequests ?? 0;
+					const successCount = o?.totalSuccess ?? 0;
+					const failCount = o?.totalFailed ?? 0;
+					const cacheRate = typeof o?.cacheHitRate === "number" ? Math.max(0, Math.min(100, o.cacheHitRate * 100)) : 0;
+					const cacheColor = cacheRate > 30 ? "#10b981" : cacheRate >= 10 ? "#f59e0b" : "#94a3b8";
+					const avgLat = o?.avgLatencyMs ?? 0;
+					const avgTtft = o?.avgTtftMs ?? 0;
+					const p90 = o?.p90LatencyMs ?? 0;
+					const isRefreshing = (auditTab === "requests" ? auditLoading : auditSessionsLoading) || statsLoading;
 					return portalToBody(h("div", {
 						className: "agy-modal-backdrop",
 						style: {
@@ -1575,7 +1605,7 @@ body.dark,
 							if (e.target === e.currentTarget) setShowAuditDrawer(false);
 						}
 					}, h("div", { style: {
-						width: "min(880px, 95vw)",
+						width: "min(920px, 95vw)",
 						height: "100%",
 						background: "#12141a",
 						borderLeft: "1px solid #27272a",
@@ -1597,11 +1627,11 @@ body.dark,
 					} }, uiIcon("activity", 15, "#3b82f6"), h("span", { style: {
 						fontSize: "14px",
 						fontWeight: 700
-					} }, "请求审计明细 (Audit Log)"), h("span", { style: {
+					} }, "请求审计与会话统计 (Audit Log)"), h("span", { style: {
 						fontSize: "12px",
 						color: "#71717a",
 						marginLeft: "6px"
-					} }, `共 ${auditTotal} 条记录`)), h("div", { style: {
+					} }, auditTab === "requests" ? `共 ${auditTotal} 条记录` : `共 ${auditSessionsTotal} 个会话`)), h("div", { style: {
 						display: "flex",
 						gap: "8px",
 						alignItems: "center"
@@ -1614,9 +1644,13 @@ body.dark,
 							borderColor: "#3f3f46",
 							color: "#e4e4e7"
 						},
-						disabled: auditLoading,
-						onClick: () => void fetchAuditRequests(auditPage)
-					}, auditLoading ? [renderSpinner(), "刷新中"] : [uiIcon("refresh", 11), "刷新"]), h("button", {
+						disabled: isRefreshing,
+						onClick: () => {
+							fetchStatsOverview();
+							if (auditTab === "requests") fetchAuditRequests(auditPage);
+							else fetchAuditSessions(auditSessionsPage);
+						}
+					}, isRefreshing ? [renderSpinner(), "刷新中"] : [uiIcon("refresh", 11), "刷新"]), h("button", {
 						type: "button",
 						className: "agy-btn",
 						style: {
@@ -1628,7 +1662,99 @@ body.dark,
 						flex: 1,
 						overflowY: "auto",
 						padding: "16px 20px"
-					} }, h("table", { style: {
+					} }, h("div", { style: {
+						display: "grid",
+						gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))",
+						gap: "10px",
+						marginBottom: "16px"
+					} }, h("div", { style: {
+						...S.statBox,
+						background: "#181b22",
+						borderColor: "#27272a"
+					} }, h("div", { style: S.statLabel }, "请求总数"), h("div", { style: S.statValue }, formatNumber(totalReq)), h("div", { style: S.statSub }, h("span", { style: {
+						color: "#10b981",
+						fontWeight: 600
+					} }, `${formatNumber(successCount)} 成功`), failCount > 0 ? h("span", { style: {
+						color: "#ef4444",
+						marginLeft: "6px"
+					} }, `${formatNumber(failCount)} 失败`) : null)), h("div", { style: {
+						...S.statBox,
+						background: "#181b22",
+						borderColor: "#27272a"
+					} }, h("div", { style: S.statLabel }, "缓存命中率 (Cache Hit %)"), h("div", { style: {
+						...S.statValue,
+						color: cacheColor
+					} }, `${cacheRate.toFixed(1)}%`), h("div", { style: S.statSub }, `节省: ${formatCompactTokens(o?.totalCachedTokens ?? 0)} tokens`)), h("div", { style: {
+						...S.statBox,
+						background: "#181b22",
+						borderColor: "#27272a"
+					} }, h("div", { style: S.statLabel }, "Token 汇总 (P / C / O)"), h("div", { style: S.statValue }, formatCompactTokens(o?.totalTokens ?? 0)), h("div", { style: S.statSub }, `P: ${formatCompactTokens(o?.totalPromptTokens ?? 0)} · O: ${formatCompactTokens(o?.totalOutputTokens ?? 0)}`)), h("div", { style: {
+						...S.statBox,
+						background: "#181b22",
+						borderColor: "#27272a"
+					} }, h("div", { style: S.statLabel }, "平均耗时 / TTFT"), h("div", { style: S.statValue }, `${formatNumber(avgLat)} ms`), h("div", { style: S.statSub }, `TTFT: ${formatNumber(avgTtft)} ms · P90: ${formatNumber(p90)} ms`))), h("div", { style: {
+						display: "flex",
+						alignItems: "center",
+						justifyContent: "space-between",
+						marginBottom: "14px"
+					} }, h("div", { style: {
+						display: "inline-flex",
+						background: "#181b22",
+						borderRadius: "8px",
+						padding: "3px",
+						border: "1px solid #27272a"
+					} }, h("button", {
+						type: "button",
+						className: "agy-btn",
+						style: auditTab === "requests" ? {
+							padding: "5px 14px",
+							borderRadius: "6px",
+							border: "none",
+							background: "#2563eb",
+							color: "#ffffff",
+							cursor: "pointer",
+							fontSize: "12px",
+							fontWeight: 700,
+							boxShadow: "0 2px 4px rgba(37, 99, 235, 0.4)"
+						} : {
+							padding: "5px 14px",
+							borderRadius: "6px",
+							border: "none",
+							background: "transparent",
+							color: "#a1a1aa",
+							cursor: "pointer",
+							fontSize: "12px",
+							fontWeight: 600
+						},
+						onClick: () => setAuditTab("requests")
+					}, "按请求明细 (Requests)"), h("button", {
+						type: "button",
+						className: "agy-btn",
+						style: auditTab === "sessions" ? {
+							padding: "5px 14px",
+							borderRadius: "6px",
+							border: "none",
+							background: "#2563eb",
+							color: "#ffffff",
+							cursor: "pointer",
+							fontSize: "12px",
+							fontWeight: 700,
+							boxShadow: "0 2px 4px rgba(37, 99, 235, 0.4)"
+						} : {
+							padding: "5px 14px",
+							borderRadius: "6px",
+							border: "none",
+							background: "transparent",
+							color: "#a1a1aa",
+							cursor: "pointer",
+							fontSize: "12px",
+							fontWeight: 600
+						},
+						onClick: () => {
+							setAuditTab("sessions");
+							if (auditSessions.length === 0 && !auditSessionsLoading) fetchAuditSessions(0);
+						}
+					}, "按会话统计 (Sessions)"))), auditTab === "requests" ? h("table", { style: {
 						width: "100%",
 						borderCollapse: "collapse",
 						fontSize: "12px"
@@ -1680,6 +1806,87 @@ body.dark,
 							fontSize: "11px",
 							fontWeight: 700
 						} }, r.status)));
+					}))) : h("table", { style: {
+						width: "100%",
+						borderCollapse: "collapse",
+						fontSize: "12px"
+					} }, h("thead", null, h("tr", { style: {
+						borderBottom: "1px solid #27272a",
+						color: "#a1a1aa",
+						textAlign: "left"
+					} }, h("th", { style: { padding: "8px 10px" } }, "更新时间"), h("th", { style: { padding: "8px 10px" } }, "会话 ID"), h("th", { style: { padding: "8px 10px" } }, "账号"), h("th", { style: { padding: "8px 10px" } }, "请求数 (总数 / 成功 / 失败)"), h("th", { style: { padding: "8px 10px" } }, "Token (Prompt / 命中缓存 / 命中率)"), h("th", { style: { padding: "8px 10px" } }, "状态/详情"))), h("tbody", null, auditSessions.length === 0 ? h("tr", null, h("td", {
+						colSpan: 6,
+						style: {
+							textAlign: "center",
+							padding: "40px",
+							color: "#71717a"
+						}
+					}, auditSessionsLoading ? "加载中..." : "暂无会话审计记录")) : auditSessions.map((s, idx) => {
+						const dateStr = s.updatedAt ? new Date(s.updatedAt).toLocaleTimeString() : "-";
+						const account = pool?.accounts?.find((a) => a.id === s.accountId);
+						const accDisplay = account?.alias || (account?.email ? maskEmail(account.email) : s.accountId || "-");
+						const shortId = s.sessionId && s.sessionId.length > 18 ? `${s.sessionId.slice(0, 8)}...${s.sessionId.slice(-6)}` : s.sessionId || "-";
+						const promptTokens = s.totalPromptTokens ?? 0;
+						const cachedTokens = s.totalCachedTokens ?? 0;
+						const cacheRate = typeof s.cacheHitRate === "number" ? Math.max(0, Math.min(100, s.cacheHitRate * 100)) : promptTokens > 0 ? Math.max(0, Math.min(100, cachedTokens / promptTokens * 100)) : 0;
+						const rateColor = cacheRate > 30 ? "#34d399" : cacheRate >= 10 ? "#f59e0b" : "#94a3b8";
+						const totalReqCount = s.totalRequests ?? 0;
+						const successReqCount = s.totalSuccess ?? 0;
+						const failedReqCount = s.totalFailed ?? 0;
+						const isHealthy = failedReqCount === 0;
+						const statusBg = isHealthy ? "rgba(16, 185, 129, 0.15)" : "rgba(239, 68, 68, 0.15)";
+						const statusColor = isHealthy ? "#34d399" : "#f87171";
+						const statusText = isHealthy ? "正常" : `${failedReqCount} 异常`;
+						return h("tr", {
+							key: s.sessionId || idx,
+							style: { borderBottom: "1px solid #1f222b" }
+						}, h("td", { style: {
+							padding: "8px 10px",
+							color: "#a1a1aa",
+							whiteSpace: "nowrap"
+						} }, dateStr), h("td", {
+							style: {
+								padding: "8px 10px",
+								fontFamily: "monospace",
+								fontWeight: 600,
+								color: "#f4f4f5",
+								whiteSpace: "nowrap"
+							},
+							title: s.sessionId
+						}, shortId), h("td", { style: {
+							padding: "8px 10px",
+							color: "#cbd5e1"
+						} }, accDisplay), h("td", { style: {
+							padding: "8px 10px",
+							fontFamily: "monospace"
+						} }, h("span", { style: {
+							fontWeight: 600,
+							color: "#f4f4f5"
+						} }, `${formatNumber(totalReqCount)}`), h("span", { style: {
+							color: "#71717a",
+							margin: "0 4px"
+						} }, "("), h("span", { style: { color: "#34d399" } }, `${formatNumber(successReqCount)}`), h("span", { style: {
+							color: "#71717a",
+							margin: "0 2px"
+						} }, "/"), h("span", { style: { color: failedReqCount > 0 ? "#f87171" : "#71717a" } }, `${formatNumber(failedReqCount)}`), h("span", { style: {
+							color: "#71717a",
+							margin: "0 4px"
+						} }, ")")), h("td", { style: {
+							padding: "8px 10px",
+							fontFamily: "monospace"
+						} }, `${formatCompactTokens(promptTokens)} / `, h("span", { style: { color: cachedTokens > 0 ? "#34d399" : "inherit" } }, `${formatCompactTokens(cachedTokens)}`), h("span", { style: {
+							color: rateColor,
+							marginLeft: "6px",
+							fontSize: "11px",
+							fontWeight: 600
+						} }, `(${cacheRate.toFixed(1)}%)`)), h("td", { style: { padding: "8px 10px" } }, h("span", { style: {
+							padding: "2px 6px",
+							borderRadius: "4px",
+							background: statusBg,
+							color: statusColor,
+							fontSize: "11px",
+							fontWeight: 700
+						} }, statusText)));
 					})))), h("div", { style: {
 						padding: "12px 20px",
 						borderTop: "1px solid #27272a",
@@ -1690,7 +1897,7 @@ body.dark,
 					} }, h("span", { style: {
 						fontSize: "12px",
 						color: "#71717a"
-					} }, `第 ${auditPage + 1} 页`), h("div", { style: {
+					} }, auditTab === "requests" ? `第 ${auditPage + 1} 页` : `第 ${auditSessionsPage + 1} 页`), h("div", { style: {
 						display: "flex",
 						gap: "8px"
 					} }, h("button", {
@@ -1702,8 +1909,11 @@ body.dark,
 							borderColor: "#3f3f46",
 							color: "#e4e4e7"
 						},
-						disabled: auditPage <= 0 || auditLoading,
-						onClick: () => void fetchAuditRequests(auditPage - 1)
+						disabled: auditTab === "requests" ? auditPage <= 0 || auditLoading : auditSessionsPage <= 0 || auditSessionsLoading,
+						onClick: () => {
+							if (auditTab === "requests") fetchAuditRequests(auditPage - 1);
+							else fetchAuditSessions(auditSessionsPage - 1);
+						}
 					}, "上一页"), h("button", {
 						type: "button",
 						className: "agy-btn",
@@ -1713,8 +1923,11 @@ body.dark,
 							borderColor: "#3f3f46",
 							color: "#e4e4e7"
 						},
-						disabled: (auditPage + 1) * 20 >= auditTotal || auditLoading,
-						onClick: () => void fetchAuditRequests(auditPage + 1)
+						disabled: auditTab === "requests" ? (auditPage + 1) * 20 >= auditTotal || auditLoading : (auditSessionsPage + 1) * 20 >= auditSessionsTotal || auditSessionsLoading,
+						onClick: () => {
+							if (auditTab === "requests") fetchAuditRequests(auditPage + 1);
+							else fetchAuditSessions(auditSessionsPage + 1);
+						}
 					}, "下一页"))))));
 				};
 				if (status === null) return h("div", { style: {

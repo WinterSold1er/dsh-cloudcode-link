@@ -681,6 +681,37 @@ export function apply(ctx: Context, entryConfig: Record<string, unknown> = {}): 
       })()
     })
 
+    // 2.1 Session history with pagination and filters
+    regBoth('stats/sessions', (req, res) => {
+      void (async () => {
+        try {
+          const q = parseQuery(req)
+          const limitParam = q.limit ? parseInt(q.limit, 10) : 50
+          const maxLimit = getConfig().apiMaxPageSize
+          const limit = Number.isFinite(limitParam) && limitParam > 0 ? Math.min(limitParam, maxLimit) : 50
+          const offsetParam = q.offset ? parseInt(q.offset, 10) : 0
+          const offset = Number.isFinite(offsetParam) && offsetParam >= 0 ? offsetParam : 0
+          const accountId = q.accountId?.trim() || undefined
+
+          const filter = { limit, offset, accountId }
+          const items = (await statsStorage.querySessions?.(filter)) ?? []
+          const total = statsStorage.countSessions
+            ? await statsStorage.countSessions({ accountId })
+            : items.length
+
+          sendJson(res as RawRes, 200, {
+            ok: true,
+            sessions: items,
+            total,
+            limit,
+            offset,
+          })
+        } catch (err) {
+          sendJson(res as RawRes, 500, { ok: false, error: String(err) })
+        }
+      })()
+    })
+
     // 3. Aggregated metrics (hour / day)
     regBoth('stats/aggregated', (req, res) => {
       void (async () => {

@@ -249,10 +249,10 @@ test('recordFailure parses reset duration from error text and sets safety buffer
 
 import { getAccountHealth } from '../src/common/pool-types.ts'
 
-test('primary slot is re-bootstrapped when missing while other accounts remain', () => {
+test('primary slot is not re-bootstrapped when missing while other accounts remain', () => {
   const dir = mkdtempSync(join(tmpdir(), 'agy-primary-reboot-'))
-  // Simulate the broken on-disk state: user deleted the primary slot while
-  // an isolated account remained (old code never recreated it).
+  // When an existing pool.json has orphan accounts and no primary account,
+  // loading it must NOT resurrect acc_primary.
   const orphan = {
     id: 'acc_1787000000000_xx',
     alias: 'orphan',
@@ -271,14 +271,53 @@ test('primary slot is re-bootstrapped when missing while other accounts remain',
 
   const pool = new AccountPoolManager(dir)
   const accounts = pool.getAccounts()
-  assert.equal(accounts.length, 2)
-  // Primary recreated at the FRONT and marked as the pool primary.
-  assert.equal(accounts[0]?.id, 'acc_primary')
-  assert.equal(accounts[0]?.systemHome, true)
-  assert.equal(pool.getPoolData().primaryAccountId, 'acc_primary')
-  // The isolated account is untouched.
-  assert.equal(accounts[1]?.id, orphan.id)
-  assert.equal(accounts[1]?.email, 'old.pool.account@gmail.com')
+  assert.equal(accounts.length, 1)
+  assert.equal(accounts[0]?.id, orphan.id)
+  assert.equal(accounts[0]?.email, 'old.pool.account@gmail.com')
+  assert.equal(pool.getPoolData().primaryAccountId, orphan.id)
+  assert.equal(accounts.some((a) => a.id === 'acc_primary'), false)
+})
+
+test('deleted primary account is not recreated on subsequent loads of existing pool.json, but brand new pool bootstraps acc_primary', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'agy-primary-delete-reboot-'))
+  // 1. Brand new pool (no pool.json on disk) -> bootstraps acc_primary
+  const pool1 = new AccountPoolManager(dir)
+  const initialAccounts = pool1.getAccounts()
+  assert.equal(initialAccounts.length, 1)
+  assert.equal(initialAccounts[0]?.id, 'acc_primary')
+  assert.equal(initialAccounts[0]?.systemHome, true)
+  assert.equal(pool1.getPoolData().primaryAccountId, 'acc_primary')
+
+  // Add a secondary account
+  const secondary = pool1.createAccountSlot('Secondary Account')
+  assert.equal(pool1.getAccounts().length, 2)
+
+  // 2. Delete primary account
+  const deleted = pool1.deleteAccount('acc_primary')
+  assert.equal(deleted, true)
+  assert.equal(pool1.getAccounts().length, 1)
+  assert.equal(pool1.getAccounts()[0]?.id, secondary.id)
+  assert.equal(pool1.getPoolData().primaryAccountId, secondary.id)
+
+  // 3. Reload from existing pool.json on disk: must NOT resurrect acc_primary
+  const pool2 = new AccountPoolManager(dir)
+  const reloadedAccounts = pool2.getAccounts()
+  assert.equal(reloadedAccounts.length, 1)
+  assert.equal(reloadedAccounts[0]?.id, secondary.id)
+  assert.equal(reloadedAccounts.some((a) => a.id === 'acc_primary'), false)
+  assert.equal(pool2.getPoolData().primaryAccountId, secondary.id)
+
+  // 4. Delete the remaining secondary account, leaving pool empty
+  const deletedSecondary = pool2.deleteAccount(secondary.id)
+  assert.equal(deletedSecondary, true)
+  assert.equal(pool2.getAccounts().length, 0)
+  assert.equal(pool2.getPoolData().primaryAccountId, undefined)
+
+  // Reload empty existing pool.json on disk: must NOT resurrect acc_primary
+  const pool3 = new AccountPoolManager(dir)
+  assert.equal(pool3.getAccounts().length, 0)
+  assert.equal(pool3.getPoolData().primaryAccountId, undefined)
+  assert.equal(pool3.getAccounts().some((a) => a.id === 'acc_primary'), false)
 })
 
 test('resetAccountIdentity clears identity-bound state on external re-login', () => {

@@ -174,6 +174,47 @@ describe('Stats & Telemetry Integration Suite', () => {
         assert.equal(page2.length, 1)
         assert.equal(page2[0]!.requestId, 'req-1')
 
+        // Test sessions count and pagination
+        await storage.upsertSessionMetrics([
+          {
+            sessionId: 'sess-1',
+            accountId: 'acc-1',
+            createdAt: now - 5000,
+            updatedAt: now - 5000,
+            totalRequests: 1,
+            totalSuccess: 1,
+            totalFailed: 0,
+            totalPromptTokens: 1000,
+            totalCachedTokens: 800,
+            cacheHitRate: 0.8,
+          },
+          {
+            sessionId: 'sess-2',
+            accountId: 'acc-2',
+            createdAt: now - 1000,
+            updatedAt: now - 1000,
+            totalRequests: 1,
+            totalSuccess: 0,
+            totalFailed: 1,
+            totalPromptTokens: 500,
+            totalCachedTokens: 0,
+            cacheHitRate: 0,
+          },
+        ])
+
+        const sessTotal = await storage.countSessions()
+        assert.equal(sessTotal, 2)
+        const sessAcc1 = await storage.countSessions({ accountId: 'acc-1' })
+        assert.equal(sessAcc1, 1)
+
+        const sessPage1 = await storage.querySessions({ limit: 1, offset: 0 })
+        assert.equal(sessPage1.length, 1)
+        assert.equal(sessPage1[0]!.sessionId, 'sess-2') // updatedAt DESC
+
+        const sessPage2 = await storage.querySessions({ limit: 1, offset: 1 })
+        assert.equal(sessPage2.length, 1)
+        assert.equal(sessPage2[0]!.sessionId, 'sess-1')
+
         await storage.close()
       } finally {
         rmSync(tempDir, { recursive: true, force: true })
@@ -222,6 +263,47 @@ describe('Stats & Telemetry Integration Suite', () => {
       assert.equal(aborts.length, 1)
       assert.equal(aborts[0]!.requestId, 'm-2')
       assert.equal(aborts[0]!.ttftMs, 40)
+
+      // Test sessions count and pagination in MemoryStatsStorage
+      await storage.upsertSessionMetrics([
+        {
+          sessionId: 'm-sess-1',
+          accountId: 'a-1',
+          createdAt: now - 3000,
+          updatedAt: now - 3000,
+          totalRequests: 1,
+          totalSuccess: 1,
+          totalFailed: 0,
+          totalPromptTokens: 300,
+          totalCachedTokens: 150,
+          cacheHitRate: 0.5,
+        },
+        {
+          sessionId: 'm-sess-2',
+          accountId: 'a-2',
+          createdAt: now - 1000,
+          updatedAt: now - 1000,
+          totalRequests: 1,
+          totalSuccess: 0,
+          totalFailed: 1,
+          totalPromptTokens: 200,
+          totalCachedTokens: 0,
+          cacheHitRate: 0,
+        },
+      ])
+
+      const sessTotal = await storage.countSessions()
+      assert.equal(sessTotal, 2)
+      const sessA1 = await storage.countSessions({ accountId: 'a-1' })
+      assert.equal(sessA1, 1)
+
+      const sessP1 = await storage.querySessions({ limit: 1, offset: 0 })
+      assert.equal(sessP1.length, 1)
+      assert.equal(sessP1[0]!.sessionId, 'm-sess-2')
+
+      const sessP2 = await storage.querySessions({ limit: 1, offset: 1 })
+      assert.equal(sessP2.length, 1)
+      assert.equal(sessP2[0]!.sessionId, 'm-sess-1')
 
       await storage.close()
     })
@@ -274,6 +356,7 @@ describe('Stats & Telemetry Integration Suite', () => {
         const requiredSubPaths = [
           'stats/overview',
           'stats/requests',
+          'stats/sessions',
           'stats/aggregated',
           'stats/accounts-usage',
         ]
@@ -393,6 +476,17 @@ describe('Stats & Telemetry Integration Suite', () => {
         assert.equal(statusCode, 200)
         assert.equal(responseJson.ok, true)
         assert.ok(Array.isArray(responseJson.accounts))
+
+        // Test stats/sessions endpoint
+        const sessRoute = routes.find((r) => r.path === '/plugins/agy-link/stats/sessions')!
+        sessRoute.handler({ url: '/plugins/agy-link/stats/sessions?limit=10&offset=0&accountId=acc-test' }, mockRes)
+        await new Promise((resolve) => setTimeout(resolve, 50))
+        assert.equal(statusCode, 200)
+        assert.equal(responseJson.ok, true)
+        assert.equal(responseJson.limit, 10)
+        assert.equal(responseJson.offset, 0)
+        assert.equal(typeof responseJson.total, 'number')
+        assert.ok(Array.isArray(responseJson.sessions))
       } finally {
         process.env.CLOUDCODE_ACCOUNTS_DIR = originalAccountsDir
         rmSync(tempDir, { recursive: true, force: true })
