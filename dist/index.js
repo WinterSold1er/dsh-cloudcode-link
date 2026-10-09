@@ -185,6 +185,7 @@ var AccountPoolManager = class {
 		this.data = this.load();
 		this.bootstrapDefaultAccount();
 		this.normalizeLegacyPrimary();
+		this.normalizeAccountAliases();
 	}
 	getBaseDir() {
 		return this.baseDir;
@@ -285,6 +286,14 @@ var AccountPoolManager = class {
 		this.data.primaryAccountId = primary.id;
 		this.persist();
 	}
+	normalizeAccountAliases() {
+		let changed = false;
+		for (const acc of this.data.accounts) if (acc.email && (!acc.alias || /^备用.*账号/i.test(acc.alias) || /^主账号/i.test(acc.alias))) {
+			acc.alias = acc.email;
+			changed = true;
+		}
+		if (changed) this.persist();
+	}
 	getPoolData() {
 		return this.data;
 	}
@@ -349,10 +358,9 @@ var AccountPoolManager = class {
 				} catch {}
 			}
 		} catch {}
-		const count = this.data.accounts.length + 1;
 		const newAccount = {
 			id,
-			alias: alias || `备用 Google 账号 ${count}`,
+			alias: !alias || /^备用.*账号/i.test(alias) || /^主账号/i.test(alias) ? email || id : alias,
 			dir: existsSync(finalDir) ? finalDir : dir,
 			...email ? { email } : {},
 			...proxyUrl ? { proxyUrl } : {},
@@ -425,10 +433,9 @@ var AccountPoolManager = class {
 			chmodSync(geminiDir, 448);
 			chmodSync(tokenDir, 448);
 		} catch {}
-		const count = this.data.accounts.length + 1;
 		const newAccount = {
 			id,
-			alias: alias || `备用账号 ${count} (Account ${count})`,
+			alias: alias || id,
 			dir,
 			enabled: true,
 			createdAt: Date.now(),
@@ -502,6 +509,7 @@ var AccountPoolManager = class {
 		const acc = this.getAccount(id);
 		if (!acc) return;
 		acc.email = newEmail;
+		if (!acc.alias || /^备用.*账号/i.test(acc.alias) || /^主账号/i.test(acc.alias)) acc.alias = newEmail;
 		acc.cooldowns = {};
 		acc.quotas = {};
 		delete acc.authRequired;
@@ -580,7 +588,10 @@ var AccountPoolManager = class {
 			...acc.quotas,
 			...quotas
 		};
-		if (email) acc.email = email;
+		if (email) {
+			acc.email = email;
+			if (!acc.alias || /^备用.*账号/i.test(acc.alias) || /^主账号/i.test(acc.alias)) acc.alias = email;
+		}
 		this.persist();
 	}
 	recordFailure(id, family, reason, serverResetTime) {

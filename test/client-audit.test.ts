@@ -3,28 +3,27 @@ import assert from 'node:assert/strict'
 import { readFileSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
 
-describe('Client Web UI: Telemetry Card & Audit Drawer Sessions Migration (Task-3)', () => {
+describe('Client Web UI: Telemetry Card & Audit Drawer Sessions Migration (Task-3 & Task-5)', () => {
   const clientSource = readFileSync(join(process.cwd(), 'src/client/index.ts'), 'utf8')
 
-  it('1. Main page Telemetry Card removes Token / Cache Hit and retains Requests / Latency in 200px grid', () => {
-    // Extract renderTelemetryCard block
-    const cardMatch = clientSource.match(/const renderTelemetryCard = \(\): unknown => \{([\s\S]*?)\n\t\t\};/)
-    assert.ok(cardMatch && cardMatch[1], 'renderTelemetryCard must be defined')
-    const cardBody = cardMatch[1]!
+  it('1. Main page removes Telemetry Card completely and adds Audit button in header', () => {
+    // Verify renderTelemetryCard is removed from main page view
+    assert.ok(!clientSource.includes('renderTelemetryCard'), 'Main page must not contain renderTelemetryCard')
+    assert.ok(!clientSource.includes('遥测总览 (Telemetry Metrics)'), 'Main page must not contain 遥测总览 (Telemetry Metrics)')
 
-    // Verify removed cards
-    assert.ok(!cardBody.includes('Token 汇总 (P / C / O)'), 'Main telemetry card must not contain Token 汇总')
-    assert.ok(!cardBody.includes('缓存命中率 (Cache Hit %)'), 'Main telemetry card must not contain 缓存命中率')
-
-    // Verify retained cards
-    assert.ok(cardBody.includes('请求总数'), 'Main telemetry card must contain 请求总数')
-    assert.ok(cardBody.includes('平均耗时 / TTFT'), 'Main telemetry card must contain 平均耗时 / TTFT')
-
-    // Verify grid layout
-    assert.ok(cardBody.includes("minmax(200px, 1fr)"), 'Main telemetry card grid must use minmax(200px, 1fr)')
+    // Verify header has 审计明细 button
+    assert.ok(clientSource.includes("' 审计明细'"), 'Header card must contain 审计明细 button')
+    assert.ok(clientSource.includes('setShowAuditDrawer(true)'), 'Audit button must open audit drawer')
   })
 
-  it('2. Audit Drawer contains top aggregate summary cards from statsOverview', () => {
+  it('2. Account cards display Google account email directly and add account form uses new placeholder', () => {
+    assert.ok(clientSource.includes('const isAutoAlias = !acc.alias || /^备用.*账号/i.test(acc.alias) || /^主账号/i.test(acc.alias)'), 'Must detect auto alias')
+    assert.ok(clientSource.includes('const displayName = acc.email ? (isAutoAlias ? acc.email : acc.alias) : (acc.alias || acc.id)'), 'Must prioritize Google account email')
+    assert.ok(clientSource.includes('可选别名 (留空直接使用 Google 账号名称)'), 'Add account form must have updated placeholder')
+    assert.ok(!clientSource.includes('`备用 Google 账号 ${(status?.pool?.accounts?.length ?? 1) + 1}`'), 'Must not auto-generate 备用 Google 账号 on add')
+  })
+
+  it('3. Audit Drawer contains top aggregate summary cards from statsOverview', () => {
     const drawerMatch = clientSource.match(/const renderAuditDrawer = \(\): unknown => \{([\s\S]*?)\n\t\t\};/)
     assert.ok(drawerMatch && drawerMatch[1], 'renderAuditDrawer must be defined')
     const drawerBody = drawerMatch[1]!
@@ -36,7 +35,7 @@ describe('Client Web UI: Telemetry Card & Audit Drawer Sessions Migration (Task-
     assert.ok(drawerBody.includes('平均耗时 / TTFT'), 'Audit drawer must render 平均耗时 / TTFT card')
   })
 
-  it('3. Audit Drawer supports Tab switcher between Requests and Sessions', () => {
+  it('4. Audit Drawer supports Tab switcher between Requests and Sessions', () => {
     // State definitions
     assert.ok(clientSource.includes("const [auditTab, setAuditTab] = useState<'requests' | 'sessions'>('requests')"), 'auditTab state must be defined with default requests')
     assert.ok(clientSource.includes('const [auditSessions, setAuditSessions] = useState'), 'auditSessions state must be defined')
@@ -49,7 +48,7 @@ describe('Client Web UI: Telemetry Card & Audit Drawer Sessions Migration (Task-
     assert.ok(clientSource.includes('按会话统计 (Sessions)'), 'Tab switcher must have 按会话统计 (Sessions)')
   })
 
-  it('4. fetchAuditSessions calls stats/sessions endpoint with pagination', () => {
+  it('5. fetchAuditSessions calls stats/sessions endpoint with pagination', () => {
     assert.ok(clientSource.includes('fetchAuditSessions'), 'fetchAuditSessions must be defined')
     assert.ok(
       clientSource.includes('${API_PREFIX}/stats/sessions?limit=${limit}&offset=${offset}') ||
@@ -58,7 +57,7 @@ describe('Client Web UI: Telemetry Card & Audit Drawer Sessions Migration (Task-
     )
   })
 
-  it('5. Sessions table renders expected columns, empty state, and pagination', () => {
+  it('6. Sessions table renders expected columns, empty state, and pagination', () => {
     const drawerMatch = clientSource.match(/const renderAuditDrawer = \(\): unknown => \{([\s\S]*?)\n\t\t\};/)
     assert.ok(drawerMatch && drawerMatch[1], 'renderAuditDrawer must be defined')
     const drawerBody = drawerMatch[1]!
@@ -79,7 +78,7 @@ describe('Client Web UI: Telemetry Card & Audit Drawer Sessions Migration (Task-
     assert.ok(drawerBody.includes('下一页'), 'Drawer footer must have 下一页 button')
   })
 
-  it('6. Compiled dist/client.js contains build artifacts', () => {
+  it('7. Compiled dist/client.js contains build artifacts', () => {
     const distPath = join(process.cwd(), 'dist/client.js')
     assert.ok(existsSync(distPath), 'dist/client.js must exist')
     const distContent = readFileSync(distPath, 'utf8')

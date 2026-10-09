@@ -1006,8 +1006,8 @@ export function apply(ctx: ClientContext): void {
 
 		const handleBeginAddAccount = async (): Promise<void> => {
 			setLoadingAction('pool:beginAdd');
-			const alias = aliasInput.trim() || `备用 Google 账号 ${(status?.pool?.accounts?.length ?? 1) + 1}`;
-			const res = await postJson(`${API_PREFIX}/pool/begin-add`, { alias });
+			const alias = aliasInput.trim() || undefined;
+			const res = await postJson(`${API_PREFIX}/pool/begin-add`, { ...(alias ? { alias } : {}) });
 			setLoadingAction(null);
 			if (res && res.ok) {
 				flowStartedRef.current = true;
@@ -1265,6 +1265,10 @@ export function apply(ctx: ClientContext): void {
 				...openaiModels.map((m) => ({ family: 'OpenAI', model: m })),
 			];
 
+			const isAutoAlias = !acc.alias || /^备用.*账号/i.test(acc.alias) || /^主账号/i.test(acc.alias);
+			const displayName = acc.email ? (isAutoAlias ? acc.email : acc.alias) : (acc.alias || acc.id);
+			const showEmailBadge = Boolean(acc.email && displayName !== acc.email);
+
 			return h('div', { key: acc.id, className: 'agy-card-hover', style: cardStyle },
 				h('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '8px' } },
 					h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' } },
@@ -1272,7 +1276,7 @@ export function apply(ctx: ClientContext): void {
 							className: 'agy-pulse-dot',
 							style: { background: dotColor, boxShadow: `0 0 8px ${dotColor}aa` },
 						}),
-						h('span', { style: { fontWeight: 700, fontSize: '13.5px', color: 'var(--agy-text-primary)' } }, acc.alias),
+						h('span', { style: { fontWeight: 700, fontSize: '13.5px', color: 'var(--agy-text-primary)' } }, displayName),
 						isAuthRequired ? h('span', {
 							style: {
 								...S.badgeTag,
@@ -1283,7 +1287,7 @@ export function apply(ctx: ClientContext): void {
 								fontWeight: 700,
 							},
 						}, uiIcon('alert', 11, '#ef4444'), '需重新登录') : null,
-						acc.email ? h('span', { style: { ...S.badgeTag, background: 'var(--agy-badge-email-bg)', color: 'var(--agy-badge-email-text)', borderColor: 'var(--agy-badge-email-border)', gap: '5px' }, title: maskEmail(acc.email) },
+						showEmailBadge ? h('span', { style: { ...S.badgeTag, background: 'var(--agy-badge-email-bg)', color: 'var(--agy-badge-email-text)', borderColor: 'var(--agy-badge-email-border)', gap: '5px' }, title: maskEmail(acc.email) },
 							uiIcon('mail', 11, 'var(--agy-badge-email-text)'),
 							maskEmail(acc.email),
 						) : null,
@@ -1331,7 +1335,7 @@ export function apply(ctx: ClientContext): void {
 							style: { ...S.btnDanger, padding: '3px 7px' },
 							title: '移除此账号',
 							disabled: isBusy,
-							onClick: () => void removeAccount(acc.id, acc.alias),
+							onClick: () => void removeAccount(acc.id, displayName),
 						}, loadingAction === `remove:${acc.id}` ? renderSpinner() : uiIcon('trash', 12, 'var(--agy-danger-text)')) : null,
 					),
 				),
@@ -1439,7 +1443,7 @@ export function apply(ctx: ClientContext): void {
 							h('input', {
 								style: S.input,
 								value: aliasInput,
-								placeholder: '账号别名 (例如: 备用账号 2)',
+								placeholder: '可选别名 (留空直接使用 Google 账号名称)',
 								onChange: (e: { target: { value: string } }) => setAliasInput(e.target.value),
 							}),
 							h('button', {
@@ -1501,70 +1505,6 @@ export function apply(ctx: ClientContext): void {
 					),
 			)
 			: null;
-
-		const renderTelemetryCard = (): unknown => {
-			const o = statsOverview;
-			const totalReq = o?.totalRequests ?? 0;
-			const successCount = o?.totalSuccess ?? 0;
-			const failCount = o?.totalFailed ?? 0;
-			const avgLat = o?.avgLatencyMs ?? 0;
-			const avgTtft = o?.avgTtftMs ?? 0;
-			const p90 = o?.p90LatencyMs ?? 0;
-
-			return h('div', {
-				style: {
-					background: 'linear-gradient(180deg, #181b22 0%, #12141a 100%)',
-					border: '1px solid #27272a',
-					borderRadius: '12px',
-					padding: '14px 16px',
-					marginBottom: '14px',
-					boxShadow: '0 4px 20px rgba(0, 0, 0, 0.25)',
-				},
-			},
-				h('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '12px' } },
-					h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px' } },
-						uiIcon('activity', 14, '#10b981'),
-						h('span', { style: { fontWeight: 700, fontSize: '13.5px', color: '#f4f4f5', letterSpacing: '0.2px' } }, '遥测总览 (Telemetry Metrics)'),
-					),
-					h('div', { style: { display: 'flex', gap: '8px', alignItems: 'center' } },
-						h('button', {
-							type: 'button',
-							className: 'agy-btn',
-							style: { ...S.btnSm, gap: '4px', background: '#27272a', borderColor: '#3f3f46', color: '#e4e4e7' },
-							title: '刷新遥测汇总指标',
-							disabled: statsLoading,
-							onClick: () => void fetchStatsOverview(),
-						}, statsLoading ? [renderSpinner(), ' 刷新中'] : [uiIcon('refresh', 11), ' 刷新遥测']),
-						h('button', {
-							type: 'button',
-							className: 'agy-btn',
-							style: { ...S.btnSmPrimary, gap: '4px' },
-							onClick: () => {
-								setShowAuditDrawer(true);
-								void fetchStatsOverview();
-								void fetchAuditRequests(0);
-								void fetchAuditSessions(0);
-							},
-						}, [uiIcon('activity', 11), ' 请求审计明细']),
-					),
-				),
-				h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '10px' } },
-					h('div', { style: S.statBox },
-						h('div', { style: S.statLabel }, '请求总数'),
-						h('div', { style: S.statValue }, formatNumber(totalReq)),
-						h('div', { style: S.statSub },
-							h('span', { style: { color: '#10b981', fontWeight: 600 } }, `${formatNumber(successCount)} 成功`),
-							failCount > 0 ? h('span', { style: { color: '#ef4444', marginLeft: '6px' } }, `${formatNumber(failCount)} 异常`) : null,
-						),
-					),
-					h('div', { style: S.statBox },
-						h('div', { style: S.statLabel }, '平均耗时 / TTFT'),
-						h('div', { style: S.statValue }, `${formatNumber(avgLat)} ms`),
-						h('div', { style: S.statSub }, `TTFT: ${formatNumber(avgTtft)} ms · P90: ${formatNumber(p90)} ms`),
-					),
-				),
-			);
-		};
 
 		const renderAuditDrawer = (): unknown => {
 			if (!showAuditDrawer) return null;
@@ -1957,6 +1897,18 @@ export function apply(ctx: ClientContext): void {
 					h('span', { style: isAuthed ? S.badgeReady : S.badgeUnready }, isAuthed ? '就绪' : '待认证'),
 				),
 				h('div', { style: { display: 'flex', gap: '6px', alignItems: 'center' } },
+					h('button', {
+						type: 'button',
+						className: 'agy-btn',
+						style: { ...S.btn, gap: '4px' },
+						title: '查看请求与会话审计明细及遥测指标',
+						onClick: () => {
+							setShowAuditDrawer(true);
+							void fetchStatsOverview();
+							void fetchAuditRequests(0);
+							void fetchAuditSessions(0);
+						},
+					}, [uiIcon('activity', 12, 'var(--agy-text-btn)'), ' 审计明细']),
 					!addingAccount ? h('button', {
 						type: 'button',
 						className: 'agy-btn',
@@ -1973,7 +1925,6 @@ export function apply(ctx: ClientContext): void {
 				),
 			),
 			renderToastBanner(),
-			renderTelemetryCard(),
 			addAccountSection,
 			renderedAccountCards,
 			h('div', { style: { marginTop: '16px', paddingTop: '12px', borderTop: '1px solid var(--agy-border-divider)' } },
