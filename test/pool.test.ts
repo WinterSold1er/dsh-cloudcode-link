@@ -320,6 +320,72 @@ test('deleted primary account is not recreated on subsequent loads of existing p
   assert.equal(pool3.getAccounts().some((a) => a.id === 'acc_primary'), false)
 })
 
+test('normalizeAccountAliases normalizes auto-generated aliases to email on load and update', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'agy-alias-norm-'))
+
+  // 1. Existing pool.json with legacy auto-generated aliases
+  const legacyAccounts = [
+    {
+      id: 'acc_1',
+      alias: '主账号 (系统登录)',
+      email: 'primary@gmail.com',
+      dir: '',
+      systemHome: true,
+      enabled: true,
+      createdAt: 1000,
+      cooldowns: {},
+      quotas: {},
+    },
+    {
+      id: 'acc_2',
+      alias: '备用 Google 账号 4',
+      email: 'secondary@gmail.com',
+      dir: join(dir, 'acc_2'),
+      enabled: true,
+      createdAt: 2000,
+      cooldowns: {},
+      quotas: {},
+    },
+    {
+      id: 'acc_3',
+      alias: 'My Custom Label',
+      email: 'custom@gmail.com',
+      dir: join(dir, 'acc_3'),
+      enabled: true,
+      createdAt: 3000,
+      cooldowns: {},
+      quotas: {},
+    },
+  ]
+  writeFileSync(
+    join(dir, 'pool.json'),
+    JSON.stringify({ version: 1, mode: 'sequential', accounts: legacyAccounts, primaryAccountId: 'acc_1' }),
+    'utf8',
+  )
+
+  const pool = new AccountPoolManager(dir)
+  const accounts = pool.getAccounts()
+  assert.equal(accounts[0]?.alias, 'primary@gmail.com')
+  assert.equal(accounts[1]?.alias, 'secondary@gmail.com')
+  assert.equal(accounts[2]?.alias, 'My Custom Label')
+
+  // 2. createAccountSlot defaults auto-generated alias to id
+  const slotAuto = pool.createAccountSlot('备用 Google 账号 9')
+  assert.equal(slotAuto.alias, slotAuto.id)
+
+  const slotCustom = pool.createAccountSlot('Explicit Custom Slot')
+  assert.equal(slotCustom.alias, 'Explicit Custom Slot')
+
+  // 3. commitStagingAccount defaults auto-generated alias to email or id
+  const staging = pool.createStagingSlot()
+  const committedAuto = pool.commitStagingAccount(staging.id, staging.dir, '备用 Google 账号 10', 'staged@gmail.com')
+  assert.equal(committedAuto.alias, 'staged@gmail.com')
+
+  // 4. updateAccountQuotas normalizes auto alias or id to email
+  pool.updateAccountQuotas(slotAuto.id, {}, 'slot.email@gmail.com')
+  assert.equal(pool.getAccount(slotAuto.id)?.alias, 'slot.email@gmail.com')
+})
+
 test('resetAccountIdentity clears identity-bound state on external re-login', () => {
   const dir = mkdtempSync(join(tmpdir(), 'agy-identity-reset-'))
   const pool = new AccountPoolManager(dir)

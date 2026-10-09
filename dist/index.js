@@ -282,15 +282,17 @@ var AccountPoolManager = class {
 		if (primary.systemHome) return;
 		primary.dir = "";
 		primary.systemHome = true;
-		primary.alias = "主账号 (系统登录)";
+		if (!primary.alias || /^主账号/i.test(primary.alias) || /^备用.*账号/i.test(primary.alias)) primary.alias = primary.email || "主账号 (系统登录)";
 		this.data.primaryAccountId = primary.id;
 		this.persist();
 	}
 	normalizeAccountAliases() {
 		let changed = false;
-		for (const acc of this.data.accounts) if (acc.email && (!acc.alias || /^备用.*账号/i.test(acc.alias) || /^主账号/i.test(acc.alias))) {
-			acc.alias = acc.email;
-			changed = true;
+		for (const acc of this.data.accounts) if (acc.email && (!acc.alias || /^备用.*账号/i.test(acc.alias) || /^主账号/i.test(acc.alias) || acc.alias === acc.id)) {
+			if (acc.alias !== acc.email) {
+				acc.alias = acc.email;
+				changed = true;
+			}
 		}
 		if (changed) this.persist();
 	}
@@ -435,7 +437,7 @@ var AccountPoolManager = class {
 		} catch {}
 		const newAccount = {
 			id,
-			alias: alias || id,
+			alias: !alias || /^备用.*账号/i.test(alias) || /^主账号/i.test(alias) ? id : alias,
 			dir,
 			enabled: true,
 			createdAt: Date.now(),
@@ -475,7 +477,7 @@ var AccountPoolManager = class {
 	setAccountAlias(id, alias) {
 		const acc = this.getAccount(id);
 		if (!acc) return false;
-		acc.alias = alias.trim();
+		acc.alias = alias.trim() || acc.email || acc.id;
 		this.persist();
 		return true;
 	}
@@ -509,11 +511,12 @@ var AccountPoolManager = class {
 		const acc = this.getAccount(id);
 		if (!acc) return;
 		acc.email = newEmail;
-		if (!acc.alias || /^备用.*账号/i.test(acc.alias) || /^主账号/i.test(acc.alias)) acc.alias = newEmail;
+		if (!acc.alias || /^备用.*账号/i.test(acc.alias) || /^主账号/i.test(acc.alias) || acc.alias === acc.id) acc.alias = newEmail;
 		acc.cooldowns = {};
 		acc.quotas = {};
 		delete acc.authRequired;
 		delete acc.authError;
+		this.normalizeAccountAliases();
 		this.persist();
 	}
 	clearAuthRequired(id) {
@@ -590,8 +593,9 @@ var AccountPoolManager = class {
 		};
 		if (email) {
 			acc.email = email;
-			if (!acc.alias || /^备用.*账号/i.test(acc.alias) || /^主账号/i.test(acc.alias)) acc.alias = email;
+			if (!acc.alias || /^备用.*账号/i.test(acc.alias) || /^主账号/i.test(acc.alias) || acc.alias === acc.id) acc.alias = email;
 		}
+		this.normalizeAccountAliases();
 		this.persist();
 	}
 	recordFailure(id, family, reason, serverResetTime) {
