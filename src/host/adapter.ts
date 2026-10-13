@@ -78,8 +78,17 @@ export class AgyAdapter extends LlmAdapter {
     const pool = this.deps.pool
     const quota = this.deps.quota
     if (!pool || !quota) return
-    const now = Date.now()
     const cfg = this.deps.getConfig()
+    if (cfg.sessionStartQuotaRefreshMinIntervalMs <= 0) return
+
+    // In round-robin mode, account selection strictly rotates by circular index
+    // through healthy accounts. Synchronous quota refresh would introduce
+    // unnecessary blocking latency on new session / subagent dispatch without
+    // altering the deterministic round-robin pointer.
+    const mode = typeof pool.getPoolData === 'function' ? pool.getPoolData().mode : undefined
+    if (mode === 'round-robin') return
+
+    const now = Date.now()
     const minInterval = Math.max(1_000, cfg.sessionStartQuotaRefreshMinIntervalMs)
     if (now - this.lastSessionStartQuotaRefresh < minInterval) return
     this.lastSessionStartQuotaRefresh = now

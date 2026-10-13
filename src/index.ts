@@ -159,10 +159,12 @@ export function apply(ctx: Context, entryConfig: Record<string, unknown> = {}): 
 
   ctx.on('subagent/start', (event) => {
     const id = event?.id ?? event?.session?.id
+    log(`[subagent] start event: ${id ?? 'anonymous'}`)
     heartbeat.onSubagentStart(id)
   })
   ctx.on('subagent/end', (event) => {
     const id = event?.id ?? event?.session?.id
+    log(`[subagent] end event: ${id ?? 'anonymous'}`)
     heartbeat.onSubagentEnd(id)
   })
   ctx.effect(() => () => heartbeat.dispose())

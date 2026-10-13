@@ -355,7 +355,7 @@ describe('QA End-to-End (E2E) Comprehensive Verification Suite', () => {
   // Section 3: Quota-Aware Scheduling & Family Cooldown E2E
   // =========================================================================
   describe('3. Quota-Aware Scheduling & Family Cooldown E2E', () => {
-    it('3.1: Quota-Aware Selection (highest 5H remaining fraction first in round-robin mode)', () => {
+    it('3.1: True Round-Robin Selection rotates in circular order through healthy accounts', () => {
       const poolDir = mkdtempSync(join(tmpdir(), 'dsh-e2e-pool-1-'))
       try {
         const pool = new AccountPoolManager(poolDir, 0.05)
@@ -365,7 +365,7 @@ describe('QA End-to-End (E2E) Comprehensive Verification Suite', () => {
         const accB = pool.createAccountSlot('account-B')
         const accC = pool.createAccountSlot('account-C')
 
-        // Set quotas across all accounts in pool: Primary=0.20, AccB=0.85, AccC=0.50
+        // Set different non-exhausted quotas across accounts: Primary=0.20, AccB=0.85, AccC=0.50
         pool.updateAccountQuotas(accPrimary.id, {
           google: { remainingFraction: 0.20, resetTime: new Date(Date.now() + 3600000).toISOString() },
         })
@@ -376,27 +376,25 @@ describe('QA End-to-End (E2E) Comprehensive Verification Suite', () => {
           google: { remainingFraction: 0.50, resetTime: new Date(Date.now() + 3600000).toISOString() },
         })
 
-        // Round-robin selection must pick AccB (highest: 0.85 remaining)
+        // True round-robin rotates strictly in circular order: accPrimary -> accB -> accC -> accPrimary
         const selected1 = pool.selectAccount('google')
-        assert.equal(selected1?.id, accB.id)
+        assert.equal(selected1?.id, accPrimary.id)
 
-        // When AccB quota drops to 0.10, next selection chooses AccC (0.50 remaining)
-        pool.updateAccountQuotas(accB.id, {
-          google: { remainingFraction: 0.10, resetTime: new Date(Date.now() + 3600000).toISOString() },
-        })
         const selected2 = pool.selectAccount('google')
-        assert.equal(selected2?.id, accC.id)
+        assert.equal(selected2?.id, accB.id)
 
-        // Equal quota rotation (all accounts have identical remaining quota, e.g. 100%)
-        pool.updateAccountQuotas(accPrimary.id, { google: { remainingFraction: 1.0 } })
-        pool.updateAccountQuotas(accB.id, { google: { remainingFraction: 1.0 } })
-        pool.updateAccountQuotas(accC.id, { google: { remainingFraction: 1.0 } })
+        const selected3 = pool.selectAccount('google')
+        assert.equal(selected3?.id, accC.id)
 
-        // Currently activeId was accC, so next in circular order must be accPrimary -> accB -> accC -> accPrimary
-        assert.equal(pool.selectAccount('google')?.id, accPrimary.id)
-        assert.equal(pool.selectAccount('google')?.id, accB.id)
-        assert.equal(pool.selectAccount('google')?.id, accC.id)
-        assert.equal(pool.selectAccount('google')?.id, accPrimary.id)
+        const selected4 = pool.selectAccount('google')
+        assert.equal(selected4?.id, accPrimary.id)
+
+        // When AccB enters cooldown, it is skipped in round-robin: accC -> accPrimary
+        pool.recordFailure(accB.id, 'google', 'rate limit 429')
+        const selectedAfterCooldown1 = pool.selectAccount('google')
+        assert.equal(selectedAfterCooldown1?.id, accC.id)
+        const selectedAfterCooldown2 = pool.selectAccount('google')
+        assert.equal(selectedAfterCooldown2?.id, accPrimary.id)
       } finally {
         rmSync(poolDir, { recursive: true, force: true })
       }

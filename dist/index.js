@@ -647,14 +647,14 @@ var AccountPoolManager = class {
 		if (quota && typeof quota.remainingFraction === "number" && quota.remainingFraction <= threshold) {
 			if (quota.resetTime) {
 				const resetMs = Date.parse(quota.resetTime);
-				if (!Number.isNaN(resetMs) && resetMs > now) return false;
-			}
+				if (!Number.isNaN(resetMs) && resetMs <= now) {} else return false;
+			} else return false;
 		}
 		if (quota && typeof quota.weeklyFraction === "number" && quota.weeklyFraction <= .01) {
 			if (quota.weeklyResetTime) {
 				const resetMs = Date.parse(quota.weeklyResetTime);
-				if (!Number.isNaN(resetMs) && resetMs > now) return false;
-			}
+				if (!Number.isNaN(resetMs) && resetMs <= now) {} else return false;
+			} else return false;
 		}
 		return true;
 	}
@@ -666,18 +666,23 @@ var AccountPoolManager = class {
 			this.runtimeActiveAccountIds.set(family, pinned.id);
 			return pinned;
 		}
-		if (this.data.mode === "round-robin" && candidates.length > 1) {
+		if (this.data.mode === "round-robin") {
+			if (candidates.length === 1) {
+				const chosen = candidates[0];
+				this.runtimeActiveAccountIds.set(family, chosen.id);
+				return chosen;
+			}
 			const activeId = this.runtimeActiveAccountIds.get(family) ?? this.data.activeAccountIds?.[family];
 			const lastIndex = activeId ? this.data.accounts.findIndex((a) => a.id === activeId) : -1;
 			const total = this.data.accounts.length;
-			const chosen = candidates.slice().sort((a, b) => {
-				const aFrac = a.quotas[family]?.remainingFraction ?? 1;
-				const bFrac = b.quotas[family]?.remainingFraction ?? 1;
-				if (Math.abs(bFrac - aFrac) >= .001) return bFrac - aFrac;
-				const aIndex = this.data.accounts.indexOf(a);
-				const bIndex = this.data.accounts.indexOf(b);
-				return (lastIndex !== -1 ? (aIndex - lastIndex - 1 + total) % total : aIndex) - (lastIndex !== -1 ? (bIndex - lastIndex - 1 + total) % total : bIndex);
-			})[0];
+			let chosen = candidates[0];
+			if (lastIndex !== -1) for (let i = 1; i <= total; i++) {
+				const checkAcc = this.data.accounts[(lastIndex + i) % total];
+				if (candidates.some((c) => c.id === checkAcc.id)) {
+					chosen = checkAcc;
+					break;
+				}
+			}
 			this.runtimeActiveAccountIds.set(family, chosen.id);
 			return chosen;
 		}
@@ -26853,8 +26858,10 @@ var AgyAdapter = class extends LlmAdapter {
 		const pool = this.deps.pool;
 		const quota = this.deps.quota;
 		if (!pool || !quota) return;
-		const now = Date.now();
 		const cfg = this.deps.getConfig();
+		if (cfg.sessionStartQuotaRefreshMinIntervalMs <= 0) return;
+		if ((typeof pool.getPoolData === "function" ? pool.getPoolData().mode : void 0) === "round-robin") return;
+		const now = Date.now();
 		const minInterval = Math.max(1e3, cfg.sessionStartQuotaRefreshMinIntervalMs);
 		if (now - this.lastSessionStartQuotaRefresh < minInterval) return;
 		this.lastSessionStartQuotaRefresh = now;
@@ -30052,10 +30059,12 @@ function apply(ctx, entryConfig = {}) {
 	const semaphore = new Semaphore(() => getConfig().maxConcurrent);
 	ctx.on("subagent/start", (event) => {
 		const id = event?.id ?? event?.session?.id;
+		log(`[subagent] start event: ${id ?? "anonymous"}`);
 		heartbeat.onSubagentStart(id);
 	});
 	ctx.on("subagent/end", (event) => {
 		const id = event?.id ?? event?.session?.id;
+		log(`[subagent] end event: ${id ?? "anonymous"}`);
 		heartbeat.onSubagentEnd(id);
 	});
 	ctx.effect(() => () => heartbeat.dispose());
