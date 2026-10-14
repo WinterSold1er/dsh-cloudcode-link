@@ -85,7 +85,7 @@ export class AuthHelper {
     if (st.phase !== 'idle') return st
     const signedIn = await this.probeSignedIn()
     if (signedIn === true) return { phase: 'ok', message: 'signed in' }
-    if (signedIn === false) return { phase: 'signed-out', message: 'not signed in — run /agy auth or add account' }
+    if (signedIn === false) return { phase: 'signed-out', message: 'not signed in — run /ccl auth or add account' }
     return st
   }
 

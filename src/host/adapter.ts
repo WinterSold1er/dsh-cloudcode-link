@@ -42,7 +42,7 @@ export interface AgyAdapterDeps {
   /** Shared semaphore for cross-session concurrency. */
   acquire?: () => Promise<() => void>
   log?: (msg: string) => void
-  /** Last-run telemetry surfaced by /agy status. */
+  /** Last-run telemetry surfaced by /ccl status. */
   onRun?: (info: { ok: boolean; code: string; durationMs: number; model: string }) => void
   /** Reads image bytes from DSH attachment storage. */
   readImage?: ImageReader
@@ -294,7 +294,7 @@ export class AgyAdapter extends LlmAdapter {
             reason: {
               kind: 'error',
               failure: {
-                message: 'No authenticated Antigravity account available. Please sign in via /agy auth.',
+                message: 'No authenticated Antigravity account available. Please sign in via /ccl auth.',
                 code: 'AUTH_REQUIRED',
               },
             },
@@ -376,7 +376,7 @@ export class AgyAdapter extends LlmAdapter {
               reason: {
                 kind: 'error',
                 failure: {
-                  message: 'No authenticated Antigravity account available. Please sign in via /agy auth.',
+                  message: 'No authenticated Antigravity account available. Please sign in via /ccl auth.',
                   code: 'AUTH_REQUIRED',
                 },
               },

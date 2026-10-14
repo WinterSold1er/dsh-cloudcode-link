@@ -1,4 +1,4 @@
-// /agy command family: status, accounts, quota, login, models, diagnostics
+// /ccl command family: status, accounts, quota, login, models, diagnostics
 import type { CommandDefinition, CommandResult } from '@deepseek-ai/dsh-commands'
 import type { PluginConfig } from '../common/types.ts'
 import type { AuthHelper } from './auth.ts'
@@ -22,28 +22,31 @@ export interface CommandDeps {
 }
 
 const HELP = [
-  '**/agy** — Antigravity (Google CloudCode direct) bridge',
-  '- `/agy status` — direct connection, auth, catalog, accounts',
-  '- `/agy pool` / `/agy accounts` — account pool, live quota %, cooldowns',
-  '- `/agy add-account [alias]` — start OAuth login for a new account slot',
-  '- `/agy refresh-quota` — query Google backend for fresh quota %',
-  '- `/agy clear-cooldown` — reset cooldown timers across all accounts',
-  '- `/agy remove-account <id>` — delete an account slot',
-  '- `/agy auth` — Google login for the primary account (opens the browser)',
-  '- `/agy auth-code <code>` — finish login by pasting the code (fallback)',
-  '- `/agy models` — refresh and list discovered models',
-  '- `/agy effort <low|medium|high|default>` — default reasoning effort',
-  '- `/agy doctor` — write a diagnostic report and return its path',
-  '- `/agy help` — this text',
+  '**/ccl** — CloudCode Link bridge',
+  '- `/ccl status` — direct connection, auth, catalog, accounts',
+  '- `/ccl pool` / `/ccl accounts` — account pool, live quota %, cooldowns',
+  '- `/ccl add-account [alias]` — start OAuth login for a new account slot',
+  '- `/ccl refresh-quota` — query Google backend for fresh quota %',
+  '- `/ccl clear-cooldown` — reset cooldown timers across all accounts',
+  '- `/ccl remove-account <id>` — delete an account slot',
+  '- `/ccl auth` — Google login for the primary account (opens the browser)',
+  '- `/ccl auth-code <code>` — finish login by pasting the code (fallback)',
+  '- `/ccl models` — refresh and list discovered models',
+  '- `/ccl effort <low|medium|high|default>` — default reasoning effort',
+  '- `/ccl doctor` — write a diagnostic report and return its path',
+  '- `/ccl help` — this text',
 ].join('\n')
 
-export function agyCommandDefinition(deps: CommandDeps): CommandDefinition {
+export function cclCommandDefinition(deps: CommandDeps, name = 'ccl'): CommandDefinition {
   return {
-    name: 'agy',
-    description: 'Antigravity bridge: status, login, models, diagnostics',
+    name,
+    description: 'CloudCode Link bridge: status, login, models, diagnostics',
     handler: (invocation) => handle(deps, invocation.rawInput),
   }
 }
+
+/** Legacy alias for backward compatibility */
+export const agyCommandDefinition = cclCommandDefinition
 
 async function handle(deps: CommandDeps, raw: string): Promise<CommandResult> {
   const parts = raw.trim().split(/\s+/).filter(Boolean)
@@ -95,7 +98,7 @@ async function handle(deps: CommandDeps, raw: string): Promise<CommandResult> {
           '',
           st.url,
           '',
-          `备用：授权完成后运行 \`/agy auth-code <授权码或完整回调URL>\`。`,
+          `备用：授权完成后运行 \`/ccl auth-code <授权码或完整回调URL>\`。`,
         ].join('\n'))
       }
       return err(st.message ?? 'failed to create account slot')
@@ -113,7 +116,7 @@ async function handle(deps: CommandDeps, raw: string): Promise<CommandResult> {
       return ok('Cleared cooldown timers.')
     }
     if (sub === 'remove-account') {
-      if (!arg) return err('usage: /agy remove-account <id>')
+      if (!arg) return err('usage: /ccl remove-account <id>')
       const pool = deps.pool?.()
       if (!pool) return err('Account pool not available')
       const success = pool.deleteAccount(arg)
@@ -132,13 +135,13 @@ async function handle(deps: CommandDeps, raw: string): Promise<CommandResult> {
           '',
           st.url,
           '',
-          '备用：授权完成后运行 `/agy auth-code <授权码或完整回调URL>`。',
+          '备用：授权完成后运行 `/ccl auth-code <授权码或完整回调URL>`。',
         ].join('\n'))
       }
       return err(st.message ?? 'failed to start the login flow')
     }
     if (sub === 'auth-code') {
-      if (arg === '') return err('usage: /agy auth-code <code-or-callback-url>')
+      if (arg === '') return err('usage: /ccl auth-code <code-or-callback-url>')
       const flow = deps.poolAuth?.()
       if (!flow) return err('auth flow not available')
       const st = await flow.submitCode(arg)
@@ -160,7 +163,7 @@ async function handle(deps: CommandDeps, raw: string): Promise<CommandResult> {
     }
     if (sub === 'effort') {
       if (!['low', 'medium', 'high', 'default'].includes(arg)) {
-        return err('usage: /agy effort <low|medium|high|default>')
+        return err('usage: /ccl effort <low|medium|high|default>')
       }
       deps.setOverride('defaultEffort', arg === 'default' ? '' : arg)
       return ok('Default effort set to **' + (arg === 'default' ? 'model default' : arg) + '**.')

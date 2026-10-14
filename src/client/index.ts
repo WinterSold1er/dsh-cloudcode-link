@@ -1089,13 +1089,6 @@ export function apply(ctx: ClientContext): void {
 			showToast('代理已保存', 'success');
 		};
 
-		const setMode = async (mode: string): Promise<void> => {
-			setLoadingAction(`mode:${mode}`);
-			await postJson(`${API_PREFIX}/pool/mode`, { mode });
-			await refresh();
-			setLoadingAction(null);
-		};
-
 		const clearCooldown = async (id?: string): Promise<void> => {
 			setLoadingAction(id ? `clearCooldown:${id}` : 'clearCooldown:all');
 			await postJson(`${API_PREFIX}/pool/clear-cooldown`, { id });
@@ -1927,70 +1920,6 @@ export function apply(ctx: ClientContext): void {
 			renderToastBanner(),
 			addAccountSection,
 			renderedAccountCards,
-			h('div', { style: { marginTop: '16px', paddingTop: '12px', borderTop: '1px solid var(--agy-border-divider)' } },
-				h('div', { style: { display: 'flex', flexDirection: 'column', gap: '10px' } },
-					h('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between' } },
-						h('span', { style: { color: 'var(--agy-text-primary)', fontWeight: 600, fontSize: '12.5px' } }, '权限模式:'),
-						h('div', { style: S.segGroup },
-							h('button', {
-								type: 'button',
-								style: status?.permissionMode === 'plan' ? S.segBtnActive : S.segBtn,
-								onClick: () => void setCfg('permissionMode', 'plan'),
-							}, 'plan (只读)'),
-							h('button', {
-								type: 'button',
-								style: status?.permissionMode === 'accept-edits' ? S.segBtnActive : S.segBtn,
-								onClick: () => void setCfg('permissionMode', 'accept-edits'),
-							}, 'accept-edits (改代码)'),
-							h('button', {
-								type: 'button',
-								style: status?.permissionMode === 'skip' ? { ...S.segBtnActive, color: 'var(--agy-seg-danger-text)', background: 'var(--agy-seg-danger-bg)', border: '1px solid var(--agy-seg-danger-border)' } : S.segBtn,
-								onClick: () => void setCfg('permissionMode', 'skip'),
-							}, 'skip (全自动免确认)'),
-						),
-					),
-					h('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between' } },
-						h('span', { style: { color: 'var(--agy-text-primary)', fontWeight: 600, fontSize: '12.5px' } }, '思考强度:'),
-						h('div', { style: S.segGroup },
-							h('button', {
-								type: 'button',
-								style: status?.defaultEffort === '' ? S.segBtnActive : S.segBtn,
-								onClick: () => void setCfg('defaultEffort', ''),
-							}, 'auto'),
-							h('button', {
-								type: 'button',
-								style: status?.defaultEffort === 'low' ? S.segBtnActive : S.segBtn,
-								onClick: () => void setCfg('defaultEffort', 'low'),
-							}, 'low'),
-							h('button', {
-								type: 'button',
-								style: status?.defaultEffort === 'medium' ? S.segBtnActive : S.segBtn,
-								onClick: () => void setCfg('defaultEffort', 'medium'),
-							}, 'medium'),
-							h('button', {
-								type: 'button',
-								style: status?.defaultEffort === 'high' ? S.segBtnActive : S.segBtn,
-								onClick: () => void setCfg('defaultEffort', 'high'),
-							}, 'high'),
-						),
-					),
-					h('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between' } },
-						h('span', { style: { color: 'var(--agy-text-primary)', fontWeight: 600, fontSize: '12.5px' } }, '号池调度:'),
-						h('div', { style: S.segGroup },
-							h('button', {
-								type: 'button',
-								style: pool?.mode === 'sequential' || !pool?.mode ? S.segBtnActive : S.segBtn,
-								onClick: () => void setMode('sequential'),
-							}, '顺次耗尽'),
-							h('button', {
-								type: 'button',
-								style: pool?.mode === 'round-robin' ? S.segBtnActive : S.segBtn,
-								onClick: () => void setMode('round-robin'),
-							}, '轮询均衡'),
-						),
-					),
-				),
-			),
 			renderAuditDrawer(),
 		);
 	};

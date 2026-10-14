@@ -1,4 +1,4 @@
-// /agy doctor: writes a diagnostic report with the
+// /ccl doctor: writes a diagnostic report with the
 // CloudCode direct connection status, catalog state, config snapshot, and pool accounts.
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'

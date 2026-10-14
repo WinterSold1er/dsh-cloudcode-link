@@ -1,5 +1,5 @@
 // Config resolution: env (DSH_AGY_*) > runtime overrides file > cordis
-// entry config > defaults. The overrides file backs /agy hot changes
+// entry config > defaults. The overrides file backs /ccl hot changes
 // and survives restarts; the env is read per call so a changed
 // process environment is honored without reload.
 import { defaultConfig, type PermissionMode, type PluginConfig } from './types.ts'

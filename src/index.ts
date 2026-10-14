@@ -1,5 +1,5 @@
 // dsh-cloudcode-link host assembly: Direct Google CloudCode API integration,
-// LlmAdapter registration, /agy commands, agy_ask tool, auth helper, and
+// LlmAdapter registration, /ccl commands, agy_ask tool, auth helper, and
 // the /plugins/cloudcode-link/* HTTP surface. Everything registers as cordis effects,
 // so uninstalling the plugin rolls it back cleanly.
 import type { Context } from '@deepseek-ai/cordis'
@@ -10,7 +10,7 @@ import { PROVIDER_ID, type PluginConfig } from './common/types.ts'
 import { AgyAdapter } from './host/adapter.ts'
 import { defineAgyAskTool } from './host/ask-tool.ts'
 import { AuthHelper } from './host/auth.ts'
-import { agyCommandDefinition } from './host/commands.ts'
+import { cclCommandDefinition } from './host/commands.ts'
 import { writeDoctorReport } from './host/diagnostics.ts'
 import { ModelCatalog } from './host/models.ts'
 import { AccountPoolManager } from './host/pool.ts'
@@ -247,27 +247,27 @@ export function apply(ctx: Context, entryConfig: Record<string, unknown> = {}): 
     }
   }
 
-  // ---- /agy command ----
-  ctx.commands.register(
-    agyCommandDefinition({
-      cfg: getConfig,
-      auth: () => auth,
-      catalog: () => catalog,
-      store: () => sessionStore,
-      pool: () => pool,
-      poolAuth: () => poolAuth,
-      quota: () => quota,
-      lastRun: () => lastRun,
-      setOverride,
-      runDoctor: async () => {
-        return writeDoctorReport({
-          cfg: getConfig,
-          catalog: () => catalog,
-          pool: () => pool,
-        })
-      },
-    }),
-  )
+  // ---- /ccl (and /cloudcode alias) command ----
+  const cmdDeps = {
+    cfg: getConfig,
+    auth: () => auth,
+    catalog: () => catalog,
+    store: () => sessionStore,
+    pool: () => pool,
+    poolAuth: () => poolAuth,
+    quota: () => quota,
+    lastRun: () => lastRun,
+    setOverride,
+    runDoctor: async () => {
+      return writeDoctorReport({
+        cfg: getConfig,
+        catalog: () => catalog,
+        pool: () => pool,
+      })
+    },
+  }
+  ctx.commands.register(cclCommandDefinition(cmdDeps, 'ccl'))
+  ctx.commands.register(cclCommandDefinition(cmdDeps, 'cloudcode'))
 
   // ---- tool registration (agy_ask) ----
   const toolsSvcRef: { current: { register: (t: unknown) => unknown } | null } = { current: null }
