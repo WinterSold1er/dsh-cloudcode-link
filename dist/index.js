@@ -91,6 +91,26 @@ const DEFAULT_FALLBACK_MODELS$1 = [
 		inputModalities: ["text", "image"]
 	},
 	{
+		id: "gemini-3-flash",
+		name: "Gemini 3 Flash",
+		inputModalities: ["text", "image"]
+	},
+	{
+		id: "gemini-2.5-pro",
+		name: "Gemini 2.5 Pro",
+		inputModalities: ["text", "image"]
+	},
+	{
+		id: "gemini-2.5-flash",
+		name: "Gemini 2.5 Flash",
+		inputModalities: ["text", "image"]
+	},
+	{
+		id: "gemini-3.1-flash-lite",
+		name: "Gemini 3.1 Flash Lite",
+		inputModalities: ["text", "image"]
+	},
+	{
 		id: "claude-sonnet-4-6",
 		name: "Claude Sonnet 4.6 (Thinking)",
 		inputModalities: ["text", "image"]
@@ -773,9 +793,9 @@ var AccountPoolManager = class {
 //#region src/common/types.ts
 const PROVIDER_ID = "antigravity";
 const DEFAULT_ENDPOINT_CANDIDATES = [
+	"https://cloudcode-pa.googleapis.com",
 	"https://daily-cloudcode-pa.googleapis.com",
-	"https://daily-cloudcode-pa.sandbox.googleapis.com",
-	"https://cloudcode-pa.googleapis.com"
+	"https://daily-cloudcode-pa.sandbox.googleapis.com"
 ];
 const DEFAULT_FALLBACK_MODELS = [
 	{
@@ -822,6 +842,26 @@ const DEFAULT_FALLBACK_MODELS = [
 		id: "gemini-3.1-pro",
 		name: "Gemini 3.1 Pro",
 		efforts: ["low", "high"],
+		inputModalities: ["text", "image"]
+	},
+	{
+		id: "gemini-3-flash",
+		name: "Gemini 3 Flash",
+		inputModalities: ["text", "image"]
+	},
+	{
+		id: "gemini-2.5-pro",
+		name: "Gemini 2.5 Pro",
+		inputModalities: ["text", "image"]
+	},
+	{
+		id: "gemini-2.5-flash",
+		name: "Gemini 2.5 Flash",
+		inputModalities: ["text", "image"]
+	},
+	{
+		id: "gemini-3.1-flash-lite",
+		name: "Gemini 3.1 Flash Lite",
 		inputModalities: ["text", "image"]
 	},
 	{
@@ -1565,6 +1605,13 @@ const RUNTIME_MAX_OUTPUT_TOKENS = {
 	"gemini-3.1-pro-low": 65535,
 	"gemini-3.1-pro-high": 65535,
 	"gemini-pro-agent": 65535,
+	"gemini-3-flash": 65536,
+	"gemini-2.5-pro": 65535,
+	"gemini-2.5-flash": 65536,
+	"gemini-2.5-flash-lite": 65536,
+	"gemini-2.5-flash-thinking": 65536,
+	"gemini-3.1-flash-lite": 65536,
+	"gemini-3.1-flash-image": 65536,
 	"claude-opus-4-6": 64e3,
 	"claude-opus-4-6-thinking": 64e3,
 	"claude-sonnet-4-6": 64e3,
@@ -25601,9 +25648,9 @@ function require$$basename(p) {
 	return i >= 0 ? p.slice(i + 1) : p;
 }
 const ENDPOINT_FALLBACKS = [
+	"https://cloudcode-pa.googleapis.com",
 	"https://daily-cloudcode-pa.googleapis.com",
-	"https://daily-cloudcode-pa.sandbox.googleapis.com",
-	"https://cloudcode-pa.googleapis.com"
+	"https://daily-cloudcode-pa.sandbox.googleapis.com"
 ];
 const PROJECT_CACHE_TTL_MS = 18e5;
 const projectCache = /* @__PURE__ */ new Map();
@@ -25867,7 +25914,7 @@ async function streamGenerateContent(token, request, signal, proxyUrl, customEnd
 	}
 	if (lastResponse) return {
 		response: lastResponse,
-		endpoint: endpoints[0] || "https://daily-cloudcode-pa.googleapis.com"
+		endpoint: endpoints[0] || "https://cloudcode-pa.googleapis.com"
 	};
 	throw lastError || /* @__PURE__ */ new Error("All Google CloudCode endpoints failed to connect");
 }
@@ -27732,8 +27779,8 @@ const OAUTH_USERINFO_URL = "https://www.googleapis.com/oauth2/v1/userinfo";
 const OAUTH_CALLBACK_PORT = 51121;
 const OAUTH_REDIRECT_URI = `http://localhost:${OAUTH_CALLBACK_PORT}/oauth-callback`;
 const AGY_ENDPOINTS = [
-	"https://daily-cloudcode-pa.googleapis.com",
 	"https://cloudcode-pa.googleapis.com",
+	"https://daily-cloudcode-pa.googleapis.com",
 	"https://daily-cloudcode-pa.sandbox.googleapis.com",
 	"https://autopush-cloudcode-pa.sandbox.googleapis.com"
 ];
@@ -28152,8 +28199,13 @@ var PoolAuthFlow = class {
 //#endregion
 //#region packages/core/src/quota.ts
 function mergeFallbackFamilyQuota(prev, fallback) {
-	if (prev && typeof prev.remainingFraction === "number") return prev;
-	return fallback;
+	if (!prev) return fallback;
+	return {
+		...prev,
+		remainingFraction: fallback.remainingFraction ?? prev.remainingFraction,
+		resetTime: fallback.resetTime ?? prev.resetTime,
+		updatedAt: fallback.updatedAt ?? Date.now()
+	};
 }
 function detectEmailFromAgyLogs(homeDir) {
 	const logDir = join(homeDir, ".gemini", "antigravity-cli", "log");
@@ -28431,8 +28483,14 @@ var QuotaService = class {
 		if (email && email !== account.email) this.pool.resetAccountIdentity(account.id, email);
 		let summary = null;
 		let discovered = null;
-		if (options?.summaryOnly) summary = await this.fetchQuotaSummary(accessToken, account.proxyUrl);
-		else {
+		if (options?.summaryOnly) {
+			summary = await this.fetchQuotaSummary(accessToken, account.proxyUrl);
+			if (!summary?.groups?.some((g) => {
+				const dName = (g.displayName || "").toLowerCase();
+				const desc = (g.description || "").toLowerCase();
+				return dName.includes("gemini") || desc.includes("gemini");
+			})) discovered = await this.fetchAvailableModels(accessToken, account.proxyUrl);
+		} else {
 			const [sum, disc] = await Promise.all([this.fetchQuotaSummary(accessToken, account.proxyUrl), this.fetchAvailableModels(accessToken, account.proxyUrl)]);
 			summary = sum;
 			discovered = disc;
@@ -28444,6 +28502,7 @@ var QuotaService = class {
 		if (!summary && (!discovered || !discovered.models)) return null;
 		if (account.authRequired) this.pool.clearAuthRequired(account.id);
 		const familyQuotas = {};
+		const summaryFamilies = /* @__PURE__ */ new Set();
 		if (summary && Array.isArray(summary.groups)) for (const group of summary.groups) {
 			const dName = (group.displayName || "").toLowerCase();
 			const desc = (group.description || "").toLowerCase();
@@ -28464,14 +28523,17 @@ var QuotaService = class {
 					weeklyReset = b.resetTime;
 				}
 			}
-			for (const fam of targetFamilies) familyQuotas[fam] = {
-				remainingFraction: fiveHourFrac,
-				resetTime: fiveHourReset,
-				weeklyFraction: weeklyFrac,
-				weeklyResetTime: weeklyReset,
-				description: group.description,
-				updatedAt: now
-			};
+			for (const fam of targetFamilies) {
+				summaryFamilies.add(fam);
+				familyQuotas[fam] = {
+					remainingFraction: fiveHourFrac,
+					resetTime: fiveHourReset,
+					weeklyFraction: weeklyFrac,
+					weeklyResetTime: weeklyReset,
+					description: group.description,
+					updatedAt: now
+				};
+			}
 		}
 		const familyModels = {};
 		if (discovered && discovered.models) for (const [modelId, entry] of Object.entries(discovered.models)) {
@@ -28492,7 +28554,7 @@ var QuotaService = class {
 				resetTime,
 				updatedAt: now
 			});
-			else if (familyQuotas[fam].remainingFraction === void 0) {
+			else if (!summaryFamilies.has(fam) || familyQuotas[fam].remainingFraction === void 0) {
 				const curRemaining = familyQuotas[fam].remainingFraction ?? 1;
 				if (remaining < curRemaining) {
 					familyQuotas[fam].remainingFraction = remaining;

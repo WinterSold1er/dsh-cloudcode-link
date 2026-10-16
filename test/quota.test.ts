@@ -380,29 +380,39 @@ test('shouldPollAccount skips restricted accounts in background polling', () => 
   assert.equal(shouldPollAccount(pool.getAccount(cooling.id)!), true)
 })
 
-test('mergeFallbackFamilyQuota keeps last-known-good data over partial fallback', () => {
+test('mergeFallbackFamilyQuota preserves weekly quota while updating 5h fraction and resetTime', () => {
   // Real incident shape: complete entry (5h + weekly) existed, then the
-  // summary endpoint blipped and per-model fallback arrived carrying a
-  // single window (fraction 1, weekly-window reset a week out, no weekly).
-  const good: import('../src/common/pool-types.ts').FamilyQuotaInfo = {
+  // summary endpoint blipped or lacked 1st-party models, and per-model fallback arrived carrying
+  // updated 5h window (fraction, reset time, updated timestamp, no weekly).
+  const prev: import('../src/common/pool-types.ts').FamilyQuotaInfo = {
     remainingFraction: 0.84,
     resetTime: '2026-08-25T14:01:28Z',
     weeklyFraction: 0.47,
     weeklyResetTime: '2026-08-27T08:13:04Z',
+    description: 'Models within this group: Gemini Flash, Gemini Pro',
     updatedAt: 1_000,
   }
-  const partial = {
-    remainingFraction: 1,
+  const fallback = {
+    remainingFraction: 0.96,
     resetTime: '2026-09-01T09:53:06Z',
     updatedAt: 2_000,
   }
-  // Complete previous data wins — never clobbered by the partial shape.
-  assert.equal(mergeFallbackFamilyQuota(good, partial), good)
-  assert.equal(mergeFallbackFamilyQuota(good, partial).weeklyFraction, 0.47)
-  // No previous data (first-ever refresh) → fallback fills in.
-  assert.equal(mergeFallbackFamilyQuota(undefined, partial), partial)
-  // Degenerate previous entry without a fraction → fallback fills in.
-  assert.equal(mergeFallbackFamilyQuota({ weeklyFraction: 0.5 }, partial), partial)
+  const merged = mergeFallbackFamilyQuota(prev, fallback)
+  // Preserves weekly quota and description from prev
+  assert.equal(merged.weeklyFraction, 0.47)
+  assert.equal(merged.weeklyResetTime, '2026-08-27T08:13:04Z')
+  assert.equal(merged.description, 'Models within this group: Gemini Flash, Gemini Pro')
+  // Updates 5h remaining fraction, resetTime, and updatedAt from fallback
+  assert.equal(merged.remainingFraction, 0.96)
+  assert.equal(merged.resetTime, '2026-09-01T09:53:06Z')
+  assert.equal(merged.updatedAt, 2_000)
+  // No previous data (first-ever refresh) -> fallback fills in directly
+  assert.equal(mergeFallbackFamilyQuota(undefined, fallback), fallback)
+  // Degenerate previous entry without a fraction -> fallback fills in
+  const mergedDegen = mergeFallbackFamilyQuota({ weeklyFraction: 0.5 }, fallback)
+  assert.equal(mergedDegen.weeklyFraction, 0.5)
+  assert.equal(mergedDegen.remainingFraction, 0.96)
+  assert.equal(mergedDegen.resetTime, '2026-09-01T09:53:06Z')
 })
 
 test('QuotaService discoverAvailableModels retrieves models using active candidate account or env token', async () => {

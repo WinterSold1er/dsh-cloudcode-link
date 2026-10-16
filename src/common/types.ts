@@ -103,9 +103,9 @@ export interface PluginConfig {
 }
 
 export const DEFAULT_ENDPOINT_CANDIDATES: readonly string[] = [
+  'https://cloudcode-pa.googleapis.com',
   'https://daily-cloudcode-pa.googleapis.com',
   'https://daily-cloudcode-pa.sandbox.googleapis.com',
-  'https://cloudcode-pa.googleapis.com',
 ]
 
 // Full fallback line-up
@@ -115,6 +115,10 @@ export const DEFAULT_FALLBACK_MODELS: readonly FallbackModelDef[] = [
   { id: 'gemini-3.6-flash', name: 'Gemini 3.6 Flash', efforts: ['low', 'medium', 'high'], inputModalities: ['text', 'image'] },
   { id: 'gemini-3.5-flash', name: 'Gemini 3.5 Flash', efforts: ['low', 'medium', 'high'], inputModalities: ['text', 'image'] },
   { id: 'gemini-3.1-pro', name: 'Gemini 3.1 Pro', efforts: ['low', 'high'], inputModalities: ['text', 'image'] },
+  { id: 'gemini-3-flash', name: 'Gemini 3 Flash', inputModalities: ['text', 'image'] },
+  { id: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro', inputModalities: ['text', 'image'] },
+  { id: 'gemini-2.5-flash', name: 'Gemini 2.5 Flash', inputModalities: ['text', 'image'] },
+  { id: 'gemini-3.1-flash-lite', name: 'Gemini 3.1 Flash Lite', inputModalities: ['text', 'image'] },
   { id: 'claude-sonnet-4-6', name: 'Claude Sonnet 4.6 (Thinking)', inputModalities: ['text', 'image'] },
   { id: 'claude-opus-4-6-thinking', name: 'Claude Opus 4.6 (Thinking)', inputModalities: ['text', 'image'] },
   { id: 'gpt-oss-120b-medium', name: 'GPT-OSS 120B (Medium)', inputModalities: ['text'] },
