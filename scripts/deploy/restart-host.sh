@@ -248,13 +248,19 @@ restart_command() {
 # environment variable: systemd-run starts a fresh transient unit that does not
 # inherit the caller's env, which is exactly how a rehearsed run once turned
 # into a real restart.
+#
+# `--force` travels the same way: the idempotence guard is re-evaluated inside
+# the payload role process, so a forced restart must carry the force through or
+# the unit stops with exit 8 (SKIPPED_ALREADY_RESTARTED).
 detached_script() {
   local role="--perform-restart"
   [[ "${REHEARSE}" == "1" ]] && role="--perform-rehearsal"
+  local args="${role}"
+  [[ "${FORCE}" == "1" ]] && args="${args} --force"
   printf 'sleep %s; exec %s %s' \
     "${PRE_RESTART_DELAY_SEC}" \
     "${SELF_DIR}/$(basename -- "${BASH_SOURCE[0]}")" \
-    "${role}"
+    "${args}"
 }
 
 # Single-quoted for a paste-able one-liner: the payload contains no single
