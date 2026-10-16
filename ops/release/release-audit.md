@@ -136,6 +136,39 @@ installedSha256=6b8e1fad176bfc5ba6e584b13f392b7c436a6e1dcb88161751871b08516a50a4
 **修复**：runner 显式传参并强制 cwd：
 `( cd "${REPO_ROOT}" && exec node "${PROBE_SCRIPT}" --repo "${REPO_ROOT}" --out "${probe_out}" --installed "${INSTALLED_DIR}" )`。
 
+### D3｜空期望值导致断言静默跳过 —— 已修（自查发现）
+
+**缺陷**：字段断言里 `want_head` / `want_pid` 为「可选」写法（`if want_head and …`、`if want_pid and …`）。
+若 `REPO_HEAD` 为空（例如发布开始时 `git rev-parse` 失败），`repoHead` 及其它绑定断言会**被静默跳过**，
+留下「跑完了但没校验」的假 PASS —— 正属审查员点名的「失败仍继续」路径。
+
+**修复**：
+1. `require_expected_hash()` 增加前置闸门：`REPO_HEAD` 为空或 `<n/a>` 时直接拒绝（exit 1）；
+2. 断言脚本改为**所有期望值必填**：任一 `want_*` 为空即 `MISMATCH … cannot bind the artifact to this release` 并 exit 1；
+3. 所有比较改为严格相等（去掉 falsy 短路）。
+
+**两向验证（提取 runner 内嵌断言脚本原样执行）**：
+
+```
+=== 接受向（参数与本次发布一致）===
+probe_verdict=PASS counts={'PASS': 9, 'FAIL': 0, 'UNKNOWN': 0} hostPid=581348 repoHead=f298597… installedSha256=6b8e1fad…
+exit=0                                  ← 期望 0
+
+=== 拒绝向 A：hostPid 不符 ===
+MISMATCH hostPid=581348 expected 999999
+exit=1
+
+=== 拒绝向 B：installedSha 不符 ===
+MISMATCH installedSha256=6b8e1fad… expected 0000…
+exit=1
+
+=== 拒绝向 C：期望 repoHead 为空（旧版会静默过关）===
+MISMATCH want_head is empty — cannot bind the artifact to this release
+exit=1                                  ← 加固前为 exit=0（假 PASS）
+```
+
+过期件过滤亦独立验证：对旧产物跑同一 `-newermt "@now"` 判据 → 命中 0 个，故 06:49 那类旧 json 不可能被本次发布接受。
+
 ### 负向验证（失败必须非零退出，不得继续）
 
 ```

@@ -110,6 +110,13 @@ require_expected_hash() {
     log_line "FAIL: CCH_EXPECTED_INDEX_SHA256 is unset — refusing to release an unpinned artifact"
     return "${EX_HASH_MISMATCH}"
   fi
+  # The probe artifact is bound to the repo HEAD, so an unresolvable HEAD must
+  # stop the run here rather than leave an empty expectation that the field
+  # assertions would silently skip.
+  if [[ -z "${REPO_HEAD}" || "${REPO_HEAD}" == "<n/a>" ]]; then
+    log_line "FAIL: cannot resolve repo HEAD in ${REPO_ROOT} — refusing to release unbound evidence"
+    return "${EX_HASH_MISMATCH}"
+  fi
   return 0
 }
 
@@ -264,13 +271,18 @@ got_pid = str(d.get("hostPid") or "")
 got_head = (d.get("repoHead") or "")
 verdict = d.get("verdict") or "UNKNOWN"
 counts = d.get("counts") or {}
+# Every expectation is mandatory: an empty want_* must fail, never silently
+# skip its assertion (a skipped check is a false PASS).
+for name, want in (("want_pid", want_pid), ("want_sha", want_sha), ("want_head", want_head)):
+    if not want:
+        bad(f"{name} is empty — cannot bind the artifact to this release")
 if got_sha != want_sha:
     bad(f"installedSha256={got_sha} expected {want_sha}")
-if want_pid and got_pid != want_pid:
+if got_pid != want_pid:
     bad(f"hostPid={got_pid} expected {want_pid}")
 if not got_head:
     bad("repoHead is empty (probe could not resolve HEAD in its cwd)")
-if want_head and got_head != want_head:
+if got_head != want_head:
     bad(f"repoHead={got_head} expected {want_head}")
 print(f"probe_verdict={verdict} counts={counts} hostPid={got_pid} repoHead={got_head} installedSha256={got_sha}")
 if verdict != "PASS":
