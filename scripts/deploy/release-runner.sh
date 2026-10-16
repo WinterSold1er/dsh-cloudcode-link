@@ -45,6 +45,10 @@ readonly SERVICE="${CCH_SERVICE:-deepseek-harness.service}"
 readonly READY_HTTP_EXPECTED="${CCH_READY_HTTP:-401}"
 readonly LOG_DIR="${CCH_LOG_DIR:-${REPO_ROOT}/ops/release}"
 readonly PROBE_SCRIPT="${REPO_ROOT}/scripts/verify/post-restart-probe.mjs"
+# Touch this file (or export CCH_NO_RESTART=1) to forbid the restart phase.
+readonly NO_RESTART_MARKER="${CCH_NO_RESTART_MARKER:-${REPO_ROOT}/ops/release/.no-restart}"
+# Install-phase freshness record consumed by the probe's --since.
+readonly INSTALL_RECORD="${CCH_INSTALL_RECORD:-${REPO_ROOT}/ops/release/install-complete.json}"
 
 # Expected artifact hash. Must be passed in or agreed out of band; this runner
 # refuses to release an artifact it cannot pin. No default on purpose.
@@ -61,6 +65,7 @@ readonly EX_REINSTALL_FAILED=2
 readonly EX_NO_RESTART=3
 readonly EX_NOT_READY=4
 readonly EX_PROBE_FAILED=5
+readonly EX_RESTART_FORBIDDEN=6
 
 LOG_FILE=""
 DRY_PHASES=0
@@ -120,6 +125,24 @@ require_expected_hash() {
   return 0
 }
 
+# Machine-readable "do not restart" gate. Set it with either an environment
+# variable (CCH_NO_RESTART=1) or a marker file touched by a human/agent
+# (.no-restart in the log directory, i.e. ops/release/.no-restart). It is
+# checked BEFORE any restart is scheduled, so a forbidden restart never reaches
+# systemd. This exists because a standing instruction not to restart the host
+# must be enforceable by the tooling, not only by the operator remembering it.
+no_restart_gate() {
+  if [[ "${CCH_NO_RESTART:-0}" == "1" ]]; then
+    log_line "REFUSED: CCH_NO_RESTART=1 — restart phase is prohibited by the environment"
+    return "${EX_RESTART_FORBIDDEN}"
+  fi
+  if [[ -f "${NO_RESTART_MARKER}" ]]; then
+    log_line "REFUSED: marker ${NO_RESTART_MARKER} exists — restart phase is prohibited"
+    return "${EX_RESTART_FORBIDDEN}"
+  fi
+  return 0
+}
+
 phase0_pre_state() {
   OLD_START="$(host_start)"
   OLD_PID="$(host_pid)"
@@ -166,6 +189,30 @@ phase2_verify_artifact() {
     log_line "WARN: repo dist differs from expected (repo=${repo_sha}) — installed copy is authoritative"
   fi
   log_line "artifact_verified: OK"
+
+  # Freshness record, produced HERE — at install time, by the install phase —
+  # and consumed later by the probe via --since. The probe never writes it, so
+  # the "host started after install completed" claim is not something the probe
+  # (or a human running the probe) can manufacture. The artifact's own mtime is
+  # deliberately NOT used as the floor: mtime is a single `touch` away from
+  # being whatever the operator wants, which is exactly how a fabricated PASS
+  # becomes possible.
+  install_completed_utc="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  cat >"${INSTALL_RECORD}" <<JSON
+{
+  "tool": "release-runner",
+  "phase": "install-complete",
+  "installCompletedUtc": "${install_completed_utc}",
+  "installCompletedMs": $(date -u +%s%3N),
+  "installedSha256": "${installed_sha}",
+  "expectedSha256": "${EXPECTED_INDEX_SHA256}",
+  "installedPath": "${INSTALLED_DIR}/dist/index.js",
+  "repoHead": "${REPO_HEAD}",
+  "note": "written by the install phase before any restart; the probe consumes installCompletedUtc via --since"
+}
+JSON
+  log_line "install_record=${INSTALL_RECORD}"
+  log_line "install_completed_utc=${install_completed_utc}"
 }
 
 phase3_git_state() {
@@ -176,6 +223,9 @@ phase3_git_state() {
 
 phase4_restart() {
   log_line "--- phase 4: single-owner restart ---"
+  # Standing "do not restart this host" instructions are enforced here, before
+  # anything is scheduled — not left to the operator's memory.
+  no_restart_gate || return $?
   local runner="${REPO_ROOT}/scripts/deploy/restart-host.sh"
   log_line "cmd: ${runner} --schedule --force --no-probe"
   # --schedule returns as soon as the detached unit is scheduled; this runner
@@ -228,6 +278,36 @@ phase6_probe() {
     return "${EX_PROBE_FAILED}"
   fi
 
+  # Freshness floor comes from the install-phase record, NOT from the
+  # artifact's mtime. mtime can be rewritten by anyone with a single `touch`,
+  # so a probe that trusts it can be made to PASS without any real restart;
+  # this record is written by the install phase and only read here.
+  if [[ ! -f "${INSTALL_RECORD}" ]]; then
+    log_line "FAIL: install record ${INSTALL_RECORD} missing — cannot bind process freshness"
+    return "${EX_PROBE_FAILED}"
+  fi
+  local since_utc record_sha
+  since_utc="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("installCompletedUtc") or "")' "${INSTALL_RECORD}")"
+  record_sha="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("installedSha256") or "")' "${INSTALL_RECORD}")"
+  if [[ -z "${since_utc}" || "${record_sha}" != "${EXPECTED_INDEX_SHA256}" ]]; then
+    log_line "FAIL: install record unusable (installCompletedUtc='${since_utc}', sha='${record_sha}')"
+    return "${EX_PROBE_FAILED}"
+  fi
+  log_line "freshness_floor_from_record=${since_utc} (installedSha256 matches expected)"
+
+  # Tamper tell-tale: an artifact whose mtime is NEWER than the recorded install
+  # completion was written after the install phase recorded it. That is a
+  # rewritten timestamp, not an install, and it must be named out loud because
+  # the probe's own freshness check would otherwise be judged against a value
+  # somebody edited. Reported as a hard warning, never silently accepted.
+  local artifact_mtime_ms record_ms
+  artifact_mtime_ms="$(stat -c '%Y' "${INSTALLED_DIR}/dist/index.js" 2>/dev/null || echo 0)"
+  record_ms="$(python3 -c 'import datetime,sys; print(int(datetime.datetime.fromisoformat(sys.argv[1]).timestamp()*1000))' "${since_utc}" 2>/dev/null || echo 0)"
+  if [[ "${artifact_mtime_ms}" != "0" && "${record_ms}" != "0" ]] && ((artifact_mtime_ms * 1000 > record_ms)); then
+    log_line "WARN: SUSPECT TIMESTAMP — artifact mtime ($(date -d "@${artifact_mtime_ms}" -Iseconds 2>/dev/null)) is NEWER than the recorded install completion (${since_utc})"
+    log_line "WARN: a mtime newer than the install record is not explained by installing; treat the mtime-derived signal as untrusted"
+  fi
+
   # The probe resolves repo HEAD with git, so it MUST run with the repository as
   # cwd. A detached unit's cwd is $HOME, where `git rev-parse HEAD` fails and the
   # artifact_pinned check degrades to UNKNOWN — that is a probe-environment bug,
@@ -237,7 +317,8 @@ phase6_probe() {
   mkdir -p -- "${probe_out}"
   local probe_exit=0
   ( cd "${REPO_ROOT}" && exec node "${PROBE_SCRIPT}" \
-      --repo "${REPO_ROOT}" --out "${probe_out}" --installed "${INSTALLED_DIR}" ) || probe_exit=$?
+      --repo "${REPO_ROOT}" --out "${probe_out}" --installed "${INSTALLED_DIR}" \
+      --since "${since_utc}" ) || probe_exit=$?
   log_line "probe_exit=${probe_exit}"
   log_line "probe_out_dir=${probe_out}"
 

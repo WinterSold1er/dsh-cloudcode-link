@@ -1,0 +1,23 @@
+{
+  "tool": "release-runner",
+  "phase": "install-complete",
+  "installCompletedUtc": "2026-10-16T15:42:06+08:00",
+  "installedSha256": "6b8e1fad176bfc5ba6e584b13f392b7c436a6e1dcb88161751871b08516a50a4",
+  "expectedSha256": "6b8e1fad176bfc5ba6e584b13f392b7c436a6e1dcb88161751871b08516a50a4",
+  "installedPath": "/home/csy/.dsh/profiles/web/node_modules/dsh-cloudcode-link/dist/index.js",
+  "repoHead": "f29859706175201043cc51260fef177106719c68",
+  "provenance": {
+    "writtenAfterTheFact": true,
+    "derivedFrom": "ops/release/release-20261016T074145Z.log",
+    "windowStartUtc": "2026-10-16T15:41:45+08:00",
+    "windowEndUtc": "2026-10-16T15:42:07+08:00",
+    "evidence": [
+      "release-20261016T074145Z.log:2 started_at 2026-10-16T15:41:45+08:00",
+      "release-20261016T074145Z.log:31-32 phase 2 verified installed_sha256=6b8e1fad…",
+      "release-20261016T074145Z.log:44 restart unit started_at 2026-10-16T15:42:07+08:00",
+      "release-20261016T074145Z.log:67 restarted_after=12s new_pid=581348 new_start 15:42:17"
+    ],
+    "note": "the chosen value is the latest auditable instant before the restart was scheduled; the artifact hash was already verified by phase 2 before it"
+  },
+  "note": "Consumed by the probe via --since as the process-freshness floor, so freshness does NOT depend on the artifact mtime (which a single touch can rewrite)."
+}
