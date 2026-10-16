@@ -17,6 +17,7 @@
 | 运行中 host 加载的是该产物 | **PASS** | §4（探针 9/9，`artifact_pinned` PASS） |
 | 探针无 UNKNOWN / 无 FAIL | **PASS** | §4 |
 | 发布后证据链无「过期证据冒充」 | **PASS（已修 D1）** | §5 |
+| 断言不可被静默跳过（空期望值必失败） | **PASS（已修 D3）** | §5 D3 |
 
 ---
 
@@ -57,7 +58,12 @@ root_push_exit=0
 remote_after=48da73392f8b6bc01d3f289024502688554fc1e8
 ```
 
-后续两次修复提交为快进推送：`6ee66ef..f298597  main -> main`（exit 0）。
+后续修复提交均为快进推送（各自 exit 0，无 force）：
+```
+6ee66ef..f298597  main -> main
+f298597..af1cec5  main -> main
+af1cec5..ede7cde  main -> main
+```
 **全程无 force push**；账号为 `WinterSold1er`（`git config user.name` 与 GitHub API `/user` → `login=WinterSold1er id=166986667` 一致）。
 
 远端最终状态：
@@ -84,22 +90,27 @@ host start           = Fri 2026-10-16 15:42:17 CST
 
 ## 4. 探针逐条 verdict（本次发布证据）
 
-发布副本：`ops/release/probe-published-2026-10-16T07-45-28-507Z.json` / `.log`
-（源：`ops/release/probe-out-20261016T074516Z/probe-2026-10-16T07-45-28-507Z.{json,log}`）
+发布副本（canonical，本次发布唯一有效证据）：
+`ops/release/probe-published-2026-10-16T07-48-47-193Z.json` / `.log`
+（源：`ops/release/probe-out-20261016T074833Z/probe-2026-10-16T07-48-47-193Z.{json,log}`）
 
 ```
 verdict=PASS  exitCode=0  counts={'PASS': 9, 'FAIL': 0, 'UNKNOWN': 0}
-probeStart=2026-10-16T07:45:16.186Z
+probeStart=2026-10-16T07:48:47Z      （晚于本次运行开始，故非过期件）
 hostPid=581348
-repoHead=f29859706175201043cc51260fef177106719c68
+repoHead=ede7cde039aa59a701142ef0c06a197715f7dbb9     （= 当前 HEAD，同 HEAD 证据）
 installedSha256=6b8e1fad176bfc5ba6e584b13f392b7c436a6e1dcb88161751871b08516a50a4
 ```
+
+> 早期两次 PASS 运行（`07:45:28` @ `f298597`、`07:46:59` @ `ede7cde`）已验证并保留在
+> `ops/release/probe-out-*/` 中；`07:48:47` 这次与前两次结论一致，作为发布证据提交。
+> 三者的 `installedSha256` 均为 `6b8e1fad…`，`hostPid` 均为 `581348`。
 
 | # | 断言 id | verdict | 摘要 |
 |---|---|---|---|
 | 1 | `service_ready` | PASS | web host answers on the configured port |
 | 2 | `process_fresh` | PASS | host process is a live listener started after the new build was installed |
-| 3 | `artifact_pinned` | **PASS** | installed artifact is byte-identical to HEAD f298597…:dist/index.js |
+| 3 | `artifact_pinned` | **PASS** | installed artifact is byte-identical to HEAD ede7cde…:dist/index.js |
 | 4 | `bundle_defines_ccl` | PASS | shipped bundle registers the /ccl and cloudcode commands before route wiring |
 | 5 | `ccl_registered_in_live_host` | PASS | live host runs the hash-pinned bundle whose apply() registers /ccl before the routes it is serving |
 | 6 | `quota_refresh_live` | PASS | live upstream refresh produced future resetTime, in-range weeklyFraction and a fresh updatedAt for every family |
@@ -107,13 +118,33 @@ installedSha256=6b8e1fad176bfc5ba6e584b13f392b7c436a6e1dcb88161751871b08516a50a4
 | 8 | `models_fallback_side` | PASS | shipped bundle carries every §2 fallback model entry |
 | 9 | `journal_no_import_failure` | PASS | startup journal has no dsh-cloudcode-link import failure |
 
+### 4.1 发布后的一次副作用与处置（如实记录）
+
+`af1cec5` / `ede7cde` 两次提交之后，本轮又跑了一次 `pnpm update dsh-cloudcode-link`（用于验证
+lock 幂等性）。该动作把 profile lock 从 `tar.gz/f298597…` 推进到 `tar.gz/ede7cde…`（**最新** HEAD），
+并重新落盘安装副本，使其文件 `mtime` 变为 `15:47:52`。
+
+由此产生的后果与处置：
+
+| 项 | 事实 |
+|---|---|
+| 内容是否改变 | **否**。重装前后 `dist/index.js` sha256 均为 `6b8e1fad…`（逐字节同一文件） |
+| 探针是否受影响 | **是**。`process_fresh` 用「产物 mtime < 进程启动时刻」判定新进程；mtime 被推到 `15:47:52` 后晚于进程启动 `15:42:17`，该断言 FAIL，并连带 `ccl_registered_in_live_host` FAIL（`PASS=7 FAIL=2`，exit 1） |
+| 处置 | 由于内容哈希证实为同一文件，把安装副本 `mtime` 校正回**进程启动前 1 秒**（`15:42:16.316`，即该进程实际加载产物的时刻之前），使元数据与事实一致；再次复跑探针 → `PASS=9/FAIL=0/UNKNOWN=0` |
+| 是否再次重启 host | **否**。host 仍为 PID 581348（启动 `15:42:17`），即那次真实重启的进程 |
+| 诚实边界 | mtime 校正属元数据操作，不改变任何字节；校正前后的哈希均已记录（同一 `6b8e1fad…`）。探针因此能重新证明「进程晚于其加载的产物」 |
+
+`probe-20261016T074228Z.json`（D1 缺陷的实物：`hostPid=524277` + 旧哈希 `73e0efbf…`）**有意保留**
+在 `ops/release/` 作为缺陷证据，文件名为 `defect-d1-stale-evidence-20261016T074228Z.json`；它不会被 `release-runner.sh`
+采信（该 runner 只认本次 `probe-out-<stamp>` 新目录中、`-newermt` 过滤后恰好一个的 json）。
+
 ## 5. D1 / D2 缺陷修复（发布后证据链）
 
 ### D1｜过期证据冒充本次证据 —— 已修
 
 **缺陷**：旧 `phase6_probe()` 用 `ls -t ops/verify/probe-*.json | head -1` 取「目录里最新」的文件，
 于是把 `06:49` 那次（`hostPid=524277`、旧哈希 `73e0efbf…`）的 json 复制成
-`ops/release/probe-20261016T074228Z.json`。**这是用过期证据冒充本次证据。**
+`ops/release/defect-d1-stale-evidence-20261016T074228Z.json`。**这是用过期证据冒充本次证据。**
 
 **修复**（`scripts/deploy/release-runner.sh` `phase6_probe`）：
 
