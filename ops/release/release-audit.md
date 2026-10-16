@@ -15,12 +15,33 @@
 | 仓库 HEAD:dist == 工作区 dist == 安装副本 dist（同一哈希） | **PASS** | §3 |
 | profile lock 解析到发布 commit | **PASS** | §3 |
 | 运行中 host 加载的是该产物 | **PASS** | §4（探针 9/9，`artifact_pinned` PASS） |
-| 探针无 UNKNOWN / 无 FAIL | **PASS** | §4 |
+| 探针无 UNKNOWN / 无 FAIL | **PASS（但 `process_fresh` 单项见下）** | §4 |
 | 发布后证据链无「过期证据冒充」 | **PASS（已修 D1）** | §5 |
 | 断言不可被静默跳过（空期望值必失败） | **PASS（已修 D3）** | §5 D3 |
 | `process_fresh` 的 mtime 依据 | **UNTRUSTED / 已作废** | §4.1.1（操作者曾 `touch` 回拨 mtime，判为伪造证据） |
+| `process_fresh` 本次判定 | **UNKNOWN（Lead 已裁定接受）** | §0.1 |
 | 「进程晚于安装完成」的独立复核 | **PASS** | §4.2 `freshness-check.sh`（不读 mtime） |
-| 禁止重启护闸 | **PASS（exit 6 拒绝）** | §5 |
+| 禁止重启护闸 | **PASS（exit 6 拒绝）** | §6 |
+
+### 0.1 Lead 裁定（2026-10-16）：本次接受 `process_fresh` = UNKNOWN
+
+Lead 裁定原文要点：
+
+1. **接受 UNKNOWN**，不为它重启、也不再用任何时间戳手段。理由：该判据已被证明可被操作者
+   用 `touch` 制造，作废是对的；实质问题（运行中的进程是否加载了新产物）由替代证据链闭合：
+   ① 重启由发布流水线在哈希闸门通过后触发（`release-runner` phase 2 → phase 4；日志时序
+   `15:41:45` 校验通过 → `15:42:07` 调度重启 → `15:42:17` 新进程）；
+   ② 三路哈希一致（`HEAD:dist` == 工作区 == 安装副本 == `6b8e1fad…`）；
+   ③ live route 200 by PID 581348；
+   ④ 独立的 `install-complete` 记录早于进程启动。
+2. **不要把 mtime 改回去**——再写一次时间戳只会叠加污染；保持现状并在审计中持续标注。
+3. `ops/release/.no-restart` 与 exit 6 护闸**保留**（用户已禁止本会话重启）。
+4. 探针 `process_fresh` 的结构性修复（改为消费本审计 §4.1.2 的 `install-complete.json`，
+   记录缺失/时间戳可疑时判 UNKNOWN 而非 PASS）**由 worker-verify 负责**，范围 `scripts/verify/**`；
+   本审计只需保留引用并等待其新证据。**本节保留 UNTRUSTED 标注，不作洗白。**
+
+> 待 worker-verify 交付后：其新探针证据应追加到本文件（新增小节，不覆盖 §4 的历史判定），
+> 以保证「先前的伪造证据」与「修复后的独立证据」在时间线上可区分。
 
 ---
 
