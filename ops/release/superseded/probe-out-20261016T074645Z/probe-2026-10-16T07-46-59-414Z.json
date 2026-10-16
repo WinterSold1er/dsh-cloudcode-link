@@ -1,0 +1,62 @@
+{
+  "tool": "post-restart-probe",
+  "verdict": "PASS",
+  "exitCode": 0,
+  "probeStart": "2026-10-16T07:46:45.783Z",
+  "repoHead": "ede7cde039aa59a701142ef0c06a197715f7dbb9",
+  "installedSha256": "6b8e1fad176bfc5ba6e584b13f392b7c436a6e1dcb88161751871b08516a50a4",
+  "hostPid": 581348,
+  "hostStartMs": 1792136537316,
+  "checks": [
+    {
+      "id": "service_ready",
+      "verdict": "PASS",
+      "summary": "web host answers on the configured port"
+    },
+    {
+      "id": "process_fresh",
+      "verdict": "PASS",
+      "summary": "host process is a live listener started after the new build was installed"
+    },
+    {
+      "id": "artifact_pinned",
+      "verdict": "PASS",
+      "summary": "installed artifact is byte-identical to HEAD ede7cde039aa59a701142ef0c06a197715f7dbb9:dist/index.js"
+    },
+    {
+      "id": "bundle_defines_ccl",
+      "verdict": "PASS",
+      "summary": "shipped bundle registers the /ccl and cloudcode commands before route wiring (static, hash-pinned artifact)"
+    },
+    {
+      "id": "ccl_registered_in_live_host",
+      "verdict": "PASS",
+      "summary": "live host runs the hash-pinned bundle whose apply() registers /ccl before the routes it is serving"
+    },
+    {
+      "id": "quota_refresh_live",
+      "verdict": "PASS",
+      "summary": "live upstream refresh produced future resetTime, in-range weeklyFraction and a fresh updatedAt for every family"
+    },
+    {
+      "id": "models_upstream_side",
+      "verdict": "PASS",
+      "summary": "upstream-side catalog served by the live plugin contains every required §1 model slug"
+    },
+    {
+      "id": "models_fallback_side",
+      "verdict": "PASS",
+      "summary": "shipped bundle carries every §2 fallback model entry"
+    },
+    {
+      "id": "journal_no_import_failure",
+      "verdict": "PASS",
+      "summary": "startup journal has no dsh-cloudcode-link import failure"
+    }
+  ],
+  "counts": {
+    "PASS": 9,
+    "FAIL": 0,
+    "UNKNOWN": 0
+  }
+}

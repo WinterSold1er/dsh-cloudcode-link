@@ -296,7 +296,7 @@ host PID = 581348   ActiveEnterTimestamp = Fri 2026-10-16 15:42:17 CST
 在 `ops/release/` 作为缺陷证据，文件名为 `defect-d1-stale-evidence-20261016T074228Z.json`；它不会被 `release-runner.sh`
 采信（该 runner 只认本次 `probe-out-<stamp>` 新目录中、`-newermt` 过滤后恰好一个的 json）。
 
-## 5. D1 / D2 缺陷修复（发布后证据链）
+## 5b. D1 / D2 缺陷修复（发布后证据链）
 
 ### D1｜过期证据冒充本次证据 —— 已修
 
@@ -399,3 +399,181 @@ wrong_hash_exit=1        ← 拒绝并可解释
 | `/home/csy/ops/verify/probe-2026-10-16T07-42-28-566Z.*` 等 | 首次探针因 cwd 错误落在 `$HOME` 下的产物，保留为 D2 的证据；不影响发布结论 |
 | `docs/review/**` | 由 reviewer 拥有，本发布**未提交** |
 | 子模块 tarball 自包含 | `packages/core` 的产物已内联进 root `dist/index.js`，故安装副本哈希可独立验证（T2 已证） |
+
+## 8. 审查员第 2 轮收敛（D2-1 / D2-2）：canonical 去 mtime 化与 provenance
+
+**背景**：第 1 轮返工把 `process_fresh` 改为消费 `ops/release/install-complete.json`，但**对外 canonical 仍是旧 mtime 版**：
+`ops/release/probe-out-20261016T075205Z/probe-2026-10-16T07-52-18-544Z.{log,json}` 的 argv 无 `--install-record`，
+其 PASS 的物理依据是操作者 `touch -d` 回拨出来的安装副本 mtime；机读 JSON 又只有 `{id,verdict,summary}`，
+对外呈无标注的干净 `PASS 9/0/0`，与本审计 §0.1「接受 `process_fresh=UNKNOWN`」自相矛盾。
+
+### 8.1 新 canonical
+
+```
+cd /home/csy/Code/Github/dsh-cloudcode-link && node scripts/verify/post-restart-probe.mjs \
+  --repo . --out ops/release/probe-out-20261016T080603Z --install-record ops/release/install-complete.json
+```
+
+件：`ops/release/probe-out-20261016T080603Z/probe-2026-10-16T08-06-29-613Z.{log,json}`
+判定：**UNKNOWN（7 PASS / 0 FAIL / 2 UNKNOWN，exit 2）** —— 这是本次发布的诚实结论，未为凑 9/0/0 调整判据或复跑覆盖。
+
+### 8.2 机读 JSON 新增 `provenance`（无标注干净 PASS 已不可能）
+
+| 字段 | 本件取值 |
+|---|---|
+| `argv` | `node scripts/verify/post-restart-probe.mjs --repo . --out ops/release/probe-out-20261016T080603Z --install-record ops/release/install-complete.json` |
+| `installRecordPath` | `/home/csy/Code/Github/dsh-cloudcode-link/ops/release/install-complete.json` |
+| `installRecordBasis` | `record`（枚举 `record｜mtime｜none`；`mtime` 已不再作为判据使用） |
+| `processFreshBasis` | `installCompletedUtc=2026-10-16T15:42:06+08:00 from …/install-complete.json` |
+| `installRecordWrittenAfterTheFact` | `true`（透传） |
+| `caveat` | 见 §8.3 |
+| `supportingEvidence` | 三路哈希一致（`6b8e1fad…` == 安装副本 == `HEAD:dist/index.js`）、live route HTTP 200 by PID 581348、发布流水线时序行（15:41:45 校验 → 15:42:07 调度 → 15:42:17 新进程） |
+
+### 8.3 `caveat` 原文
+
+> process_fresh timing judgement is self-attested: /home/csy/Code/Github/dsh-cloudcode-link/ops/release/install-complete.json has provenance.writtenAfterTheFact=true, so installCompletedUtc (2026-10-16T15:42:06+08:00) was derived after the fact from a release log by the same operator; the install->restart ordering is NOT independently trustworthy, therefore the verdict is UNKNOWN, not PASS. Admissible substitutes: artifact hash binding (record sha == installed copy sha == HEAD blob == working tree), the live plugin routes answered by this PID, and the release-pipeline ordering lines in the record provenance.
+
+规则：`provenance.writtenAfterTheFact === true` ⇒ `process_fresh` **一律 UNKNOWN**（不得带 caveat 判 PASS）。
+一旦下个发布由安装阶段**现场写入**记录（`writtenAfterTheFact=false`），该项即可合法转 PASS。
+
+### 8.4 判定明细
+
+| # | check | verdict | 依据 |
+|---|---|---|---|
+| 1 | service_ready | PASS | `GET / -> 401` |
+| 2 | process_fresh | **UNKNOWN** | 记录自证时序（§8.3）；哈希绑定与 live route 仍可采信 |
+| 3 | artifact_pinned | PASS | 安装副本 sha `6b8e1fad…` == `HEAD c8a6b125…:dist/index.js` |
+| 4 | bundle_defines_ccl | PASS | 交付包内 `ccl`/`cloudcode` 注册先于路由装配 |
+| 5 | ccl_registered_in_live_host | **UNKNOWN** | 同一条规则的下游后果：路由确实由 PID 581348 应答（HTTP 200），但「该进程加载的正是该交付包」未独立证明 ⇒ 不判 PASS |
+| 6 | quota_refresh_live | PASS | live 上游刷新，15 family resetTime 全为未来、weeklyFraction ∈[0,1] |
+| 7 | models_upstream_side | PASS | `source="discovered"` 目录含 §1 全部要求 slug |
+| 8 | models_fallback_side | PASS | 交付包 `DEFAULT_FALLBACK_MODELS` 12 条与 §2 一致 |
+| 9 | journal_no_import_failure | PASS | 启动日志无 dsh-cloudcode-link 导入失败 |
+
+> 注：第 5 条判 UNKNOWN 与任务书预估的「8 PASS / 1 UNKNOWN」相差一条 —— 这是刻意保留的保守判定：
+> 若把「新进程加载了该交付包」这一未证明前提隐式当作成立，就会重新制造 §4.1.1 那类不可独立采信的 PASS。
+> 如需把它降级为纯静态/liveness 断言（只断言「交付包注册顺序 + 路由由该 PID 应答」），须由 Lead 明确改名并接受语义收窄。
+
+### 8.5 旧 canonical 处置
+
+`probe-published-2026-10-16T07-48-47-193Z.{log,json}`、`probe-out-20261016T074833Z/`（同一次 07-48-47 运行）、
+`probe-out-20261016T075205Z/`（07-52-05）、`probe-out-20261016T080158Z/`（T9 期产出，未识别 `writtenAfterTheFact`）
+已移入 `ops/release/superseded/`，并在 `ops/release/superseded/SUPERSEDED.md` 记录作废原因与替代件路径。
+`probe-out-20261016T074516Z / 074645Z / 074758Z` 为探索性中间运行，从未作为对外证据，保持原位、不背书。
+
+### 8.6 判据非恒真的负向验证（`ops/verify/negative-controls-t10.log`）
+
+| 用例 | 构造 | `process_fresh` | 总判定 |
+|---|---|---|---|
+| N1 | 记录 `installCompletedUtc` 晚于 host 启动 | FAIL | FAIL exit 1 |
+| N2 | 记录 `installedSha256` != 实际安装副本 | FAIL | FAIL exit 1 |
+| N3 | 记录缺失 | UNKNOWN | UNKNOWN exit 2 |
+| N4 | 副本 mtime 晚于 host 启动（篡改 fixture） | UNKNOWN + `WARN: SUSPECT TIMESTAMP` | UNKNOWN exit 2 |
+| N5 | 真实记录且 `writtenAfterTheFact=true` | UNKNOWN | UNKNOWN exit 2 |
+
+约束遵守：**本轮未重启 host**；**未 touch / 未 `cp -p` 任何既有产物 mtime**（N4 仅在 `/tmp` 用普通 `cp` 新建临时副本，未改动任何既有文件的时间戳）。
+
+### 8.7 遗留
+
+记录 `install-complete.json` 由 `release-20261016T074145Z.log` 事后推导（`writtenAfterTheFact=true`），其独立性上限即在该日志；
+探针只能校验「记录 vs 实际产物哈希/路径 + 进程启动时刻 vs 记录时刻」，无法校验记录撰写动机。根治方式：安装阶段现场写入记录。
+
+## 9. T11 收敛：四项观察修复 + 散件整理
+
+本节记录审查员第 2 轮的四条非阻塞观察的修复与验证。**全程未重启 host、未写入任何时间戳**。
+
+### ① 所有重启入口对 env 抑制一致处理
+
+**缺陷**：拒绝规则只覆盖 `--schedule`；`--detach` / `--plan` 会**静默忽略** `CCH_RESTART_DRY_RUN=1`
+并照常打印含真实重启的载荷——第 1 轮事故正是有人复制 `--detach` 打印件执行。
+
+**修复**（`scripts/deploy/restart-host.sh`，统一规则一处实现）：
+
+```
+if [[ "${mode}" == "print" || "${mode}" == "schedule" ]] \
+  && [[ "${REHEARSE}" != "1" && "${CCH_RESTART_DRY_RUN:-0}" == "1" ]]; then
+  local hint="--schedule"; [[ "${mode}" == "print" ]] && hint="--detach"
+  printf 'refusing: CCH_RESTART_DRY_RUN does not cross the systemd-run boundary.\n' >&2
+  printf 'use: restart-host.sh %s --rehearse\n' "${hint}" >&2
+  return "${EX_USAGE}"
+fi
+```
+
+**负向验证原始输出**：
+
+```
+$ for a in "--detach" "--plan" "--schedule"; do CCH_RESTART_DRY_RUN=1 bash scripts/deploy/restart-host.sh $a; done
+--detach    -> exit=2 | refusing: CCH_RESTART_DRY_RUN does not cross the systemd-run boundary. use: restart-host.sh --detach --rehearse
+--plan      -> exit=2 | refusing: CCH_RESTART_DRY_RUN does not cross the systemd-run boundary. use: restart-host.sh --detach --rehearse
+--schedule  -> exit=2 | refusing: CCH_RESTART_DRY_RUN does not cross the systemd-run boundary. use: restart-host.sh --schedule --rehearse
+
+$ CCH_RESTART_DRY_RUN=1 bash scripts/deploy/restart-host.sh --detach --rehearse | grep -o "perform-rehearsal[^']*"
+perform-rehearsal          # 转 rehearsal 的路径放行（exit 0）
+```
+
+三者文案一致（仅提示行随入口不同），均 exit 2。
+
+### ④ `freshness-check.sh` 的 UNKNOWN 改为输出真实依据
+
+**缺陷**：原文案为硬编码句子，无信息量（不含 mtime 值、记录路径、不可采信的具体理由）。
+
+**修复后输出**（真实运行）：
+
+```
+mtime_freshness  UNKNOWN  mtime=2026-10-16T15:42:16+08:00 (ctime=2026-10-16 15:48:33)
+                          vs install record /home/csy/Code/Github/dsh-cloudcode-link/ops/release/install-complete.json
+                          installCompletedUtc=2026-10-16T15:42:06+08:00;
+                          mtime is settable by a single touch, so it cannot serve as the freshness basis
+                          — the timestamp judgement comes from the install record instead (see process_after_install)
+```
+
+依据随实际状态变化：文件缺失 → 报缺失路径；记录缺失 → 报「无记录可比对」。
+`ctime` 一并输出，因为它同样暴露「文件在安装后被写过」的事实。
+
+### ④b release-runner：先判定、后发布（失败路径不留发布件）
+
+**缺陷**：`phase6_probe()` 先 `cp` 发布件、再查 `probe_exit`，失败运行也会留下形似成功产物的文件。
+
+**修复**：`probe_exit != 0` 时先 `FAIL: probe exited … — nothing published` 并返回，`cp` 只在
+「探针退出 0 **且** 字段断言（installedSha256 / hostPid / repoHead / verdict）全部通过」之后执行。
+
+**负向验证**（用注入的 stub 探针分别走失败/成功路径；stub 经 `CCH_PROBE_SCRIPT` 注入）：
+
+```
+=== A) 探针失败路径 ===
+FAIL: probe exited 1 — nothing published
+logs 顶层文件: [0] 个            ← 失败路径不落任何发布件
+
+=== B) 成功路径（stub 字段与本次发布一致）===
+probe_verdict=PASS counts={'PASS': 1, 'FAIL': 0, 'UNKNOWN': 0} hostPid=581348 repoHead=c8a6b125e3caf7d986521dbe1ccdab594893f03d installedSha256=6b8e1fad176bfc5ba6e584b13f392b7c436a6e1dcb88161751871b08516a50a4
+probe_json_published=…/probe-20261016T081208Z.json (from …/probe-out-20261016T081207Z/probe-2026-10-16T08-12-08-032Z.json)
+logs 顶层文件: [probe-20261016T081208Z.json]   ← 仅成功路径产出 1 件
+```
+
+同一机制下，**喂错期望哈希**的闸门拒绝（更早的负向验证，仍在 §5b 生效）：
+
+```
+$ CCH_EXPECTED_INDEX_SHA256=0000…0000 bash scripts/deploy/release-runner.sh --dry-phases
+FAIL: installed artifact does not match expected hash — NOT restarting
+wrong_hash_exit=1
+```
+
+### ⑤ 未跟踪散件的整理（最小动作：移动，不删除）
+
+见 `ops/release/superseded/SUPERSEDED.md` 追加节：
+
+| 处置 | 对象 | 说明 |
+|---|---|---|
+| 移动 | `ops/release/probe-out-20261016T0745{16,45,58}Z/` → `ops/release/superseded/` | mtime 依据期的历史探测件，内容与哈希未变 |
+| 移动 | `ops/verify/probe-2026-10-16T0{7-58-21,8-02-21}-*` → `ops/verify/superseded/` | T9 期，连同其 `.superseded.md` 说明 |
+| 删除 | `ops/release/trigger.txt` | 冗余：`started_at`/`pre_pid`/`pre_start`/`repo_head_at_start` 均已记录在 `ops/release/release-<UTC>.log` 头部 |
+| 不提交 | `docs/review/**` | 归 reviewer 所有 |
+
+### 本轮交付状态
+
+- canonical 证据：`ops/release/probe-out-20261016T080603Z/probe-2026-10-16T08-06-29-613Z.{json,log}`
+  （verdict=UNKNOWN，PASS=7 FAIL=0 UNKNOWN=2；`process_fresh` 与 `ccl_registered_in_live_host` 的 UNKNOWN
+  为 §0.1 裁定的诚实降级）。
+- 历史判定保留在 `ops/release/superseded/`，**不覆盖**；本文件 §4 的历史结论与 `UNTRUSTED` 标注同样保留。
+- host 全程未重启：PID 581348 / `2026-10-16 15:42:17 CST`；安装副本 mtime 未被再次写入。
+- `ops/release/.no-restart` 护闸保留生效（exit 6）。

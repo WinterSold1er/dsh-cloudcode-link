@@ -110,11 +110,23 @@ print(int(datetime.datetime.fromisoformat(raw).timestamp() * 1000))' "${RECORD}"
 
   # ---- 3. mtime-derived freshness: reported, never trusted
   if [[ ! -f "${INSTALLED}/dist/index.js" ]]; then
-    emit mtime_freshness UNKNOWN "artifact missing"
+    emit mtime_freshness UNKNOWN "artifact missing at ${INSTALLED}/dist/index.js — nothing to date"
   else
-    local artifact_ms
+    local artifact_ms artifact_iso ctime_iso verdict_reason
     artifact_ms="$(stat -c '%Y' "${INSTALLED}/dist/index.js" 2>/dev/null || echo 0)"
-    emit mtime_freshness UNKNOWN "artifact mtime $(date -d "@${artifact_ms}" -Iseconds) is OPERATOR-REWRITTEN in this release — a touch can set it to any value, so a PASS here would be manufactured, not observed"
+    artifact_iso="$(date -d "@${artifact_ms}" -Iseconds 2>/dev/null || echo 'unparseable')"
+    ctime_iso="$(stat -c '%z' "${INSTALLED}/dist/index.js" 2>/dev/null | cut -d. -f1 || echo 'unparseable')"
+    # Explain WHY this value cannot be used, naming the concrete artifacts:
+    # the file, its observed mtime, the recorded install completion, and the
+    # fact that mtime is operator-writable. No canned sentence.
+    if [[ -f "${RECORD}" ]]; then
+      local rec_utc
+      rec_utc="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("installCompletedUtc") or "<unset>")' "${RECORD}" 2>/dev/null || echo '<unreadable>')"
+      verdict_reason="mtime=${artifact_iso} (ctime=${ctime_iso}) vs install record ${RECORD} installCompletedUtc=${rec_utc}"
+    else
+      verdict_reason="mtime=${artifact_iso} (ctime=${ctime_iso}); no install record at ${RECORD} to corroborate it"
+    fi
+    emit mtime_freshness UNKNOWN "${verdict_reason}; mtime is settable by a single touch, so it cannot serve as the freshness basis — the timestamp judgement comes from the install record instead (see process_after_install)"
   fi
 
   # ---- 4. served /ccl route (live behaviour, not a timestamp)

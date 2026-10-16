@@ -44,7 +44,7 @@ readonly HOST_URL="${CCH_URL:-http://127.0.0.1:3080/}"
 readonly SERVICE="${CCH_SERVICE:-deepseek-harness.service}"
 readonly READY_HTTP_EXPECTED="${CCH_READY_HTTP:-401}"
 readonly LOG_DIR="${CCH_LOG_DIR:-${REPO_ROOT}/ops/release}"
-readonly PROBE_SCRIPT="${REPO_ROOT}/scripts/verify/post-restart-probe.mjs"
+readonly PROBE_SCRIPT="${CCH_PROBE_SCRIPT:-${REPO_ROOT}/scripts/verify/post-restart-probe.mjs}"
 # Touch this file (or export CCH_NO_RESTART=1) to forbid the restart phase.
 readonly NO_RESTART_MARKER="${CCH_NO_RESTART_MARKER:-${REPO_ROOT}/ops/release/.no-restart}"
 # Install-phase freshness record consumed by the probe's --since.
@@ -377,13 +377,17 @@ PY
   fi
   log_line "${probe_report}"
 
-  cp -f -- "${PROBE_JSON}" "${LOG_DIR}/probe-$(utc_stamp).json"
-  log_line "probe_json_published=${LOG_DIR}/probe-$(utc_stamp).json (from ${PROBE_JSON})"
-
+  # Gate FIRST, publish second. Publishing before checking probe_exit left a
+  # file named like a release artifact behind even on failed runs, which is
+  # exactly how a failure gets misread as a success later. Nothing is copied
+  # unless the probe exited zero.
   if ((probe_exit != 0)); then
-    log_line "FAIL: probe exited ${probe_exit}"
+    log_line "FAIL: probe exited ${probe_exit} — nothing published"
     return "${EX_PROBE_FAILED}"
   fi
+
+  cp -f -- "${PROBE_JSON}" "${LOG_DIR}/probe-$(utc_stamp).json"
+  log_line "probe_json_published=${LOG_DIR}/probe-$(utc_stamp).json (from ${PROBE_JSON})"
   return 0
 }
 

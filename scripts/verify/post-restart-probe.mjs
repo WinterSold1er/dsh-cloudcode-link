@@ -27,6 +27,9 @@ import { join, resolve } from 'node:path'
 const DEFAULT_BASE_URL = 'http://127.0.0.1:3080'
 const DEFAULT_FRESH_WINDOW_MS = 5 * 60 * 1000 // refreshed quota must be this recent
 const DEFAULT_READY_TIMEOUT_MS = 90 * 1000 // host readiness wait after restart
+// An artifact mtime may sit this far before the recorded install completion and
+// still be legitimate (copy/extract ordering inside the install phase).
+const MTIME_TOLERANCE_MS = 5 * 60 * 1000
 const READY_POLL_INTERVAL_MS = 2 * 1000
 const HTTP_READY_STATUSES = new Set([200, 401]) // 401 = web host alive, auth required
 const SERVICE_UNIT = 'deepseek-harness.service'
@@ -75,6 +78,7 @@ function parseArgs(argv) {
     repo: process.cwd(),
     out: null,
     installed: join(homedir(), '.dsh/profiles/web/node_modules/dsh-cloudcode-link'),
+    installRecord: null,
     freshWindowMs: DEFAULT_FRESH_WINDOW_MS,
     readyTimeoutMs: DEFAULT_READY_TIMEOUT_MS,
     noWait: false,
@@ -92,6 +96,7 @@ function parseArgs(argv) {
     else if (a === '--repo') opts.repo = resolve(next())
     else if (a === '--out') opts.out = resolve(next())
     else if (a === '--installed') opts.installed = resolve(next())
+    else if (a === '--install-record') opts.installRecord = resolve(next())
     else if (a === '--fresh-window-ms') opts.freshWindowMs = Number(next())
     else if (a === '--ready-timeout-ms') opts.readyTimeoutMs = Number(next())
     else if (a === '--no-wait') opts.noWait = true
@@ -102,6 +107,7 @@ function parseArgs(argv) {
     throw new Error(`--since is not a parseable time: ${opts.sinceRaw}`)
   }
   opts.out = opts.out ?? join(opts.repo, 'ops/verify')
+  opts.installRecord = opts.installRecord ?? join(opts.repo, 'ops/release/install-complete.json')
   return opts
 }
 
@@ -200,6 +206,34 @@ function installedArtifact(installedDir) {
   return { path: p, mtimeMs: st.mtimeMs, size: st.size, sha256: sha256(p) }
 }
 
+// Independent install record written by the release pipeline
+// (ops/release/install-complete.json). Freshness is judged against THIS, never
+// against a filesystem mtime that a single `touch` can rewrite.
+function readInstallRecord(recordPath) {
+  if (!existsSync(recordPath)) return { ok: false, reason: `install record not found: ${recordPath}` }
+  let rec
+  try {
+    rec = JSON.parse(readFileSync(recordPath, 'utf8'))
+  } catch (err) {
+    return { ok: false, reason: `install record is not valid JSON (${recordPath}): ${err?.message ?? err}` }
+  }
+  const recordMs = rec?.installCompletedUtc ? toEpochMs(rec.installCompletedUtc) : Number.NaN
+  const missing = ['installCompletedUtc', 'installedSha256', 'installedPath', 'repoHead']
+    .filter((k) => typeof rec?.[k] !== 'string' || rec[k] === '')
+  if (missing.length > 0) return { ok: false, reason: `install record is missing field(s): ${missing.join(', ')} (${recordPath})`, rec }
+  if (!Number.isFinite(recordMs)) return { ok: false, reason: `install record installCompletedUtc is not parseable: ${rec.installCompletedUtc}`, rec }
+  return {
+    ok: true,
+    path: recordPath,
+    recordMs,
+    rec,
+    // A record the same operator derived after the fact is self-attested: it can
+    // still bind the artifact hash, but it cannot independently prove ordering.
+    writtenAfterTheFact: rec?.provenance?.writtenAfterTheFact === true,
+    provenanceEvidence: Array.isArray(rec?.provenance?.evidence) ? rec.provenance.evidence : [],
+  }
+}
+
 // ---- startup readiness -----------------------------------------------------
 async function waitReady(opts) {
   const deadline = Date.now() + opts.readyTimeoutMs
@@ -257,27 +291,88 @@ function checkProcessFresh(opts, artifact) {
     : 'installed dist/index.js NOT FOUND')
   if (opts.sinceMs !== null) evidence.push(`--since ${opts.sinceRaw} -> ${msHuman(opts.sinceMs)}`)
 
+  const installRec = readInstallRecord(opts.installRecord)
+  evidence.push(`independent install record: ${opts.installRecord}`)
+  if (installRec.ok) {
+    evidence.push(`record installCompletedUtc=${installRec.rec.installCompletedUtc} -> ${msHuman(installRec.recordMs)}`)
+    evidence.push(`record installedSha256=${installRec.rec.installedSha256}`)
+    evidence.push(`record installedPath=${installRec.rec.installedPath}`)
+    evidence.push(`record repoHead=${installRec.rec.repoHead}`)
+  } else {
+    evidence.push(`record unusable: ${installRec.reason}`)
+  }
+
+  // Timestamp tamper detection: a legitimately installed artifact is written
+  // before the host started and after (or near) the recorded install completion.
+  let suspect = null
+  if (artifact && Number.isFinite(startMs)) {
+    if (artifact.mtimeMs > startMs) {
+      suspect = `artifact mtime ${msHuman(artifact.mtimeMs)} is LATER than host start ${msHuman(startMs)} (artifact changed after the process booted)`
+    } else if (installRec.ok && artifact.mtimeMs < installRec.recordMs - MTIME_TOLERANCE_MS) {
+      suspect = `artifact mtime ${msHuman(artifact.mtimeMs)} predates the recorded install completion ${msHuman(installRec.recordMs)} by more than ${MTIME_TOLERANCE_MS}ms (back-dated timestamp)`
+    }
+    if (suspect) evidence.push(`WARN: SUSPECT TIMESTAMP - ${suspect}`)
+  }
+
   const problems = []
+  if (!installRec.ok) {
+    problems.push(`UNKNOWN-EVIDENCE: missing/invalid independent install record (${installRec.reason}) -> the mtime comparison cannot be trusted on its own`)
+  } else {
+    if (artifact && artifact.sha256 !== installRec.rec.installedSha256.toLowerCase()) {
+      problems.push(`record installedSha256 ${installRec.rec.installedSha256} != actual installed artifact sha256 ${artifact.sha256}`)
+    }
+    if (artifact && resolve(installRec.rec.installedPath) !== resolve(artifact.path)) {
+      problems.push(`record installedPath ${installRec.rec.installedPath} != probed artifact path ${artifact.path}`)
+    }
+    if (Number.isFinite(startMs) && !(startMs > installRec.recordMs)) {
+      problems.push(`host started ${msHuman(startMs)} which is NOT after the recorded install completion ${msHuman(installRec.recordMs)} -> the running process predates the new build`)
+    }
+    // The record binds the artifact hash, but its timestamp was chosen after the
+    // fact by the same operator -> it cannot independently prove ordering.
+    if (installRec.writtenAfterTheFact) {
+      problems.push(`UNKNOWN-EVIDENCE: install record is self-attested (provenance.writtenAfterTheFact=true, installCompletedUtc=${installRec.rec.installCompletedUtc} derived after the fact) -> the install->restart ordering is NOT independently trustworthy; hash binding and live-route evidence remain admissible`)
+      for (const line of installRec.provenanceEvidence) evidence.push(`record provenance evidence: ${line}`)
+    }
+  }
+  if (suspect) {
+    problems.push(`UNKNOWN-EVIDENCE: SUSPECT TIMESTAMP - ${suspect}`)
+  }
   if (props.ActiveState !== 'active') problems.push(`unit not active (${props.ActiveState})`)
   if (!lp.ok || lp.pid === null) problems.push(`no process listening on :${port}`)
   else if (lp.pid !== mainPid) problems.push(`listening pid ${lp.pid} != MainPID ${mainPid}`)
   if (!Number.isFinite(startMs)) problems.push('host start time could not be computed')
   if (!artifact) problems.push('installed artifact missing')
-  if (artifact && Number.isFinite(startMs) && !(startMs > artifact.mtimeMs)) {
-    problems.push(`host started ${msHuman(startMs)} which is NOT after the installed artifact mtime ${msHuman(artifact.mtimeMs)} -> the running process predates the new build`)
-  }
   if (opts.sinceMs !== null && Number.isFinite(startMs) && !(startMs >= opts.sinceMs - 1000)) {
     problems.push(`host started ${msHuman(startMs)} which is before the requested --since ${msHuman(opts.sinceMs)}`)
   }
-  if (!opts.sinceMs && !opts.noWait) {
-    evidence.push('no --since given: freshness floor is the installed artifact mtime (restart must happen after install)')
-  }
+  const unknownOnly = problems.length > 0 && problems.every((p) => p.startsWith('UNKNOWN-EVIDENCE:'))
   const pass = problems.length === 0
-  record('process_fresh', pass ? 'PASS' : 'FAIL',
-    pass ? 'host process is a live listener started after the new build was installed'
-      : `stale/unverifiable process: ${problems.join('; ')}`,
-    evidence)
-  return { verdict: pass ? 'PASS' : 'FAIL', mainPid, startMs, listenPid: lp.pid }
+  const verdict = pass ? 'PASS' : unknownOnly ? 'UNKNOWN' : 'FAIL'
+  const caveat = installRec.ok
+    ? (installRec.writtenAfterTheFact
+      ? `process_fresh timing judgement is self-attested: ${opts.installRecord} has provenance.writtenAfterTheFact=true, so installCompletedUtc (${installRec.rec.installCompletedUtc}) was derived after the fact from a release log by the same operator; the install->restart ordering is NOT independently trustworthy, therefore the verdict is UNKNOWN, not PASS. Admissible substitutes: artifact hash binding (record sha == installed copy sha == HEAD blob == working tree), the live plugin routes answered by this PID, and the release-pipeline ordering lines in the record provenance.`
+      : null)
+    : `no usable independent install record (${installRec.reason}); an artifact mtime is rewritable by one touch and is never a freshness basis, therefore the verdict is UNKNOWN, not PASS.`
+  record('process_fresh', verdict,
+    pass ? `host process is a live listener started after installCompletedUtc=${installRec.rec?.installCompletedUtc} with a matching artifact hash (basis: independent install record, not mtime)`
+      : `${unknownOnly ? 'NOT INDEPENDENTLY PROVEN' : 'stale/unverifiable process'}: ${problems.join('; ')}`,
+    evidence,
+    pass ? 'mtime is reported for context only and is never the freshness basis' : caveat)
+  return {
+    verdict,
+    mainPid,
+    startMs,
+    listenPid: lp.pid,
+    recordMs: installRec.ok ? installRec.recordMs : null,
+    recordPath: opts.installRecord,
+    recordBasis: installRec.ok ? 'record' : 'none',
+    writtenAfterTheFact: installRec.ok ? installRec.writtenAfterTheFact : null,
+    installRecordInstallCompletedUtc: installRec.ok ? installRec.rec.installCompletedUtc : null,
+    installRecordSha256: installRec.ok ? installRec.rec.installedSha256 : null,
+    installRecordRepoHead: installRec.ok ? installRec.rec.repoHead : null,
+    provenanceEvidence: installRec.ok ? installRec.provenanceEvidence : [],
+    caveat,
+  }
 }
 
 function checkArtifactPinned(opts, artifact) {
@@ -371,21 +466,24 @@ async function checkCclLive(opts, fresh, cclStatic) {
     const evidence = [`GET ${url} -> HTTP ${res.status} in ${res.ms}ms`, `body.plugin=${JSON.stringify(res.json?.plugin)} transport=${JSON.stringify(res.json?.transport)}`]
     const servedByPlugin = res.status === 200 && res.json?.plugin === 'dsh-cloudcode-link'
     evidence.push(`listening pid (new process) = ${fresh.listenPid}, host start = ${msHuman(fresh.startMs)}`)
-    const pass = servedByPlugin && fresh.verdict === 'PASS' && cclStatic.verdict === 'PASS'
     const problems = []
+    let unproven = null
     if (!servedByPlugin) problems.push(`plugin status route not served as expected (HTTP ${res.status})`)
-    if (fresh.verdict !== 'PASS') problems.push('new-process evidence not established (see process_fresh)')
+    if (fresh.verdict === 'FAIL') problems.push('new-process evidence refuted (see process_fresh)')
+    else if (fresh.verdict !== 'PASS') unproven = 'new-process evidence not established (see process_fresh)'
     if (cclStatic.verdict !== 'PASS') problems.push('shipped bundle lacks the /ccl registration literals')
-    record('ccl_registered_in_live_host', pass ? 'PASS' : 'FAIL',
-      pass ? 'live host runs the hash-pinned bundle whose apply() registers /ccl before the routes it is serving'
-        : `cannot prove /ccl is registered in the live host: ${problems.join('; ')}`,
+    const verdict = problems.length > 0 ? 'FAIL' : unproven ? 'UNKNOWN' : 'PASS'
+    record('ccl_registered_in_live_host', verdict,
+      verdict === 'PASS' ? 'live host runs the hash-pinned bundle whose apply() registers /ccl before the routes it is serving'
+        : verdict === 'UNKNOWN' ? `cannot prove /ccl is registered in the live host: ${unproven}`
+          : `cannot prove /ccl is registered in the live host: ${problems.join('; ')}`,
       evidence,
       'chain: routes answered by the new PID + bundle hash == HEAD + registration precedes route wiring in the same shipped function')
-    return { verdict: pass ? 'PASS' : 'FAIL' }
+    return { verdict, statusCode: res.status, servedByPlugin }
   } catch (err) {
     record('ccl_registered_in_live_host', 'FAIL', 'plugin status route unreachable in the running host',
       [`GET ${url} -> fetch error: ${err?.message ?? err}`])
-    return { verdict: 'FAIL' }
+    return { verdict: 'FAIL', statusCode: null, servedByPlugin: false }
   }
 }
 
@@ -424,7 +522,14 @@ async function checkQuotaRefresh(opts, probeStartMs) {
       [...evidence, `body: ${refreshed.text.slice(0, 500)}`])
     return { verdict: 'FAIL' }
   }
-  const pool = await httpJson('GET', poolUrl)
+  let pool
+  try {
+    pool = await httpJson('GET', poolUrl)
+  } catch (err) {
+    record('quota_refresh_live', 'UNKNOWN', 'pool read failed at the network layer after the refresh',
+      [...evidence, `GET ${poolUrl} -> fetch error: ${err?.message ?? err}`])
+    return { verdict: 'UNKNOWN' }
+  }
   evidence.push(`GET ${poolUrl} -> HTTP ${pool.status}`)
   if (pool.status !== 200 || !Array.isArray(pool.json?.accounts)) {
     record('quota_refresh_live', 'FAIL', 'pool route did not return account data after refresh',
@@ -598,7 +703,7 @@ async function main() {
   const fresh = checkProcessFresh(opts, artifact)
   const pinned = checkArtifactPinned(opts, artifact)
   const cclStatic = checkBundleDefinesCcl(opts)
-  await checkCclLive(opts, fresh, cclStatic)
+  const ccl = await checkCclLive(opts, fresh, cclStatic)
   await checkQuotaRefresh(opts, probeStartMs)
   await checkModelsUpstream(opts)
   checkModelsFallback(opts)
@@ -608,6 +713,31 @@ async function main() {
   for (const c of checks) counts[c.verdict] += 1
   const verdict = counts.FAIL > 0 ? 'FAIL' : counts.UNKNOWN > 0 ? 'UNKNOWN' : 'PASS'
   const exitCode = counts.FAIL > 0 ? 1 : counts.UNKNOWN > 0 ? 2 : 0
+  // Every emitted check carries its own basis text; this block makes the timing
+  // judgement explicit in the machine-readable artifact so no unlabelled PASS
+  // can leave the probe.
+  const provenance = {
+    argv: `node scripts/verify/post-restart-probe.mjs ${process.argv.slice(2).join(' ')}`.trim(),
+    cwd: process.cwd(),
+    repo: opts.repo,
+    baseUrl: opts.baseUrl,
+    installedPath: artifact?.path ?? null,
+    installRecordPath: fresh.recordPath,
+    installRecordBasis: fresh.recordBasis, // 'record' | 'none' ('mtime' is never used as a basis)
+    processFreshBasis: fresh.recordBasis === 'record'
+      ? `installCompletedUtc=${fresh.installRecordInstallCompletedUtc} from ${fresh.recordPath}`
+      : `no usable install record (${fresh.recordPath}); mtime deliberately NOT used`,
+    installRecordInstallCompletedUtc: fresh.installRecordInstallCompletedUtc,
+    installRecordSha256: fresh.installRecordSha256,
+    installRecordRepoHead: fresh.installRecordRepoHead,
+    installRecordWrittenAfterTheFact: fresh.writtenAfterTheFact,
+    caveat: fresh.caveat,
+    supportingEvidence: [
+      `artifact hash binding (artifact_pinned=${pinned.verdict}): installed copy sha256 ${pinned.sha256 ?? 'n/a'} == git HEAD:dist/index.js ${pinned.headSha ?? 'n/a'}`,
+      `live plugin routes answered by host PID ${fresh.mainPid} (ccl_registered_in_live_host=${ccl.verdict}, status HTTP ${ccl.statusCode ?? 'n/a'}, servedByPlugin=${ccl.servedByPlugin})`,
+      ...fresh.provenanceEvidence.map((l) => `release pipeline: ${l}`),
+    ],
+  }
   const summary = {
     tool: 'post-restart-probe',
     verdict,
@@ -617,11 +747,13 @@ async function main() {
     installedSha256: pinned.sha256 ?? null,
     hostPid: fresh.mainPid ?? null,
     hostStartMs: Number.isFinite(fresh.startMs) ? fresh.startMs : null,
+    provenance,
     checks: checks.map((c) => ({ id: c.id, verdict: c.verdict, summary: c.summary })),
     counts,
   }
   log('')
   log(`VERDICT: ${verdict}  (PASS=${counts.PASS} FAIL=${counts.FAIL} UNKNOWN=${counts.UNKNOWN}, exit ${exitCode})`)
+  log(`PROBE_PROVENANCE_JSON ${JSON.stringify(provenance)}`)
   log(`PROBE_SUMMARY_JSON ${JSON.stringify(summary)}`)
 
   mkdirSync(opts.out, { recursive: true })

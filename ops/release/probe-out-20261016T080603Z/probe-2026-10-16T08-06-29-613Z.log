@@ -1,0 +1,99 @@
+=== dsh-cloudcode-link post-restart probe ===
+probe start: 2026-10-16T08:06:03.649Z (epoch 1792137963649)
+base url: http://127.0.0.1:3080
+installed copy: /home/csy/.dsh/profiles/web/node_modules/dsh-cloudcode-link
+repo: /home/csy/Code/Github/dsh-cloudcode-link
+argv: node scripts/verify/post-restart-probe.mjs --repo . --out ops/release/probe-out-20261016T080603Z --install-record ops/release/install-complete.json
+--- CHECK service_ready: PASS ---
+    web host answers on the configured port
+    evidence: GET http://127.0.0.1:3080/ -> HTTP 401
+    evidence: response date header: Fri, 16 Oct 2026 08:06:03 GMT
+readiness wait: ready=true last=HTTP 401 waitedMs=7
+--- CHECK process_fresh: UNKNOWN ---
+    NOT INDEPENDENTLY PROVEN: UNKNOWN-EVIDENCE: install record is self-attested (provenance.writtenAfterTheFact=true, installCompletedUtc=2026-10-16T15:42:06+08:00 derived after the fact) -> the install->restart ordering is NOT independently trustworthy; hash binding and live-route evidence remain admissible
+    evidence: ActiveState=active SubState=running
+    evidence: MainPID=581348 ExecMainPID=581348 ExecMainStartTimestamp=Fri 2026-10-16 15:42:17 CST
+    evidence: ExecMainStartTimestampMonotonic=153584316393 btime=1791982953s -> hostStartMs=1792136537316 (2026-10-16T07:42:17.316Z)
+    evidence: listening on :3080: LISTEN 0      511    127.0.0.1:3080 0.0.0.0:* users:(("node-MainThread",pid=581348,fd=35))
+    evidence: installed dist/index.js mtime=1792136536316 (2026-10-16T07:42:16.316Z) sha256=6b8e1fad176bfc5ba6e584b13f392b7c436a6e1dcb88161751871b08516a50a4
+    evidence: independent install record: /home/csy/Code/Github/dsh-cloudcode-link/ops/release/install-complete.json
+    evidence: record installCompletedUtc=2026-10-16T15:42:06+08:00 -> 1792136526000 (2026-10-16T07:42:06.000Z)
+    evidence: record installedSha256=6b8e1fad176bfc5ba6e584b13f392b7c436a6e1dcb88161751871b08516a50a4
+    evidence: record installedPath=/home/csy/.dsh/profiles/web/node_modules/dsh-cloudcode-link/dist/index.js
+    evidence: record repoHead=f29859706175201043cc51260fef177106719c68
+    evidence: record provenance evidence: release-20261016T074145Z.log:2 started_at 2026-10-16T15:41:45+08:00
+    evidence: record provenance evidence: release-20261016T074145Z.log:31-32 phase 2 verified installed_sha256=6b8e1fad…
+    evidence: record provenance evidence: release-20261016T074145Z.log:44 restart unit started_at 2026-10-16T15:42:07+08:00
+    evidence: record provenance evidence: release-20261016T074145Z.log:67 restarted_after=12s new_pid=581348 new_start 15:42:17
+    note: process_fresh timing judgement is self-attested: /home/csy/Code/Github/dsh-cloudcode-link/ops/release/install-complete.json has provenance.writtenAfterTheFact=true, so installCompletedUtc (2026-10-16T15:42:06+08:00) was derived after the fact from a release log by the same operator; the install->restart ordering is NOT independently trustworthy, therefore the verdict is UNKNOWN, not PASS. Admissible substitutes: artifact hash binding (record sha == installed copy sha == HEAD blob == working tree), the live plugin routes answered by this PID, and the release-pipeline ordering lines in the record provenance.
+--- CHECK artifact_pinned: PASS ---
+    installed artifact is byte-identical to HEAD c8a6b125e3caf7d986521dbe1ccdab594893f03d:dist/index.js
+    evidence: installed dist/index.js /home/csy/.dsh/profiles/web/node_modules/dsh-cloudcode-link/dist/index.js sha256=6b8e1fad176bfc5ba6e584b13f392b7c436a6e1dcb88161751871b08516a50a4 size=1250243
+    evidence: repo HEAD=c8a6b125e3caf7d986521dbe1ccdab594893f03d
+    evidence: git show HEAD:dist/index.js sha256=6b8e1fad176bfc5ba6e584b13f392b7c436a6e1dcb88161751871b08516a50a4
+    evidence: working-tree dist/index.js sha256=6b8e1fad176bfc5ba6e584b13f392b7c436a6e1dcb88161751871b08516a50a4
+    evidence: INFO (not used as a verdict): installed dist/client.js sha256=3991a5a36b0141609605bc010fd6d5481ee737303cff40077d9d43eec2c48717
+--- CHECK bundle_defines_ccl: PASS ---
+    shipped bundle registers the /ccl and cloudcode commands before route wiring (static, hash-pinned artifact)
+    evidence: offset 1230833: commands.register
+    evidence: offset 1230851: cclCommandDefinition(cmdDeps, "ccl")
+    evidence: offset 1230913: cclCommandDefinition(cmdDeps, "cloudcode")
+    evidence: offset 1233159: regBoth("status"
+    evidence: offset 1248881: inject(["webServer"]
+    evidence: ordering in shipped apply() body: ccl@1230851 < status-route@1233159 < webServer-inject@1248881
+    note: static evidence only; direct /ccl invocation needs an authenticated session API that the local HTTP surface does not expose
+--- CHECK ccl_registered_in_live_host: UNKNOWN ---
+    cannot prove /ccl is registered in the live host: new-process evidence not established (see process_fresh)
+    evidence: GET http://127.0.0.1:3080/plugins/cloudcode-link/status -> HTTP 200 in 7ms
+    evidence: body.plugin="dsh-cloudcode-link" transport="direct"
+    evidence: listening pid (new process) = 581348, host start = 1792136537316 (2026-10-16T07:42:17.316Z)
+    note: chain: routes answered by the new PID + bundle hash == HEAD + registration precedes route wiring in the same shipped function
+--- CHECK quota_refresh_live: PASS ---
+    live upstream refresh produced future resetTime, in-range weeklyFraction and a fresh updatedAt for every family
+    evidence: GET http://127.0.0.1:3080/plugins/cloudcode-link/status -> HTTP 200, auth.phase="ok" message="signed in"
+    evidence: POST http://127.0.0.1:3080/plugins/cloudcode-link/pool/refresh-quota -> HTTP 200 in 25770ms, body.ok=true
+    evidence: GET http://127.0.0.1:3080/plugins/cloudcode-link/pool -> HTTP 200
+    evidence: acc=acc_1792116942660_pqxkh family=anthropic remainingFraction=1 resetTime="2026-10-16T13:06:27Z" (epoch 1792155987000) updatedAt=1792137963818 weeklyFraction=1
+    evidence: acc=acc_1792116942660_pqxkh family=openai remainingFraction=1 resetTime="2026-10-16T13:06:27Z" (epoch 1792155987000) updatedAt=1792137963818 weeklyFraction=1
+    evidence: acc=acc_1792116942660_pqxkh family=google remainingFraction=1 resetTime="2026-10-16T13:06:28Z" (epoch 1792155988000) updatedAt=1792137963818 weeklyFraction=1
+    evidence: acc=acc_1788785623927_xhs7n family=google remainingFraction=1 resetTime="2026-10-16T13:06:28Z" (epoch 1792155988000) updatedAt=1792137963818 weeklyFraction=0.27856246
+    evidence: acc=acc_1788785623927_xhs7n family=anthropic remainingFraction=1 resetTime="2026-10-16T13:06:28Z" (epoch 1792155988000) updatedAt=1792137963818 weeklyFraction=1
+    evidence: acc=acc_1788785623927_xhs7n family=openai remainingFraction=1 resetTime="2026-10-16T13:06:28Z" (epoch 1792155988000) updatedAt=1792137963818 weeklyFraction=1
+    evidence: acc=acc_1788949635573_50yxc family=google remainingFraction=1 resetTime="2026-10-16T13:06:27Z" (epoch 1792155987000) updatedAt=1792137963818 weeklyFraction=0.220663
+    evidence: acc=acc_1788949635573_50yxc family=anthropic remainingFraction=1 resetTime="2026-10-16T13:06:29Z" (epoch 1792155989000) updatedAt=1792137963818 weeklyFraction=1
+    evidence: acc=acc_1788949635573_50yxc family=openai remainingFraction=1 resetTime="2026-10-16T13:06:29Z" (epoch 1792155989000) updatedAt=1792137963818 weeklyFraction=1
+    evidence: acc=acc_1788769443420_5ptu4 family=google remainingFraction=1 resetTime="2026-10-16T13:06:28Z" (epoch 1792155988000) updatedAt=1792137963818 weeklyFraction=0.28054035
+    evidence: acc=acc_1788769443420_5ptu4 family=anthropic remainingFraction=1 resetTime="2026-10-16T13:06:27Z" (epoch 1792155987000) updatedAt=1792137963818 weeklyFraction=1
+    evidence: acc=acc_1788769443420_5ptu4 family=openai remainingFraction=1 resetTime="2026-10-16T13:06:27Z" (epoch 1792155987000) updatedAt=1792137963818 weeklyFraction=1
+    evidence: acc=acc_1788868397749_n0tdx family=google remainingFraction=1 resetTime="2026-10-16T13:06:27Z" (epoch 1792155987000) updatedAt=1792137963818 weeklyFraction=0.2694833
+    evidence: acc=acc_1788868397749_n0tdx family=anthropic remainingFraction=1 resetTime="2026-10-16T13:06:28Z" (epoch 1792155988000) updatedAt=1792137963818 weeklyFraction=1
+    evidence: acc=acc_1788868397749_n0tdx family=openai remainingFraction=1 resetTime="2026-10-16T13:06:28Z" (epoch 1792155988000) updatedAt=1792137963818 weeklyFraction=1
+    evidence: families=15 weeklyFractionPresent=15 freshest updatedAt=1792137963818 (age -169ms, window 300000ms)
+    note: values come from the running plugin (installed copy) calling the upstream quota endpoints; nothing is mocked
+--- CHECK models_upstream_side: PASS ---
+    upstream-side catalog served by the live plugin contains every required §1 model slug
+    evidence: GET http://127.0.0.1:3080/plugins/cloudcode-link/catalog -> HTTP 200 in 6ms
+    evidence: source="discovered" count=19 idsInBody=19
+    evidence: observed ids: gemini-3.6-flash, gemini-3.8-flash, gemini-3.1-pro, gemini-3.5-flash, gemini-3.1-flash-image, gemini-3.1-flash-lite, gemini-2.5-flash, gemini-3-flash-agent, gemini-3-flash, claude-sonnet-4-6, gemini-2.5-flash-thinking, claude-opus-4-6-thinking, gpt-oss-120b-medium, gemini-3.5-flash-lite, gemini-2.5-flash-lite, gemini-2.5-pro, gemini-pro-agent, gemini-3.5-flash-extra-low, gemini-3.7-flash
+    evidence: required (docs/models-and-fix.md §1 upstream, normalized slugs): gemini-3.8-flash, gemini-3.6-flash, gemini-3.5-flash, gemini-3-flash, gemini-3.1-flash-lite, gemini-2.5-pro, gemini-2.5-flash, claude-sonnet-4-6, claude-opus-4-6-thinking, gpt-oss-120b-medium
+    evidence: missing: (none)
+--- CHECK models_fallback_side: PASS ---
+    shipped bundle carries every §2 fallback model entry
+    evidence: extracted from /home/csy/.dsh/profiles/web/node_modules/dsh-cloudcode-link/dist/index.js (offset 1881..3351)
+    evidence: DEFAULT_FALLBACK_MODELS ids (12): gemini-3.8-flash, gemini-3.7-flash, gemini-3.6-flash, gemini-3.5-flash, gemini-3.1-pro, gemini-3-flash, gemini-2.5-pro, gemini-2.5-flash, gemini-3.1-flash-lite, claude-sonnet-4-6, claude-opus-4-6-thinking, gpt-oss-120b-medium
+    evidence: required (docs/models-and-fix.md §2 fallback constant, 12 entries): gemini-3.8-flash, gemini-3.7-flash, gemini-3.6-flash, gemini-3.5-flash, gemini-3.1-pro, gemini-3-flash, gemini-2.5-pro, gemini-2.5-flash, gemini-3.1-flash-lite, claude-sonnet-4-6, claude-opus-4-6-thinking, gpt-oss-120b-medium
+    evidence: missing: (none)
+--- CHECK journal_no_import_failure: PASS ---
+    startup journal has no dsh-cloudcode-link import failure
+    evidence: journalctl --user -u deepseek-harness.service --since 2026-10-16T07:42:12.316Z -> 58 lines
+    evidence: cloudcode-link/agy-link lines: 0
+    evidence: cloudcode-link import FAILURES: 0
+    evidence: unrelated plugins failing to import (pre-existing, informational): 5
+    evidence: INFO (other plugin): 10月 16 15:42:45 qianting-superserver node[581348]: subagent-director (dsh-plugin-subagent-director): failed to import
+    evidence: INFO (other plugin): 10月 16 15:42:45 qianting-superserver node[581348]: lsp (@deepseek-ai/dsh-lsp): failed to import
+    evidence: INFO (other plugin): 10月 16 15:42:45 qianting-superserver node[581348]: lsp-stdio (@deepseek-ai/dsh-lsp-stdio): failed to import
+    note: the plugin logs no startup banner, so absence of a failure line is the only journal signal (the live routes are the positive evidence)
+
+VERDICT: UNKNOWN  (PASS=7 FAIL=0 UNKNOWN=2, exit 2)
+PROBE_PROVENANCE_JSON {"argv":"node scripts/verify/post-restart-probe.mjs --repo . --out ops/release/probe-out-20261016T080603Z --install-record ops/release/install-complete.json","cwd":"/home/csy/Code/Github/dsh-cloudcode-link","repo":"/home/csy/Code/Github/dsh-cloudcode-link","baseUrl":"http://127.0.0.1:3080","installedPath":"/home/csy/.dsh/profiles/web/node_modules/dsh-cloudcode-link/dist/index.js","installRecordPath":"/home/csy/Code/Github/dsh-cloudcode-link/ops/release/install-complete.json","installRecordBasis":"record","processFreshBasis":"installCompletedUtc=2026-10-16T15:42:06+08:00 from /home/csy/Code/Github/dsh-cloudcode-link/ops/release/install-complete.json","installRecordInstallCompletedUtc":"2026-10-16T15:42:06+08:00","installRecordSha256":"6b8e1fad176bfc5ba6e584b13f392b7c436a6e1dcb88161751871b08516a50a4","installRecordRepoHead":"f29859706175201043cc51260fef177106719c68","installRecordWrittenAfterTheFact":true,"caveat":"process_fresh timing judgement is self-attested: /home/csy/Code/Github/dsh-cloudcode-link/ops/release/install-complete.json has provenance.writtenAfterTheFact=true, so installCompletedUtc (2026-10-16T15:42:06+08:00) was derived after the fact from a release log by the same operator; the install->restart ordering is NOT independently trustworthy, therefore the verdict is UNKNOWN, not PASS. Admissible substitutes: artifact hash binding (record sha == installed copy sha == HEAD blob == working tree), the live plugin routes answered by this PID, and the release-pipeline ordering lines in the record provenance.","supportingEvidence":["artifact hash binding (artifact_pinned=PASS): installed copy sha256 6b8e1fad176bfc5ba6e584b13f392b7c436a6e1dcb88161751871b08516a50a4 == git HEAD:dist/index.js c8a6b125e3caf7d986521dbe1ccdab594893f03d","live plugin routes answered by host PID 581348 (ccl_registered_in_live_host=UNKNOWN, status HTTP 200, servedByPlugin=true)","release pipeline: release-20261016T074145Z.log:2 started_at 2026-10-16T15:41:45+08:00","release pipeline: release-20261016T074145Z.log:31-32 phase 2 verified installed_sha256=6b8e1fad…","release pipeline: release-20261016T074145Z.log:44 restart unit started_at 2026-10-16T15:42:07+08:00","release pipeline: release-20261016T074145Z.log:67 restarted_after=12s new_pid=581348 new_start 15:42:17"]}
+PROBE_SUMMARY_JSON {"tool":"post-restart-probe","verdict":"UNKNOWN","exitCode":2,"probeStart":"2026-10-16T08:06:03.649Z","repoHead":"c8a6b125e3caf7d986521dbe1ccdab594893f03d","installedSha256":"6b8e1fad176bfc5ba6e584b13f392b7c436a6e1dcb88161751871b08516a50a4","hostPid":581348,"hostStartMs":1792136537316,"provenance":{"argv":"node scripts/verify/post-restart-probe.mjs --repo . --out ops/release/probe-out-20261016T080603Z --install-record ops/release/install-complete.json","cwd":"/home/csy/Code/Github/dsh-cloudcode-link","repo":"/home/csy/Code/Github/dsh-cloudcode-link","baseUrl":"http://127.0.0.1:3080","installedPath":"/home/csy/.dsh/profiles/web/node_modules/dsh-cloudcode-link/dist/index.js","installRecordPath":"/home/csy/Code/Github/dsh-cloudcode-link/ops/release/install-complete.json","installRecordBasis":"record","processFreshBasis":"installCompletedUtc=2026-10-16T15:42:06+08:00 from /home/csy/Code/Github/dsh-cloudcode-link/ops/release/install-complete.json","installRecordInstallCompletedUtc":"2026-10-16T15:42:06+08:00","installRecordSha256":"6b8e1fad176bfc5ba6e584b13f392b7c436a6e1dcb88161751871b08516a50a4","installRecordRepoHead":"f29859706175201043cc51260fef177106719c68","installRecordWrittenAfterTheFact":true,"caveat":"process_fresh timing judgement is self-attested: /home/csy/Code/Github/dsh-cloudcode-link/ops/release/install-complete.json has provenance.writtenAfterTheFact=true, so installCompletedUtc (2026-10-16T15:42:06+08:00) was derived after the fact from a release log by the same operator; the install->restart ordering is NOT independently trustworthy, therefore the verdict is UNKNOWN, not PASS. Admissible substitutes: artifact hash binding (record sha == installed copy sha == HEAD blob == working tree), the live plugin routes answered by this PID, and the release-pipeline ordering lines in the record provenance.","supportingEvidence":["artifact hash binding (artifact_pinned=PASS): installed copy sha256 6b8e1fad176bfc5ba6e584b13f392b7c436a6e1dcb88161751871b08516a50a4 == git HEAD:dist/index.js c8a6b125e3caf7d986521dbe1ccdab594893f03d","live plugin routes answered by host PID 581348 (ccl_registered_in_live_host=UNKNOWN, status HTTP 200, servedByPlugin=true)","release pipeline: release-20261016T074145Z.log:2 started_at 2026-10-16T15:41:45+08:00","release pipeline: release-20261016T074145Z.log:31-32 phase 2 verified installed_sha256=6b8e1fad…","release pipeline: release-20261016T074145Z.log:44 restart unit started_at 2026-10-16T15:42:07+08:00","release pipeline: release-20261016T074145Z.log:67 restarted_after=12s new_pid=581348 new_start 15:42:17"]},"checks":[{"id":"service_ready","verdict":"PASS","summary":"web host answers on the configured port"},{"id":"process_fresh","verdict":"UNKNOWN","summary":"NOT INDEPENDENTLY PROVEN: UNKNOWN-EVIDENCE: install record is self-attested (provenance.writtenAfterTheFact=true, installCompletedUtc=2026-10-16T15:42:06+08:00 derived after the fact) -> the install->restart ordering is NOT independently trustworthy; hash binding and live-route evidence remain admissible"},{"id":"artifact_pinned","verdict":"PASS","summary":"installed artifact is byte-identical to HEAD c8a6b125e3caf7d986521dbe1ccdab594893f03d:dist/index.js"},{"id":"bundle_defines_ccl","verdict":"PASS","summary":"shipped bundle registers the /ccl and cloudcode commands before route wiring (static, hash-pinned artifact)"},{"id":"ccl_registered_in_live_host","verdict":"UNKNOWN","summary":"cannot prove /ccl is registered in the live host: new-process evidence not established (see process_fresh)"},{"id":"quota_refresh_live","verdict":"PASS","summary":"live upstream refresh produced future resetTime, in-range weeklyFraction and a fresh updatedAt for every family"},{"id":"models_upstream_side","verdict":"PASS","summary":"upstream-side catalog served by the live plugin contains every required §1 model slug"},{"id":"models_fallback_side","verdict":"PASS","summary":"shipped bundle carries every §2 fallback model entry"},{"id":"journal_no_import_failure","verdict":"PASS","summary":"startup journal has no dsh-cloudcode-link import failure"}],"counts":{"PASS":7,"FAIL":0,"UNKNOWN":2}}

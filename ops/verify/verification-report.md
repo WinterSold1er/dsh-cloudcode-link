@@ -62,3 +62,16 @@ UNKNOWN：无。
   即安装副本自身的产物在真实进程内执行；不 mock、不读仓库 src（仓库 `src/**` 不参与判定）。
 - `/ccl` 的**交互式**调用未取证（无认证会话 API），只给出「交付包注册顺序 + 新进程加载该交付包 + 其路由正被服务」的推理链，
   已在日志 note 中标注，未当作交互验证。
+
+---
+
+## 追加（T10）：canonical 已切换到独立记录 + provenance
+
+本报告 §「最新一次运行」所列的 mtime 期证据（含 `probe-2026-10-16T06-49-07-493Z`、`08-02-21-403Z`）**均已作废**。
+
+- 现行 canonical：`ops/release/probe-out-20261016T080603Z/probe-2026-10-16T08-06-29-613Z.{log,json}`
+  → **UNKNOWN（7 PASS / 0 FAIL / 2 UNKNOWN，exit 2）**，`process_fresh` 依据为
+  `ops/release/install-complete.json`（`installRecordBasis=record`），但该记录
+  `provenance.writtenAfterTheFact=true` ⇒ 时序自证 ⇒ 判 UNKNOWN（详见 `ops/release/release-audit.md` §8）。
+- 机读件带 `provenance.caveat` 与 `supportingEvidence`（三路哈希一致 / live route by PID / 流水线时序行）。
+- 作废清单：`ops/release/superseded/SUPERSEDED.md`。

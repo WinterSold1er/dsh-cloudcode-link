@@ -560,12 +560,16 @@ main() {
     shift
   done
 
-  # Reject the combination whose suppression cannot cross the systemd-run
-  # boundary: a scheduled unit must carry --rehearse as an argument, and env
-  # overrides of the form CCH_RESTART_DRY_RUN=1 are refused outright.
-  if [[ "${mode}" == "schedule" && "${REHEARSE}" != "1" && "${CCH_RESTART_DRY_RUN:-0}" == "1" ]]; then
+  # Every entry point that can lead to a restart treats the env switch the same
+  # way. `--detach`/`--plan` print a command whose payload restarts the host, so
+  # silently ignoring CCH_RESTART_DRY_RUN there is exactly how a copied `--detach`
+  # line once killed a live session. One rule, identical wording, all modes.
+  if [[ "${mode}" == "print" || "${mode}" == "schedule" ]] \
+    && [[ "${REHEARSE}" != "1" && "${CCH_RESTART_DRY_RUN:-0}" == "1" ]]; then
+    local hint="--schedule"
+    [[ "${mode}" == "print" ]] && hint="--detach"
     printf 'refusing: CCH_RESTART_DRY_RUN does not cross the systemd-run boundary.\n' >&2
-    printf 'use: restart-host.sh --schedule --rehearse\n' >&2
+    printf 'use: restart-host.sh %s --rehearse\n' "${hint}" >&2
     return "${EX_USAGE}"
   fi
 
