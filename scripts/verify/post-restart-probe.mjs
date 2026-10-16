@@ -21,7 +21,8 @@ import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { join, relative, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 // ---- named knobs (no anonymous magic values) -------------------------------
 const DEFAULT_BASE_URL = 'http://127.0.0.1:3080'
@@ -737,6 +738,34 @@ async function main() {
       `live plugin routes answered by host PID ${fresh.mainPid} (ccl_registered_in_live_host=${ccl.verdict}, status HTTP ${ccl.statusCode ?? 'n/a'}, servedByPlugin=${ccl.servedByPlugin})`,
       ...fresh.provenanceEvidence.map((l) => `release pipeline: ${l}`),
     ],
+  }
+  // Pin the evidence to an exact probe revision + repo state, so a machine-readable
+  // artifact can never be produced by an unidentified script revision.
+  const probeAbs = fileURLToPath(import.meta.url)
+  const probeRel = relative(opts.repo, probeAbs)
+  const probeClean = run('git', ['diff', '--quiet', 'HEAD', '--', probeRel], { cwd: opts.repo })
+  const headBlob = run('git', ['show', `HEAD:${probeRel}`], { cwd: opts.repo, encoding: 'buffer', maxBuffer: 64 * 1024 * 1024 })
+  const porcelain = run('git', ['status', '--porcelain'], { cwd: opts.repo })
+  const dirtyPaths = porcelain.ok ? porcelain.out.split('\n').map((l) => l.trimEnd()).filter(Boolean) : []
+  provenance.probeFile = probeRel
+  provenance.probeSha256 = sha256(probeAbs)
+  provenance.probeMatchesHeadBlob = headBlob.ok
+    ? createHash('sha256').update(headBlob.out).digest('hex') === provenance.probeSha256
+    : null
+  provenance.repoHeadSha = (run('git', ['rev-parse', 'HEAD'], { cwd: opts.repo }).out ?? '').trim() || null
+  provenance.repoDirty = probeClean.ok ? false : true // the evidence-producing probe revision is uncommitted
+  provenance.repoDirtyAll = dirtyPaths.length > 0
+  provenance.repoDirtyPaths = dirtyPaths.slice(0, 10)
+  provenance.nodeVersion = process.version
+  const REQUIRED_PROVENANCE_FIELDS = ['probeFile', 'probeSha256', 'repoHeadSha', 'repoDirty', 'nodeVersion']
+  const missingProvenance = REQUIRED_PROVENANCE_FIELDS
+    .filter((k) => provenance[k] === undefined || provenance[k] === null || provenance[k] === '')
+  if (missingProvenance.length > 0) {
+    log('')
+    log(`PROVENANCE SELF-CHECK FAILED: missing/empty provenance field(s): ${missingProvenance.join(', ')} -> evidence is invalid, refusing to emit a canonical artifact`)
+    mkdirSync(opts.out, { recursive: true })
+    writeFileSync(join(opts.out, `probe-${outStamp()}.log`), `${logLines.join('\n')}\n`)
+    return 3
   }
   const summary = {
     tool: 'post-restart-probe',
