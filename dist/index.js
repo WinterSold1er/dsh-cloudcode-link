@@ -27777,7 +27777,12 @@ const OAUTH_AUTHORIZE_URL = "https://accounts.google.com/o/oauth2/v2/auth";
 const OAUTH_TOKEN_URL = "https://oauth2.googleapis.com/token";
 const OAUTH_USERINFO_URL = "https://www.googleapis.com/oauth2/v1/userinfo";
 const OAUTH_CALLBACK_PORT = 51121;
-const OAUTH_REDIRECT_URI = `http://localhost:${OAUTH_CALLBACK_PORT}/oauth-callback`;
+const OAUTH_CALLBACK_PATH = "/oauth-callback";
+/** Redirect URI for the registered callback port; overridable so a listener can bind an isolated port. */
+function oauthRedirectUri(port = OAUTH_CALLBACK_PORT) {
+	return `http://localhost:${port}${OAUTH_CALLBACK_PATH}`;
+}
+const OAUTH_REDIRECT_URI = oauthRedirectUri();
 const AGY_ENDPOINTS = [
 	"https://cloudcode-pa.googleapis.com",
 	"https://daily-cloudcode-pa.googleapis.com",
@@ -27791,12 +27796,12 @@ function generatePkce() {
 		challenge: createHash("sha256").update(verifier).digest("base64url")
 	};
 }
-function buildAuthorizeUrl(challenge, state) {
+function buildAuthorizeUrl(challenge, state, redirectUri = OAUTH_REDIRECT_URI) {
 	const { clientId } = resolveClientCredentials();
 	const url = new URL(OAUTH_AUTHORIZE_URL);
 	url.searchParams.set("client_id", clientId);
 	url.searchParams.set("response_type", "code");
-	url.searchParams.set("redirect_uri", OAUTH_REDIRECT_URI);
+	url.searchParams.set("redirect_uri", redirectUri);
 	url.searchParams.set("scope", AGY_SCOPES.join(" "));
 	url.searchParams.set("code_challenge", challenge);
 	url.searchParams.set("code_challenge_method", "S256");
@@ -27835,11 +27840,11 @@ function toTokenSet(payload, refreshTokenFallback) {
 	};
 }
 /** Exchange an authorization code for tokens (PKCE-verified). */
-async function exchangeCode(code, verifier, proxyUrl) {
+async function exchangeCode(code, verifier, proxyUrl, redirectUri = OAUTH_REDIRECT_URI) {
 	return toTokenSet(await postTokenForm({
 		grant_type: "authorization_code",
 		code: code.trim(),
-		redirect_uri: OAUTH_REDIRECT_URI,
+		redirect_uri: redirectUri,
 		code_verifier: verifier
 	}, proxyUrl));
 }
@@ -27910,7 +27915,9 @@ const CALLBACK_SUCCESS_HTML = `<!doctype html><html><head><meta charset="utf-8">
 <h2>✓ 授权成功</h2>
 <p>可以关闭此标签页返回终端或应用。</p>
 </body></html>`;
-function startCallbackListener(timeoutMs = 3e5) {
+function startCallbackListener(options = {}) {
+	const timeoutMs = options.timeoutMs ?? 3e5;
+	const port = options.port ?? 51121;
 	let resolveResult;
 	let rejectResult;
 	const result = new Promise((resolve, reject) => {
@@ -27954,9 +27961,9 @@ function startCallbackListener(timeoutMs = 3e5) {
 		setTimeout(() => server.close(), 1500);
 	});
 	server.on("error", (error) => {
-		rejectResult(error.code === "EADDRINUSE" ? /* @__PURE__ */ new Error(`port ${OAUTH_CALLBACK_PORT} is busy`) : error);
+		rejectResult(error.code === "EADDRINUSE" ? /* @__PURE__ */ new Error(`port ${port} is busy`) : error);
 	});
-	server.listen(OAUTH_CALLBACK_PORT, "127.0.0.1");
+	server.listen(port, "127.0.0.1");
 	const timeout = setTimeout(() => {
 		rejectResult(/* @__PURE__ */ new Error("timed out waiting for the OAuth callback"));
 		server.close();
@@ -28013,6 +28020,7 @@ var PoolAuthFlow = class {
 	statusValue = { phase: "idle" };
 	doneResetTimer = null;
 	open;
+	callbackPort;
 	pool;
 	quota;
 	log;
@@ -28021,6 +28029,7 @@ var PoolAuthFlow = class {
 		this.quota = quota;
 		this.log = log;
 		this.open = deps.openBrowser ?? openBrowser;
+		this.callbackPort = deps.callbackPort;
 	}
 	status() {
 		return { ...this.statusValue };
@@ -28042,8 +28051,8 @@ var PoolAuthFlow = class {
 		await this.abortActive();
 		const { verifier, challenge } = generatePkce();
 		const state = randomBytes(16).toString("base64url");
-		const url = buildAuthorizeUrl(challenge, state);
-		let listener = startCallbackListener();
+		const url = buildAuthorizeUrl(challenge, state, oauthRedirectUri(this.callbackPort));
+		let listener = startCallbackListener({ port: this.callbackPort });
 		let bindFailed = false;
 		await Promise.race([listener.result.then(() => {}, () => {
 			bindFailed = true;
@@ -28134,7 +28143,7 @@ var PoolAuthFlow = class {
 		}
 		this.setStatus({ phase: "exchanging" });
 		try {
-			const tokens = await exchangeCode(code, flow.verifier, flow.proxyUrl);
+			const tokens = await exchangeCode(code, flow.verifier, flow.proxyUrl, oauthRedirectUri(this.callbackPort));
 			writeAgyTokenFile(flow.dir, tokens);
 			const email = await fetchUserEmail(tokens.access_token, flow.proxyUrl);
 			if (flow.primary) {

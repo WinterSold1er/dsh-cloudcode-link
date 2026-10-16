@@ -6,7 +6,26 @@ import { join } from 'node:path'
 import { AccountPoolManager } from '../src/host/pool.ts'
 import { PoolAuthFlow } from '../src/host/pool-auth.ts'
 import { QuotaService } from '../src/host/quota.ts'
-import { resolveClientCredentials, AGY_PUBLIC_CLIENT_SECRET } from '../src/host/oauth.ts'
+import { resolveClientCredentials, AGY_PUBLIC_CLIENT_SECRET, OAUTH_REDIRECT_URI } from '../src/host/oauth.ts'
+
+/**
+ * Ask the OS for a currently free TCP port. The OAuth callback listener binds a
+ * real socket, so this file must never assume the shared production port 51121
+ * is free: a concurrent suite run (or a live host mid-auth) holds it, and the
+ * flow then correctly degrades to 'manual' mode.
+ */
+async function freePort(): Promise<number> {
+  const { createServer } = await import('node:net')
+  return await new Promise<number>((resolve, reject) => {
+    const probe = createServer()
+    probe.once('error', reject)
+    probe.listen(0, '127.0.0.1', () => {
+      const address = probe.address()
+      const port = typeof address === 'object' && address !== null ? address.port : 0
+      probe.close(() => (port > 0 ? resolve(port) : reject(new Error('no free port assigned'))))
+    })
+  })
+}
 
 function fixture() {
   const dir = mkdtempSync(join(tmpdir(), 'agy-pool-auth-'))
@@ -17,7 +36,8 @@ function fixture() {
 
 test('PoolAuthFlow begin produces a PKCE authorize URL and auto mode', async () => {
   const { pool, quota } = fixture()
-  const flow = new PoolAuthFlow(pool, quota, () => {}, { openBrowser: async () => true })
+  const port = await freePort()
+  const flow = new PoolAuthFlow(pool, quota, () => {}, { openBrowser: async () => true, callbackPort: port })
   const st = await flow.begin('测试账号')
   assert.equal(st.ok, true)
   assert.equal(st.phase, 'waiting')
@@ -26,7 +46,9 @@ test('PoolAuthFlow begin produces a PKCE authorize URL and auto mode', async () 
   assert.ok(st.url?.includes('accounts.google.com'))
   assert.ok(st.url?.includes('code_challenge='))
   assert.ok(st.url?.includes('code_challenge_method=S256'))
-  assert.ok(st.url?.includes('redirect_uri=http%3A%2F%2Flocalhost%3A51121'))
+  assert.ok(st.url?.includes(`redirect_uri=http%3A%2F%2Flocalhost%3A${port}`))
+  // production default stays the registered callback port
+  assert.equal(OAUTH_REDIRECT_URI, 'http://localhost:51121/oauth-callback')
   // openid must NOT be in the scope (hangs consent for this client)
   assert.ok(!st.url?.includes('openid'))
   // staging slot exists but no account committed yet
@@ -37,7 +59,8 @@ test('PoolAuthFlow begin produces a PKCE authorize URL and auto mode', async () 
 
 test('PoolAuthFlow cancel cleans the staging dir', async () => {
   const { dir, pool, quota } = fixture()
-  const flow = new PoolAuthFlow(pool, quota, () => {}, { openBrowser: async () => false })
+  const port = await freePort()
+  const flow = new PoolAuthFlow(pool, quota, () => {}, { openBrowser: async () => false, callbackPort: port })
   const st = await flow.begin()
   assert.equal(st.ok, true)
   const { readdirSync } = await import('node:fs')
@@ -48,7 +71,8 @@ test('PoolAuthFlow cancel cleans the staging dir', async () => {
 
 test('PoolAuthFlow rejects bogus paste and wrong-state URLs', async () => {
   const { pool, quota } = fixture()
-  const flow = new PoolAuthFlow(pool, quota, () => {}, { openBrowser: async () => true })
+  const port = await freePort()
+  const flow = new PoolAuthFlow(pool, quota, () => {}, { openBrowser: async () => true, callbackPort: port })
   const st = await flow.begin()
   assert.equal(st.ok, true)
 
@@ -56,7 +80,7 @@ test('PoolAuthFlow rejects bogus paste and wrong-state URLs', async () => {
   assert.equal(bogus.ok, false)
   assert.equal(bogus.phase, 'waiting') // still waiting, not failed
 
-  const wrongState = await flow.submitCode('http://localhost:51121/oauth-callback?code=4/1AfValidLookingCode&state=WRONG')
+  const wrongState = await flow.submitCode(`http://localhost:${port}/oauth-callback?code=4/1AfValidLookingCode&state=WRONG`)
   assert.equal(wrongState.ok, false)
   assert.equal(wrongState.phase, 'waiting')
   assert.match(wrongState.message ?? '', /state/)
@@ -64,14 +88,16 @@ test('PoolAuthFlow rejects bogus paste and wrong-state URLs', async () => {
   await flow.cancel()
 })
 
-test('PoolAuthFlow fails cleanly when the exchange is rejected', async () => {
+test('PoolAuthFlow fails cleanly when the exchange is rejected', async (t) => {
   const { dir, pool, quota } = fixture()
-  const flow = new PoolAuthFlow(pool, quota, () => {}, { openBrowser: async () => true })
+  const port = await freePort()
+  const flow = new PoolAuthFlow(pool, quota, () => {}, { openBrowser: async () => true, callbackPort: port })
   const st = await flow.begin()
   assert.equal(st.ok, true)
   // A real-looking but invalid code reaches the token endpoint and is
   // rejected; the flow must fail (not hang) and clean up staging.
-  // NOTE: this test requires network; skip silently when offline.
+  // NOTE: this test requires network — offline it reports an explicit skip
+  // (never a silent pass) so the gap stays visible in the run tally.
   try {
     const res = await flow.submitCode('4/1AfDefinitelyInvalidCode123')
     assert.equal(res.ok, false)
@@ -80,8 +106,14 @@ test('PoolAuthFlow fails cleanly when the exchange is rejected', async () => {
     const { readdirSync } = await import('node:fs')
     assert.ok(!readdirSync(dir).some((e) => e.startsWith('staging_')))
   } catch (err) {
-    if (String(err).includes('fetch failed')) return // offline: skip
+    if (String(err).includes('fetch failed')) {
+      t.diagnostic('token endpoint unreachable (fetch failed): rejecting-code path NOT verified')
+      t.skip('offline: cannot reach the token endpoint to verify the rejection path')
+      return
+    }
     throw err
+  } finally {
+    await flow.cancel() // release the callback port instead of leaking it past the test
   }
 })
 
