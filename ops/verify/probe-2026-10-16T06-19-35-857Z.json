@@ -1,0 +1,62 @@
+{
+  "tool": "post-restart-probe",
+  "verdict": "FAIL",
+  "exitCode": 1,
+  "probeStart": "2026-10-16T06:19:23.538Z",
+  "repoHead": "dc0ca77a29a317bd1948a291534cd69334085081",
+  "installedSha256": "73e0efbf8d72cbb8a0f51866f31afb5411e9c61c88107e9ce9337107198e2ebf",
+  "hostPid": 420693,
+  "hostStartMs": 1792116191991,
+  "checks": [
+    {
+      "id": "service_ready",
+      "verdict": "PASS",
+      "summary": "web host answers on the configured port"
+    },
+    {
+      "id": "process_fresh",
+      "verdict": "FAIL",
+      "summary": "stale/unverifiable process: host started 1792116191991 (2026-10-16T02:03:11.991Z) which is NOT after the installed artifact mtime 1792123525479.5623 (2026-10-16T04:05:25.479Z) -> the running process predates the new build"
+    },
+    {
+      "id": "artifact_pinned",
+      "verdict": "PASS",
+      "summary": "installed artifact is byte-identical to HEAD dc0ca77a29a317bd1948a291534cd69334085081:dist/index.js"
+    },
+    {
+      "id": "bundle_defines_ccl",
+      "verdict": "FAIL",
+      "summary": "shipped bundle does not contain the expected registration literals: \"/plugins/cloudcode-link/"
+    },
+    {
+      "id": "ccl_registered_in_live_host",
+      "verdict": "FAIL",
+      "summary": "cannot prove /ccl is registered in the live host: new-process evidence not established (see process_fresh); shipped bundle lacks the /ccl registration literals"
+    },
+    {
+      "id": "quota_refresh_live",
+      "verdict": "PASS",
+      "summary": "live upstream refresh produced future resetTime, in-range weeklyFraction and a fresh updatedAt for every family"
+    },
+    {
+      "id": "models_upstream_side",
+      "verdict": "PASS",
+      "summary": "upstream-side catalog served by the live plugin contains every required §1 model slug"
+    },
+    {
+      "id": "models_fallback_side",
+      "verdict": "PASS",
+      "summary": "shipped bundle carries every §2 fallback model entry"
+    },
+    {
+      "id": "journal_no_import_failure",
+      "verdict": "FAIL",
+      "summary": "startup journal reports plugin import failures"
+    }
+  ],
+  "counts": {
+    "PASS": 5,
+    "FAIL": 4,
+    "UNKNOWN": 0
+  }
+}
