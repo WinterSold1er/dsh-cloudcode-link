@@ -577,3 +577,21 @@ wrong_hash_exit=1
 - 历史判定保留在 `ops/release/superseded/`，**不覆盖**；本文件 §4 的历史结论与 `UNTRUSTED` 标注同样保留。
 - host 全程未重启：PID 581348 / `2026-10-16 15:42:17 CST`；安装副本 mtime 未被再次写入。
 - `ops/release/.no-restart` 护闸保留生效（exit 6）。
+
+### 9.1 本轮副作用披露：`--dry-phases` 会执行 phase 1，因而改写了 mtime（如实记录）
+
+我在 §9 的负向验证里跑了 `release-runner.sh --dry-phases`（喂错期望哈希）。
+该模式**跳过的是重启阶段（phase 4+），不跳过 phase 1 的 `pnpm update`**，因此它重新落盘了
+安装副本，把 mtime 从 `2026-10-16 15:42:16.316000000 +0800` 改写为 `2026-10-16 16:14:21.427841018 +0800`。
+
+| 项 | 事实 |
+|---|---|
+| 是否我发起 | **是**。命令：`CCH_EXPECTED_INDEX_SHA256=deadbeef… bash scripts/deploy/release-runner.sh --dry-phases` |
+| 写入者 | phase 1 `pnpm update dsh-cloudcode-link`（日志 `ops/release/release-20261016T081357Z.log:13` 为 phase 1、`:29` `pnpm_exit=1`） |
+| 内容是否改变 | **否**。改写前后 `dist/index.js` sha256 均为 `6b8e1fad176bfc5ba6e584b13f392b7c436a6e1dcb88161751871b08516a50a4`，且 == `HEAD:dist` |
+| 是否违反用户约束 | **是**（用户禁止任何 mtime 写入）。性质上这是**工具副作用**，不是我手工 `touch`；但我发起了命令，故由我承担责任 |
+| 处置 | **不回拨、不再写入**（用户明确要求保持现状，避免叠加污染）。`mtime_freshness` 继续判 UNKNOWN，依据行会显示新的 mtime/ctime |
+| 教训 | `--dry-phases` 名不副实：它只跳过重启，不跳过重装。凡在这个仓库里跑 runner，都会改写安装副本 mtime —— 后续验证应改用 `freshness-check.sh`（只读）或函数级 source，而不是 `--dry-phases` |
+
+**后续建议（交 Lead 决策，我不擅自改）**：给 runner 增加 `--no-install` 开关，使「只校验不重装」
+成为可能；或在 `--dry-phases` 中跳过 phase 1。两者都能避免再次污染 mtime。
