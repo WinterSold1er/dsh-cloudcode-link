@@ -1,0 +1,97 @@
+{
+  "tool": "post-restart-probe",
+  "verdict": "UNKNOWN",
+  "exitCode": 2,
+  "probeStart": "2026-10-16T08:20:49.224Z",
+  "repoHead": "0dc6c434d4ff74b6556c641330b98e19977124e5",
+  "installedSha256": "6b8e1fad176bfc5ba6e584b13f392b7c436a6e1dcb88161751871b08516a50a4",
+  "hostPid": 581348,
+  "hostStartMs": 1792136537316,
+  "provenance": {
+    "argv": "node scripts/verify/post-restart-probe.mjs --repo . --out ops/release/probe-out-20261016T082049Z --install-record ops/release/install-complete.json",
+    "cwd": "/home/csy/Code/Github/dsh-cloudcode-link",
+    "repo": "/home/csy/Code/Github/dsh-cloudcode-link",
+    "baseUrl": "http://127.0.0.1:3080",
+    "installedPath": "/home/csy/.dsh/profiles/web/node_modules/dsh-cloudcode-link/dist/index.js",
+    "installRecordPath": "/home/csy/Code/Github/dsh-cloudcode-link/ops/release/install-complete.json",
+    "installRecordBasis": "record",
+    "processFreshBasis": "installCompletedUtc=2026-10-16T15:42:06+08:00 from /home/csy/Code/Github/dsh-cloudcode-link/ops/release/install-complete.json",
+    "installRecordInstallCompletedUtc": "2026-10-16T15:42:06+08:00",
+    "installRecordSha256": "6b8e1fad176bfc5ba6e584b13f392b7c436a6e1dcb88161751871b08516a50a4",
+    "installRecordRepoHead": "f29859706175201043cc51260fef177106719c68",
+    "installRecordWrittenAfterTheFact": true,
+    "caveat": "process_fresh timing judgement is self-attested: /home/csy/Code/Github/dsh-cloudcode-link/ops/release/install-complete.json has provenance.writtenAfterTheFact=true, so installCompletedUtc (2026-10-16T15:42:06+08:00) was derived after the fact from a release log by the same operator; the install->restart ordering is NOT independently trustworthy, therefore the verdict is UNKNOWN, not PASS. Admissible substitutes: artifact hash binding (record sha == installed copy sha == HEAD blob == working tree), the live plugin routes answered by this PID, and the release-pipeline ordering lines in the record provenance.",
+    "supportingEvidence": [
+      "artifact hash binding (artifact_pinned=PASS): installed copy sha256 6b8e1fad176bfc5ba6e584b13f392b7c436a6e1dcb88161751871b08516a50a4 == git HEAD:dist/index.js 0dc6c434d4ff74b6556c641330b98e19977124e5",
+      "live plugin routes answered by host PID 581348 (ccl_registered_in_live_host=UNKNOWN, status HTTP 200, servedByPlugin=true)",
+      "release pipeline: release-20261016T074145Z.log:2 started_at 2026-10-16T15:41:45+08:00",
+      "release pipeline: release-20261016T074145Z.log:31-32 phase 2 verified installed_sha256=6b8e1fad…",
+      "release pipeline: release-20261016T074145Z.log:44 restart unit started_at 2026-10-16T15:42:07+08:00",
+      "release pipeline: release-20261016T074145Z.log:67 restarted_after=12s new_pid=581348 new_start 15:42:17"
+    ],
+    "probeFile": "scripts/verify/post-restart-probe.mjs",
+    "probeSha256": "0539fdab0ecd79a85dfcc7678c7524f6577fb6d0fbbd622b0bc908c30400b814",
+    "probeMatchesHeadBlob": true,
+    "repoHeadSha": "0dc6c434d4ff74b6556c641330b98e19977124e5",
+    "repoDirty": false,
+    "repoDirtyAll": true,
+    "repoDirtyPaths": [
+      " M ops/restart/.last-restart-pid",
+      "?? docs/review/t5-evidence-checklist.md",
+      "?? docs/review/verdict-t5.md"
+    ],
+    "nodeVersion": "v26.9.0"
+  },
+  "checks": [
+    {
+      "id": "service_ready",
+      "verdict": "PASS",
+      "summary": "web host answers on the configured port"
+    },
+    {
+      "id": "process_fresh",
+      "verdict": "UNKNOWN",
+      "summary": "NOT INDEPENDENTLY PROVEN: UNKNOWN-EVIDENCE: install record is self-attested (provenance.writtenAfterTheFact=true, installCompletedUtc=2026-10-16T15:42:06+08:00 derived after the fact) -> the install->restart ordering is NOT independently trustworthy; hash binding and live-route evidence remain admissible; UNKNOWN-EVIDENCE: SUSPECT TIMESTAMP - artifact mtime 1792138461427.841 (2026-10-16T08:14:21.427Z) is LATER than host start 1792136537316 (2026-10-16T07:42:17.316Z) (artifact changed after the process booted)"
+    },
+    {
+      "id": "artifact_pinned",
+      "verdict": "PASS",
+      "summary": "installed artifact is byte-identical to HEAD 0dc6c434d4ff74b6556c641330b98e19977124e5:dist/index.js"
+    },
+    {
+      "id": "bundle_defines_ccl",
+      "verdict": "PASS",
+      "summary": "shipped bundle registers the /ccl and cloudcode commands before route wiring (static, hash-pinned artifact)"
+    },
+    {
+      "id": "ccl_registered_in_live_host",
+      "verdict": "UNKNOWN",
+      "summary": "cannot prove /ccl is registered in the live host: new-process evidence not established (see process_fresh)"
+    },
+    {
+      "id": "quota_refresh_live",
+      "verdict": "UNKNOWN",
+      "summary": "quota refresh request failed at the network layer (upstream may be unreachable)"
+    },
+    {
+      "id": "models_upstream_side",
+      "verdict": "PASS",
+      "summary": "upstream-side catalog served by the live plugin contains every required §1 model slug"
+    },
+    {
+      "id": "models_fallback_side",
+      "verdict": "PASS",
+      "summary": "shipped bundle carries every §2 fallback model entry"
+    },
+    {
+      "id": "journal_no_import_failure",
+      "verdict": "PASS",
+      "summary": "startup journal has no dsh-cloudcode-link import failure"
+    }
+  ],
+  "counts": {
+    "PASS": 6,
+    "FAIL": 0,
+    "UNKNOWN": 3
+  }
+}

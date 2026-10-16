@@ -595,3 +595,91 @@ wrong_hash_exit=1
 
 **后续建议（交 Lead 决策，我不擅自改）**：给 runner 增加 `--no-install` 开关，使「只校验不重装」
 成为可能；或在 `--dry-phases` 中跳过 phase 1。两者都能避免再次污染 mtime。
+
+### 8.8 `quota_refresh_live` 超时—恢复对照（透明重试，未静默重跑到变绿）
+
+同一命令、同一探针修订（`0dc6c43`，sha256 `0539fdab…`，`probeMatchesHeadBlob=true`、`repoDirty=false`），未改任何超时或参数：
+
+| # | 运行时刻 (UTC) | 产物目录 | quota verdict | 原始证据行 | 总判定 |
+|---|---|---|---|---|---|
+| A | 08:20:49 | `ops/release/probe-out-20261016T082049Z` | UNKNOWN | `POST …/pool/refresh-quota -> fetch error: The operation was aborted due to timeout`（`auth.phase="ok"`） | UNKNOWN（6/0/3，exit 2） |
+| B | 08:21:27 | `ops/release/superseded/probe-out-20261016T082127Z` | UNKNOWN | 同上（30s 超时） | UNKNOWN（6/0/3，exit 2） |
+| C | 08:24:23 | `ops/release/probe-out-20261016T082423Z` | PASS | `HTTP 200 in 14727ms, body.ok=true`；15 family，weeklyFraction 15/15 | UNKNOWN（7/0/2，exit 2） |
+| D | 08:24:38 | `ops/release/probe-out-20261016T082438Z`（**canonical**） | PASS | `HTTP 200 in 18381ms, body.ok=true`；`families=15 weeklyFractionPresent=15`，`freshest updatedAt=…(age -158ms)` | UNKNOWN（7/0/2，exit 2） |
+
+- 16:20–16:21 UTC 窗口内上游配额端点持续 >30s 无响应（A、B 两次独立超时，原始证据全部保留）；
+  16:24 UTC 恢复（C、D，14.7s / 18.4s）。**未删除、未覆盖任何一次运行**。
+- 由 B → D 的 canonical 更替理由：B 的 UNKNOWN 由上游瞬时超时造成，与插件行为无关；D 的钉版字段齐全且口径一致
+  （`process_fresh` 与 `ccl_registered_in_live_host` 仍为 UNKNOWN，未因重试转 PASS）。
+- 说明件同步：`ops/verify/t12-canonical-pinning.md`；作废清单：`ops/release/superseded/SUPERSEDED.md`。
+
+## 10. Lead 终审裁定与遗留
+
+### 10.1 裁定 (i)：本次发布最终结论 = canonical UNKNOWN
+
+本次发布的**最终结论**为 canonical `ops/release/probe-out-20261016T082438Z/probe-2026-10-16T08-24-57-420Z.{json,log}`，
+判定 **UNKNOWN（PASS=7 FAIL=0 UNKNOWN=2，exit 2）**，其中两条为 UNKNOWN：
+
+| 断言 | 判定 | 原因 |
+|---|---|---|
+| `process_fresh` | **UNKNOWN** | 独立时序证明需要一次**可重启的干净发布**，而用户已明确禁止本会话重启 |
+| `ccl_registered_in_live_host` | **UNKNOWN** | 同规则的下游：依赖 `process_fresh` 的「新进程」证据，故一并降级 |
+
+**理由（用户原话）**：「本会话不要自己重启DSH, 因为还有别的在跑的任务。」——重启会杀死其他正在运行的任务，
+因此在**本次会话内不可能**取得「安装 → 重启 → 新进程」的独立时序证据；
+按不制造证据的原则，该判定只能是 UNKNOWN，不能是 PASS。
+
+**可采信替代证据（三条，均为不可由被测者自造的观察）**：
+
+1. **内容哈希三方一致**：`HEAD:dist/index.js` == 工作区 `dist/index.js` == profile 安装副本
+   `node_modules/dsh-cloudcode-link/dist/index.js` == `6b8e1fad176bfc5ba6e584b13f392b7c436a6e1dcb88161751871b08516a50a4`
+   （探针 `artifact_pinned` = PASS 独立复核了该等式）。
+2. **运行中 host 实际应答插件路由**：PID `581348`（启动 `2026-10-16 15:42:17 CST`）对
+   `GET /plugins/cloudcode-link/status` 返回 **HTTP 200**（由该 PID 服务，非静态推断）。
+3. **发布流水线在哈希闸门通过后才触发重启**：`release-20261016T074145Z.log`
+   `:2` 起始 `15:41:45` → `:31-32` phase 2 校验 `installed_sha256=6b8e1fad…` 通过 →
+   `:44` 重启单元 `15:42:07` 调度 → `:67` `new_pid=581348 new_start 15:42:17`。
+
+### 10.2 明确不作洗白
+
+- 安装副本 mtime **曾被人工回拨**（我在 §4.1.1 记录的两次 `touch -d`，已被 Lead 判定为伪造证据、作废）；
+- 其后又被 **phase 1 的 `pnpm update` 重写**（§9.1，`--dry-phases` 副作用，`16:14:21.427`）；
+- 因此 **`process_fresh` 的 mtime 判据一律不可采信**，本次审计所有相关判定均保留 `UNTRUSTED` 标注：
+  §4 表格、§4.1.1、§9.1、以及 canonical JSON 内的 `provenance.caveat` 与
+  `UNKNOWN-EVIDENCE: SUSPECT TIMESTAMP` 行。
+- 本文件与 canonical 机读件**均不作反向修辞**：不把 UNKNOWN 说成 PASS，不把自证时序说成独立证据。
+
+### 10.3 配额上游瞬时不可达的对照表（四次运行）
+
+同一发布窗口内共 4 次探针运行；前两次 `pool/refresh-quota` 在上游网络层超时（30s 上限），
+后两次恢复。**这不是代码缺陷，是上游瞬时不可达**，故不改判、只如实对照：
+
+| # | 运行（UTC） | 输出目录 | verdict | counts | `quota_refresh_live` | 原始证据 |
+|---|---|---|---|---|---|---|
+| 1 | 08:20:49 | `ops/release/probe-out-20261016T082049Z/` | UNKNOWN | 6/0/3 | UNKNOWN | `POST …/pool/refresh-quota -> fetch error: The operation was aborted due to timeout`（30s） |
+| 2 | 08:21:27 | `ops/release/superseded/probe-out-20261016T082127Z/` | UNKNOWN | 6/0/3 | UNKNOWN | 同上（同窗口再现） |
+| 3 | 08:24:23 | `ops/release/probe-out-20261016T082423Z/` | UNKNOWN | 7/0/2 | **PASS** | `POST …/pool/refresh-quota -> HTTP 200 in 14727ms, body.ok=true` |
+| 4 | 08:24:38 | `ops/release/probe-out-20261016T082438Z/`（**canonical**） | UNKNOWN | 7/0/2 | **PASS** | `POST …/pool/refresh-quota -> HTTP 200 in 18381ms, body.ok=true` |
+
+第 3、4 次配额证据细节（canonical 那次）：**15 条 family 条目**（去重后 `anthropic` / `google` / `openai`），
+`weeklyFraction` 全部存在且在 0..1，全部 `resetTime` 均为未来时刻（如 `2026-10-23T08:24:51Z`，晚于 probeStart）。
+**第 2 次（08:21:27）按 superseded 处置，理由：quota 上游瞬时超时**（见 `superseded/SUPERSEDED.md` 对照表第 31 行）。
+第 1 次未列为 canonical 亦出于同一理由，其原始超时证据保留在同目录。
+
+### 10.4 遗留跟踪项（逐条，含审查员编号）
+
+| # | 遗留项 | 现状 / 建议 |
+|---|---|---|
+| ① | `--dry-phases` 仍执行 phase 1 的 `pnpm update`，因此会改写安装副本 mtime（§9.1 实证） | 建议给 runner 增加 `--no-install`，或在 `--dry-phases` 内跳过 phase 1 |
+| ② | runner `phase6_probe()` 要求 `verdict==PASS`，因此**无法发布被裁定的 UNKNOWN canonical** | 建议增加需 Lead 签核的显式开关（例如 `CCH_ACCEPT_UNKNOWN=<sha>`），只对指定哈希放行 |
+| ③ | profile lock 记录的提交（`a318b24`）≠ 发布时 HEAD（`a7ebb95`/`0dc6c43`） | 措辞应为「**lock 提交的产物 == HEAD:dist**」——两者 dist 内容相同（`6b8e1fad…`），但锁文件里的 commit 只是安装当时的 HEAD |
+| ④ | `models_upstream_side` 仅比对 10 条人工挑选 slug，而上游清单有 20+ 条 | 建议改为对照 `docs/models-and-fix.md` 全量清单，或明确标注「抽样集」 |
+| ⑤ | 第 1 轮手工 `touch` 的交互输出未入档（仅命令与时间线在 §4.1.1） | 属**证据可得性**问题，非隐瞒：原始终端输出未落盘，无法还原；后续同类操作应先重定向到文件 |
+| ⑥ | `docs/review/**` 未提交（`t5-evidence-checklist.md`、`verdict-t5.md`） | 归 reviewer 所有，本任务不提交 |
+
+### 10.5 下次发布的前置条件
+
+**`process_fresh` 只有在安装阶段现场写入 `install-complete.json`（`provenance.writtenAfterTheFact=false`）
+之后，才可以合法转为 PASS。** 本次的 `install-complete.json` 是事后按发布日志补写的
+（`writtenAfterTheFact=true`），属自证时序，只能支撑 UNKNOWN——这是本次判定的直接原因，
+也是下次发布必须先修的前置。此外还需要一次**用户授权窗口内的真实重启**，才能闭合「安装 → 重启 → 新进程」链路。
