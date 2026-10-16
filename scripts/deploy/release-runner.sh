@@ -118,9 +118,20 @@ phase0_pre_state() {
 phase1_reinstall() {
   log_line "--- phase 1: profile reinstall ---"
   log_line "cmd: pnpm update dsh-cloudcode-link (cwd=${PROFILE_DIR})"
-  if ! log_raw timeout "${PNPM_TIMEOUT_SEC}" pnpm --dir "${PROFILE_DIR}" update dsh-cloudcode-link; then
-    log_line "FAIL: pnpm update failed (timeout ${PNPM_TIMEOUT_SEC}s or non-zero exit)"
+  local out rc=0
+  # ERR_PNPM_IGNORED_BUILDS makes pnpm exit 1 even though the package installed
+  # correctly: the shipped tarball already contains the built dist/, so the
+  # ignored postinstall is irrelevant. That one case is tolerated — phase 2
+  # remains the real gate, because a bad artifact fails the hash check anyway.
+  out="$(timeout "${PNPM_TIMEOUT_SEC}" pnpm --dir "${PROFILE_DIR}" update dsh-cloudcode-link 2>&1)" || rc=$?
+  printf '%s\n' "${out}" | tee -a "${LOG_FILE}"
+  log_line "pnpm_exit=${rc}"
+  if ((rc != 0)) && ! grep -q 'ERR_PNPM_IGNORED_BUILDS' <<<"${out}"; then
+    log_line "FAIL: pnpm update failed (exit ${rc}, timeout ${PNPM_TIMEOUT_SEC}s) — see output above"
     return "${EX_REINSTALL_FAILED}"
+  fi
+  if ((rc != 0)); then
+    log_line "note: tolerating ERR_PNPM_IGNORED_BUILDS (pnpm exit ${rc}); verifying the artifact instead"
   fi
   log_line "lock_entry: $(grep -m1 -A2 'dsh-cloudcode-link@https://codeload' "${PROFILE_DIR}/pnpm-lock.yaml" 2>/dev/null | tr '\n' ' ' || echo '<not found>')"
 }
