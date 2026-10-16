@@ -64,6 +64,9 @@ readonly EX_PROBE_FAILED=5
 
 LOG_FILE=""
 DRY_PHASES=0
+RUN_START_EPOCH=0
+REPO_HEAD=""
+PROBE_JSON=""
 
 utc_stamp() { date -u +%Y%m%dT%H%M%SZ; }
 now_iso() { date +%Y-%m-%dT%H:%M:%S%z; }
@@ -85,9 +88,13 @@ init_log() {
   mkdir -p -- "${LOG_DIR}"
   LOG_FILE="${LOG_DIR}/release-$(utc_stamp).log"
   : >"${LOG_FILE}"
+  # Boundaries used later to prove the probe artifact belongs to THIS run.
+  RUN_START_EPOCH="$(date +%s)"
+  REPO_HEAD="$(git -C "${REPO_ROOT}" rev-parse HEAD 2>/dev/null || echo '<n/a>')"
   log_line "# dsh-cloudcode-link release run"
   log_line "# started_at: $(now_iso)"
   log_line "# repo_root: ${REPO_ROOT}"
+  log_line "# repo_head_at_start: ${REPO_HEAD}"
   log_line "# profile_dir: ${PROFILE_DIR}"
   log_line "# installed_dir: ${INSTALLED_DIR}"
   log_line "# expected_index_sha256: ${EXPECTED_INDEX_SHA256:-<unset>}"
@@ -213,18 +220,73 @@ phase6_probe() {
     log_line "FAIL: probe script missing at ${PROBE_SCRIPT}"
     return "${EX_PROBE_FAILED}"
   fi
+
+  # The probe resolves repo HEAD with git, so it MUST run with the repository as
+  # cwd. A detached unit's cwd is $HOME, where `git rev-parse HEAD` fails and the
+  # artifact_pinned check degrades to UNKNOWN — that is a probe-environment bug,
+  # not a verdict. --repo/--out are passed explicitly so nothing depends on cwd,
+  # and --out is a fresh directory so only THIS run's artifacts can appear in it.
+  local probe_out="${LOG_DIR}/probe-out-$(utc_stamp)"
+  mkdir -p -- "${probe_out}"
   local probe_exit=0
-  log_raw node "${PROBE_SCRIPT}" || probe_exit=$?
+  ( cd "${REPO_ROOT}" && exec node "${PROBE_SCRIPT}" \
+      --repo "${REPO_ROOT}" --out "${probe_out}" --installed "${INSTALLED_DIR}" ) || probe_exit=$?
   log_line "probe_exit=${probe_exit}"
-  # Copy the newest probe json next to the release log for a single-artifact audit.
-  local newest
-  newest="$(ls -t "${REPO_ROOT}"/ops/verify/probe-*.json 2>/dev/null | head -1 || true)"
-  if [[ -n "${newest}" ]]; then
-    cp -f -- "${newest}" "${LOG_DIR}/probe-$(utc_stamp).json"
-    log_line "probe_json_copied: ${LOG_DIR}/probe-$(utc_stamp).json (from ${newest})"
-  else
-    log_line "probe_json_copied: <none found under ops/verify/>"
+  log_line "probe_out_dir=${probe_out}"
+
+  # Exactly one json must have been produced by this run. Anything else (zero, or
+  # leftovers) is a release failure — never fall back to "newest json on disk",
+  # which is how a stale artifact once got published as this release's evidence.
+  local produced
+  produced="$(find "${probe_out}" -maxdepth 1 -name 'probe-*.json' -newermt "@${RUN_START_EPOCH}" 2>/dev/null | sort)"
+  if [[ -z "${produced}" ]]; then
+    log_line "FAIL: the probe produced no json in ${probe_out} — refusing to substitute an older artifact"
+    return "${EX_PROBE_FAILED}"
   fi
+  if [[ "$(printf '%s\n' "${produced}" | wc -l)" != "1" ]]; then
+    log_line "FAIL: expected exactly one fresh probe json, got: $(printf '%s ' ${produced})"
+    return "${EX_PROBE_FAILED}"
+  fi
+  PROBE_JSON="${produced}"
+  log_line "probe_json_produced=${PROBE_JSON}"
+
+  # Field-level assertions: the artifact must describe THIS release.
+  local probe_report
+  if ! probe_report="$(python3 - "${PROBE_JSON}" "${NEW_PID:-}" "${EXPECTED_INDEX_SHA256}" "${REPO_HEAD}" "${RUN_START_EPOCH}" <<'PY'
+import json, sys
+path, want_pid, want_sha, want_head, start = sys.argv[1:6]
+d = json.load(open(path))
+def bad(msg):
+    print(f"MISMATCH {msg}")
+    sys.exit(1)
+got_sha = (d.get("installedSha256") or "")
+got_pid = str(d.get("hostPid") or "")
+got_head = (d.get("repoHead") or "")
+verdict = d.get("verdict") or "UNKNOWN"
+counts = d.get("counts") or {}
+if got_sha != want_sha:
+    bad(f"installedSha256={got_sha} expected {want_sha}")
+if want_pid and got_pid != want_pid:
+    bad(f"hostPid={got_pid} expected {want_pid}")
+if not got_head:
+    bad("repoHead is empty (probe could not resolve HEAD in its cwd)")
+if want_head and got_head != want_head:
+    bad(f"repoHead={got_head} expected {want_head}")
+print(f"probe_verdict={verdict} counts={counts} hostPid={got_pid} repoHead={got_head} installedSha256={got_sha}")
+if verdict != "PASS":
+    print(f"VERDICT {verdict}")
+    sys.exit(1)
+PY
+  )"; then
+    log_line "FAIL: ${probe_report}"
+    log_line "FAIL: probe artifact does not describe this release"
+    return "${EX_PROBE_FAILED}"
+  fi
+  log_line "${probe_report}"
+
+  cp -f -- "${PROBE_JSON}" "${LOG_DIR}/probe-$(utc_stamp).json"
+  log_line "probe_json_published=${LOG_DIR}/probe-$(utc_stamp).json (from ${PROBE_JSON})"
+
   if ((probe_exit != 0)); then
     log_line "FAIL: probe exited ${probe_exit}"
     return "${EX_PROBE_FAILED}"
@@ -239,7 +301,9 @@ phase7_summary() {
   log_line "new_start=${NEW_START:-<unchanged>}"
   log_line "installed_sha256=$(sha256sum "${INSTALLED_DIR}/dist/index.js" 2>/dev/null | awk '{print $1}')"
   log_line "expected_sha256=${EXPECTED_INDEX_SHA256}"
-  log_line "repo_head=$(git -C "${REPO_ROOT}" rev-parse HEAD 2>/dev/null || echo '<n/a>')"
+  log_line "repo_head_at_start=${REPO_HEAD}"
+  log_line "repo_head_at_end=$(git -C "${REPO_ROOT}" rev-parse HEAD 2>/dev/null || echo '<n/a>')"
+  log_line "probe_json=${PROBE_JSON:-<none>}"
   log_line "RESULT: RELEASE_OK"
   log_line "# finished_at: $(now_iso)"
 }
