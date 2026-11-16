@@ -1,0 +1,69 @@
+{
+  "requests": 4,
+  "summary": [
+    {
+      "account": "acc_1792116942660_pqxkh",
+      "role": "primary",
+      "requestId": "agent/t16/acc_1792116942660_pqxkh/1",
+      "auth": "Bearer ****",
+      "expiry": "2026-11-16T12:39:04.748Z",
+      "status": 200,
+      "statusText": "",
+      "contentType": "text/event-stream",
+      "bytes": 1378,
+      "dataFrames": 3,
+      "doneFrames": 0,
+      "elapsedMs": 5119,
+      "endpoint": "https://daily-cloudcode-pa.googleapis.com",
+      "preview200": "data: {\"response\": {\"candidates\": [{\"content\": {\"role\": \"model\",\"parts\": [{\"text\": \"Hello\"}]}}],\"usageMetadata\": {\"promptTokenCount\": 2,\"candidatesTokenCount\": 1,\"totalTokenCount\": 25,\"thoughtsTokenCo"
+    },
+    {
+      "account": "acc_1788868397749_n0tdx",
+      "role": "historical-fail-most",
+      "requestId": "agent/t16/acc_1788868397749_n0tdx/1",
+      "auth": "Bearer ****",
+      "expiry": "2026-11-16T12:34:12.925Z",
+      "status": 200,
+      "statusText": "",
+      "contentType": "text/event-stream",
+      "bytes": 1830,
+      "dataFrames": 2,
+      "doneFrames": 0,
+      "elapsedMs": 45980,
+      "endpoint": "https://daily-cloudcode-pa.googleapis.com",
+      "preview200": "data: {\"response\": {\"candidates\": [{\"content\": {\"role\": \"model\",\"parts\": [{\"text\": \"Hello! How can I help you today?\"}]}}],\"usageMetadata\": {\"promptTokenCount\": 2,\"candidatesTokenCount\": 9,\"totalToken"
+    },
+    {
+      "account": "acc_1788949635573_50yxc",
+      "role": "conditional",
+      "requestId": "agent/t16/acc_1788949635573_50yxc/1",
+      "auth": "Bearer ****",
+      "expiry": "2026-11-16T12:34:12.735Z",
+      "status": 200,
+      "statusText": "",
+      "contentType": "text/event-stream",
+      "bytes": 1909,
+      "dataFrames": 3,
+      "doneFrames": 0,
+      "elapsedMs": 21602,
+      "endpoint": "https://daily-cloudcode-pa.googleapis.com",
+      "preview200": "data: {\"response\": {\"candidates\": [{\"content\": {\"role\": \"model\",\"parts\": [{\"text\": \"Hello\"}]}}],\"usageMetadata\": {\"promptTokenCount\": 2,\"candidatesTokenCount\": 1,\"totalTokenCount\": 124,\"thoughtsTokenC"
+    },
+    {
+      "account": "acc_1788769443420_5ptu4",
+      "role": "untested-5th",
+      "requestId": "agent/t16/acc_1788769443420_5ptu4/1",
+      "auth": "Bearer ****",
+      "expiry": "2026-11-16T12:34:12.936Z",
+      "status": 200,
+      "statusText": "",
+      "contentType": "text/event-stream",
+      "bytes": 1818,
+      "dataFrames": 2,
+      "doneFrames": 0,
+      "elapsedMs": 11106,
+      "endpoint": "https://daily-cloudcode-pa.googleapis.com",
+      "preview200": "data: {\"response\": {\"candidates\": [{\"content\": {\"role\": \"model\",\"parts\": [{\"text\": \"Hello! How can I help you today?\"}]}}],\"usageMetadata\": {\"promptTokenCount\": 2,\"candidatesTokenCount\": 9,\"totalToken"
+    }
+  ]
+}

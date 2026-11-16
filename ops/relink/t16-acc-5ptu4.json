@@ -1,0 +1,16 @@
+{
+  "account": "acc_1788769443420_5ptu4",
+  "role": "untested-5th",
+  "requestId": "agent/t16/acc_1788769443420_5ptu4/1",
+  "auth": "Bearer ****",
+  "expiry": "2026-11-16T12:34:12.936Z",
+  "status": 200,
+  "statusText": "",
+  "contentType": "text/event-stream",
+  "bytes": 1818,
+  "dataFrames": 2,
+  "doneFrames": 0,
+  "elapsedMs": 11106,
+  "endpoint": "https://daily-cloudcode-pa.googleapis.com",
+  "preview200": "data: {\"response\": {\"candidates\": [{\"content\": {\"role\": \"model\",\"parts\": [{\"text\": \"Hello! How can I help you today?\"}]}}],\"usageMetadata\": {\"promptTokenCount\": 2,\"candidatesTokenCount\": 9,\"totalToken"
+}

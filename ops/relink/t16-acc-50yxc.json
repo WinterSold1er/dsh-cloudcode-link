@@ -1,0 +1,16 @@
+{
+  "account": "acc_1788949635573_50yxc",
+  "role": "conditional",
+  "requestId": "agent/t16/acc_1788949635573_50yxc/1",
+  "auth": "Bearer ****",
+  "expiry": "2026-11-16T12:34:12.735Z",
+  "status": 200,
+  "statusText": "",
+  "contentType": "text/event-stream",
+  "bytes": 1909,
+  "dataFrames": 3,
+  "doneFrames": 0,
+  "elapsedMs": 21602,
+  "endpoint": "https://daily-cloudcode-pa.googleapis.com",
+  "preview200": "data: {\"response\": {\"candidates\": [{\"content\": {\"role\": \"model\",\"parts\": [{\"text\": \"Hello\"}]}}],\"usageMetadata\": {\"promptTokenCount\": 2,\"candidatesTokenCount\": 1,\"totalTokenCount\": 124,\"thoughtsTokenC"
+}

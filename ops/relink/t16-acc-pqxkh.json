@@ -1,0 +1,16 @@
+{
+  "account": "acc_1792116942660_pqxkh",
+  "role": "primary",
+  "requestId": "agent/t16/acc_1792116942660_pqxkh/1",
+  "auth": "Bearer ****",
+  "expiry": "2026-11-16T12:39:04.748Z",
+  "status": 200,
+  "statusText": "",
+  "contentType": "text/event-stream",
+  "bytes": 1378,
+  "dataFrames": 3,
+  "doneFrames": 0,
+  "elapsedMs": 5119,
+  "endpoint": "https://daily-cloudcode-pa.googleapis.com",
+  "preview200": "data: {\"response\": {\"candidates\": [{\"content\": {\"role\": \"model\",\"parts\": [{\"text\": \"Hello\"}]}}],\"usageMetadata\": {\"promptTokenCount\": 2,\"candidatesTokenCount\": 1,\"totalTokenCount\": 25,\"thoughtsTokenCo"
+}
