@@ -1,0 +1,2 @@
+arm=1 ts=2026-11-16T20:12:53+08:00 model=gemini-3.8-flash-low endpoint=daily status=200
+arm=2 ts=2026-11-16T20:12:53+08:00 model=gemini-3.8-flash-medium endpoint=daily status=200
