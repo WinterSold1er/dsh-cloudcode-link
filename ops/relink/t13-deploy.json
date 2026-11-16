@@ -1,0 +1,209 @@
+{
+  "task": "t13-deploy",
+  "agent": "t13-deployer",
+  "generated_at": "2026-11-16T19:06:15.590446+08:00",
+  "host_pid": 2685153,
+  "host_restarted": false,
+  "web_server_restarted": false,
+  "baseline": {
+    "installed_dist": {
+      "sha256": "6b8e1fad176bfc5ba6e584b13f392b7c436a6e1dcb88161751871b08516a50a4",
+      "size": 1250243,
+      "mtime_epoch": 1794236696,
+      "inode": 5819482,
+      "mode": "644"
+    },
+    "backup": {
+      "path": "/tmp/relink-t13-deploy/backup-index.js",
+      "sha256": "6b8e1fad176bfc5ba6e584b13f392b7c436a6e1dcb88161751871b08516a50a4",
+      "size": 1250243
+    },
+    "patch_backup": {
+      "path": "/tmp/relink-t13-deploy/backup-cordis.patch.yml",
+      "sha256": "f38700c2e4f0cd42e4550f387bdb25f5b8a39104375ff3e9fa136c1b72868d7b",
+      "size": 14489
+    }
+  },
+  "deployed": {
+    "source": "/home/csy/Code/Github/dsh-cloudcode-link/dist/index.js",
+    "source_sha256": "677d9a81e70ba139a417e5fff5e7c784d3efdd6fa97a34f359b7db6e77f7ce82",
+    "installed_sha256": "677d9a81e70ba139a417e5fff5e7c784d3efdd6fa97a34f359b7db6e77f7ce82",
+    "sha_match_expected": true,
+    "size": 1250243,
+    "mtime_epoch": 1794826906,
+    "inode": 5819482,
+    "mode": "644",
+    "changed_fields": [
+      "mtime (1794236696 -> 1794826906)",
+      "content sha256"
+    ],
+    "unchanged_fields": [
+      "inode (5819482, in-place overwrite)",
+      "size (1250243)"
+    ],
+    "content_delta": "old vs new dist differ only in endpointCandidates order: daily-cloudcode-pa now before cloudcode-pa (daily-first)"
+  },
+  "hmr_trigger": {
+    "file": "/home/csy/.dsh/profiles/web/cordis.patch.yml",
+    "action": "appended one YAML comment line: '# t13-recomp 20261116T110145Z'",
+    "yaml_syntax_ok": true,
+    "trigger_epoch_est": 1794826907.2,
+    "waited_seconds": 10
+  },
+  "inotify_evidence": {
+    "probe": "/tmp/relink-t13-recon/inotify_probe.py (ctypes inotify, IN_OPEN|IN_ACCESS|IN_CLOSE_NOWRITE)",
+    "watched_file": "/home/csy/.dsh/profiles/web/node_modules/dsh-cloudcode-link/dist/index.js",
+    "event_total": 84,
+    "deploy_burst_epoch": "906.834-906.865",
+    "deploy_burst_note": "reads caused by our own sha256sum/verification of the freshly copied file",
+    "post_trigger_reead": {
+      "epoch": 909.432,
+      "events": [
+        "OPEN",
+        "ACCESS"
+      ],
+      "delta_after_trigger_s": 2.2,
+      "attribution": "external reader after HMR trigger; idle 10s probe shows ZERO spontaneous reads, and our script performed no file reads after 906.865 -> attributable to host module reload"
+    },
+    "idle_baseline_probe": {
+      "duration_s": 10,
+      "events": 0
+    },
+    "raw_lines_tail": [
+      "906.859 ['OPEN'] ",
+      "906.860..906.865 ['ACCESS'] x39",
+      "909.432 ['OPEN'] ",
+      "909.432 ['ACCESS'] "
+    ]
+  },
+  "status_proof": {
+    "status_after": {
+      "http": 200,
+      "plugin": "dsh-cloudcode-link",
+      "enabled": true,
+      "transport": "direct",
+      "dormantReason": null
+    },
+    "pool_after": {
+      "http": 200,
+      "accounts": 5
+    },
+    "poll_1s_x10": [
+      [
+        1794826907.2579782,
+        200
+      ],
+      [
+        1794826908.271236,
+        200
+      ],
+      [
+        1794826909.5304313,
+        200
+      ],
+      [
+        1794826910.5441074,
+        200
+      ],
+      [
+        1794826911.5581708,
+        200
+      ],
+      [
+        1794826912.5739431,
+        200
+      ],
+      [
+        1794826913.5891364,
+        200
+      ],
+      [
+        1794826914.6034281,
+        200
+      ],
+      [
+        1794826915.6183941,
+        200
+      ],
+      [
+        1794826916.633014,
+        200
+      ]
+    ],
+    "poll_fast_60ms": {
+      "samples": 260,
+      "non_200": 0,
+      "codes": [
+        "200"
+      ]
+    },
+    "reload_window_404_observed": false,
+    "note": "60ms polling over 12s + 1s polling x10 saw no 404/connection failure; reload window either shorter than sampling interval or routes stayed mounted"
+  },
+  "e2e": {
+    "command": "PROBE_ALLOW_UPSTREAM=1 PROBE_CORE_SRC=.../packages/core/src/client.ts PROBE_ACCOUNT_DIR=acc_1788785623927_xhs7n PROBE_MODEL=gemini-3.8-flash-high PROBE_PROJECT=aicode-consumers PROBE_PROMPT=hi PROBE_TIMEOUT_MS=90000 node /tmp/relink-build/probe/probe.mjs",
+    "generations_used": 1,
+    "token_check_before": {
+      "hasToken": true,
+      "expired": false,
+      "expiresInSeconds": 3562,
+      "needsRefresh": false
+    },
+    "result": {
+      "ts": "2026-11-16T11:05:23.165Z",
+      "op": "generate",
+      "account": "acc_1788785623927_xhs7n",
+      "model": "gemini-3.8-flash-high",
+      "endpoint": "https://daily-cloudcode-pa.googleapis.com",
+      "status": 200,
+      "contentType": "text/event-stream",
+      "bytes": 2052,
+      "firstText": "Hello! How can I help you today?",
+      "sseEventCount": 3,
+      "injection": {
+        "headers": false,
+        "clientMetadata": false,
+        "patchedCore": false,
+        "ua": null,
+        "coreSrc": "/home/csy/Code/Github/dsh-cloudcode-link/packages/core/src/client.ts",
+        "clientMetadataWhere": null
+      },
+      "tokenFile": "/home/csy/.dsh/agy-accounts/acc_1788785623927_xhs7n/.gemini/antigravity-cli/antigravity-oauth-token",
+      "counts": {
+        "generate": 7,
+        "total": 9,
+        "loadCodeAssist": 1,
+        "onboardUser": 1
+      },
+      "durationMs": 5005
+    },
+    "pass": true
+  },
+  "rollback": {
+    "performed": false,
+    "reason": "all hard metrics passed"
+  },
+  "sanitization": {
+    "pattern": "ya29[.]|1[/][/]|ey[J]",
+    "artifacts_checked": [
+      "inotify.log",
+      "inotify-idle.log",
+      "poll1s.log",
+      "pollfast.log",
+      "e2e.json",
+      "e2e.err.log",
+      "status-before.json",
+      "status-after.json",
+      "pool-after.json",
+      "token-check.txt",
+      "baseline.txt",
+      "backup.txt"
+    ],
+    "max_match_count": 0
+  },
+  "caveats": [
+    "No in-memory discriminator available: /status lastRun was null both before and after reload; plugin has no startedAt/uptime field.",
+    "No journal log lines for reload (consistent with recon: HMR has no journal logging).",
+    "Reload-window 404 was not observed; proof of reload rests on inotify post-trigger OPEN+ACCESS + mtime-based staleness mechanism + post-reload 200s."
+  ]
+}

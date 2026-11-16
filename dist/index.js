@@ -1,9 +1,10 @@
 import { createRequire } from "node:module";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { fileURLToPath } from "node:url";
 import { homedir } from "node:os";
 import { LlmAdapter } from "@deepseek-ai/dsh-llm";
-import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { createServer } from "node:http";
 import { readFile } from "node:fs/promises";
 import { defineTool } from "@deepseek-ai/dsh-tools";
@@ -25648,8 +25649,8 @@ function require$$basename(p) {
 	return i >= 0 ? p.slice(i + 1) : p;
 }
 const ENDPOINT_FALLBACKS = [
-	"https://cloudcode-pa.googleapis.com",
 	"https://daily-cloudcode-pa.googleapis.com",
+	"https://cloudcode-pa.googleapis.com",
 	"https://daily-cloudcode-pa.sandbox.googleapis.com"
 ];
 const PROJECT_CACHE_TTL_MS = 18e5;
@@ -30041,6 +30042,13 @@ var StatsCollector = class {
 };
 //#endregion
 //#region src/index.ts
+const selfSha256 = (() => {
+	try {
+		return createHash("sha256").update(readFileSync(fileURLToPath(import.meta.url))).digest("hex");
+	} catch {
+		return null;
+	}
+})();
 const name = "dsh-cloudcode-link";
 const inject = ["llm", "commands"];
 /** Cross-session concurrency limiter. */
@@ -30304,7 +30312,8 @@ function apply(ctx, entryConfig = {}) {
 						count: cat.models.length,
 						lastError: cat.lastError ?? null
 					},
-					lastRun
+					lastRun,
+					distSha256: selfSha256
 				});
 			})();
 		});

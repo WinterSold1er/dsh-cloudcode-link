@@ -1,0 +1,165 @@
+{
+  "task": "task-10 (T3) — 最小可复制配方 → 插件侧改动证明",
+  "agent": "worker-fix",
+  "generated_at": "2026-11-16T10:31:00Z",
+  "workspace": "/home/csy/Code/Github/dsh-cloudcode-link",
+  "temp_build": "/tmp/relink-build (repo rsync 副本；node_modules 软链；repo 工作区零改动)",
+  "host": {
+    "unit": "deepseek-harness-official.service",
+    "main_pid": 2685153,
+    "active_since": "2026-11-16 11:42:18 CST",
+    "installed_plugin": "/home/csy/.dsh/profiles/web/node_modules/dsh-cloudcode-link",
+    "installed_dist_index_sha256": "6b8e1fad176bfc5ba6e584b13f392b7c436a6e1dcb88161751871b08516a50a4",
+    "repo_dist_index_sha256": "6b8e1fad176bfc5ba6e584b13f392b7c436a6e1dcb88161751871b08516a50a4",
+    "note": "运行中 host 加载的是 profile 里的复制件，其 sha256 与 repo dist 相同（production-first 版本）"
+  },
+  "recipe": {
+    "verified": true,
+    "endpoint": "https://daily-cloudcode-pa.googleapis.com",
+    "path": "/v1internal:streamGenerateContent?alt=sse",
+    "model": "gemini-3.5-flash-lite",
+    "project": "aicode-consumers",
+    "project_source": "插件 loadCodeAssist 真实响应 cloudaicompanionProject（本账号实测）",
+    "identity": "无需修改：插件默认 UA / X-Goog-Api-Client / Client-Metadata / body userAgent=ANTIGRAVITY / requestType=AGENT 全部保留",
+    "account": "acc_1788785623927_xhs7n (pool index 1, 邮箱脱敏)",
+    "access": "走 host 本机 TUN 默认出口（未设 PROXY 环境变量，未改 Clash selector）"
+  },
+  "upstream_request_budget": {
+    "generation_requests_limit": 4,
+    "generation_requests_used": 4,
+    "metadata_requests_used": 2,
+    "note": "生成请求 4 次已全部登记；loadCodeAssist 2 次为非生成元数据调用"
+  },
+  "generation_requests": [
+    {
+      "n": 1,
+      "ts": "2026-11-16T10:14:56.633Z",
+      "what": "官方 34.7KB 生成请求体（捕获 20261116T081812Z-35）原样重放",
+      "endpoint": "https://daily-cloudcode-pa.googleapis.com",
+      "identity": "官方 CLI antigravity/cli/1.3.5",
+      "status": 404,
+      "bytes": 114,
+      "sse_frames": 0,
+      "error": "{\"error\":{\"code\":404,\"message\":\"Requested entity was not found.\",\"status\":\"NOT_FOUND\"}}",
+      "interpretation": "body 内含捕获账号的 session/cascade 作用域 ID，换账号后按 ID 找不到实体；不是端点头失败",
+      "evidence": "/tmp/relink-t3-run/g1-replay-official.json"
+    },
+    {
+      "n": 2,
+      "ts": "2026-11-16T10:21:26.726Z",
+      "what": "官方 942B checkpoint 生成请求体（捕获 20261116T081811Z-33）重放，仅换 requestId uuid",
+      "endpoint": "https://daily-cloudcode-pa.googleapis.com",
+      "identity": "官方 CLI antigravity/cli/1.3.5",
+      "status": 200,
+      "content_type": "text/event-stream",
+      "bytes": 1444,
+      "sse_frames": 4,
+      "model_version": "gemini-3.5-flash-lite",
+      "usage": "promptTokenCount=119",
+      "text": "General Greeting",
+      "latency_ms": 2009,
+      "evidence": "/tmp/relink-t3-run/a-official-checkpoint.json"
+    },
+    {
+      "n": 3,
+      "ts": "2026-11-16T10:23:22.240Z",
+      "what": "插件 packages/core/src/client.ts streamGenerateContent 原样代码（零改动），endpoint=daily + model=gemini-3.5-flash-lite + project=aicode-consumers",
+      "endpoint_hit": "https://daily-cloudcode-pa.googleapis.com",
+      "identity": "插件默认（UA antigravity/hub/2.8.0、X-Goog-Api-Client、Client-Metadata、body AGENT/ANTIGRAVITY）",
+      "probe_injection_flags": {"headers": false, "clientMetadata": false, "patchedCore": false, "ua": null},
+      "status": 200,
+      "content_type": "text/event-stream",
+      "bytes": 1451,
+      "sse_frames": 4,
+      "text": "Hi there! How can I help you today?",
+      "latency_ms": 3092,
+      "evidence": "/tmp/relink-t3-run/b-plugin-daily-flashlite.json"
+    },
+    {
+      "n": 4,
+      "ts": "2026-11-16T10:26:14.771Z",
+      "what": "插件原样代码 + 同一账号 + 同一模型，仅把端点换成 production（隔离变量）",
+      "endpoint_hit": "https://cloudcode-pa.googleapis.com",
+      "model": "gemini-3.5-flash-lite",
+      "status": 429,
+      "bytes": 139,
+      "sse_frames": 0,
+      "error": "{\"error\":{\"code\":429,\"message\":\"Resource has been exhausted (e.g. check quota).\",\"status\":\"RESOURCE_EXHAUSTED\"}}",
+      "latency_ms": 2445,
+      "interpretation": "与 n=3 相隔 2 分钟、同账号同模型同代码，唯一差异=端点；daily=200 / production=429 ⇒ 端点是决定性变量",
+      "evidence": "/tmp/relink-t3-run/d-production-flashlite.json"
+    }
+  ],
+  "metadata_requests": [
+    {
+      "n": 1,
+      "ts": "2026-11-16T10:08:38.664Z",
+      "op": "loadCodeAssist",
+      "identity": "插件 antigravity/hub/2.8.0 + IDE headers",
+      "status": 200,
+      "ineligibleTiers": null,
+      "currentTier": {"id": "free-tier", "name": "Antigravity"},
+      "allowedTiers": [{"id": "free-tier", "isDefault": true}, {"id": "standard-tier"}],
+      "project": "aicode-consumers",
+      "interpretation": "插件身份不被资格闸门拦；项目已可用",
+      "evidence": "/tmp/relink-t3-run/b1-lca-antigravity.json"
+    },
+    {
+      "n": 2,
+      "ts": "2026-11-16T10:08:51.852Z",
+      "op": "loadCodeAssist",
+      "identity": "官方 @google/gemini-cli@0.68.0（UA GeminiCLI/0.68.0/gemini-2.5-pro (linux; x64; terminal)，IDE_UNSPECIFIED，无 IDE 头）",
+      "status": 200,
+      "ineligibleTiers": [{"reasonCode": "UNSUPPORTED_CLIENT", "tierId": "free-tier", "reasonMessage": "This client is no longer supported for Gemini Code Assist for individuals. To continue using Gemini, please migrate to the Antigravity suite of products: https://antigravity.google"}],
+      "project": null,
+      "interpretation": "换成 GeminiCLI 身份反而被判定不受支持 ⇒ 身份方向与假设相反，身份补丁(cand-b)作废",
+      "evidence": "/tmp/relink-t3-run/b2-lca-geminicli.json"
+    }
+  ],
+  "minimal_change": {
+    "type": "code patch (2 行数组重排)",
+    "file": "packages/core/src/client.ts",
+    "change": "ENDPOINT_FALLBACKS 顺序改为 [daily, DEFAULT_ENDPOINT(production), daily.sandbox]；DEFAULT_ENDPOINT 常量值与导出语义不变",
+    "diff_file": "ops/relink/t3-patch.diff",
+    "diff_numstat": "1 insertion / 1 deletion (总计 2 行变更)",
+    "verification": {
+      "git_apply_check": "APPLY_CHECK_OK (干净 rsync 副本)",
+      "tsc_noemit": "exit=0",
+      "repo_tests": "212 pass / 0 fail",
+      "endpoint_candidates_after": "[daily, production, daily.sandbox] (不设 env 时首元素=daily)",
+      "regressions_checked": "显式 ANTIGRAVITY_BASE_URL 与自定义 baseUrl 仍只返回该端点；不设 env 时 mock 抓包与 pristine 一致（除端点选择）"
+    },
+    "alternative_rejected": {
+      "plugin_config_baseUrl": "config.baseUrl 在生成路径没有被消费（仅 config 解析，无消费者），实测属死配置 ⇒ 不能靠改插件配置生效",
+      "env_ANTIGRAVITY_BASE_URL": "client.ts:104 在请求时读 process.env，但 host 进程 env 无该变量且运行中无法改 env ⇒ 需重启 host，故不作为首选",
+      "identity_patch": "cand-b/b2 已作废（身份不改变闸门，反而 UNSUPPORTED_CLIENT）",
+      "onboard_patch": "cand-c 未采用（LCA 已 eligible、project 已存在，无需 onboard；且 onboard 为写操作）"
+    }
+  },
+  "activation": {
+    "requires_host_restart": false,
+    "mechanism": "profile 内插件复制件 recomposition / HMR 重载（改 profile 的 cordis.patch.yml 内容触发 reconcileProfile → evict → 重新 import）",
+    "steps": [
+      "1) repo 根执行 pnpm build（root dist 通过 src/host/client.ts 的 re-export 打包 packages/core/src，产物 dist/index.js 会变）",
+      "2) 备份并把新 dist/index.js 覆盖到 ~/.dsh/profiles/web/node_modules/dsh-cloudcode-link/dist/index.js（保留旧文件以便回滚）",
+      "3) 触发 recomposition：在 profile 的 cordis.patch.yml 中加一行注释（内容变化）或用 plugin_manager 的启停动作",
+      "4) 验证：GET /plugins/cloudcode-link/status 仍 ok；再发 1 次真实请求确认 200（该验证会花生成预算，需 Lead 批准）"
+    ],
+    "evidence": "/tmp/relink-recon/RESTART.md（DSH 源码级：HMR 默认启用、监听 profile patch 内容变化、重新 import 插件包；installed packages below node_modules takes effect without a restart）",
+    "residual_risk": "HMR 重载本插件未在本机实测（不得在运行 host 上试）；若 recomposition 后状态异常，回滚 dist 再触发一次即可，仍无需重启",
+    "fallback_if_lead_prefers_restart": "scripts/deploy/restart-host.sh --schedule [--force]（会杀掉当前会话与并行会话；由 Lead 决策，执行者不得自行重启）"
+  },
+  "redaction": {
+    "pattern": "credential-prefix regex（Google access-token 前缀 / refresh-token 前缀 / JWT 前缀，共 3 类；为避免自扫描命中，此处不写连续字面量，扫描命令见 t3-recipe.md）",
+    "hits": 0,
+    "checked_files": ["ops/relink/t3-recipe.md", "ops/relink/t3-patch.diff", "ops/relink/t3-proof.json", "ops/relink/t3-proof.log", "ops/relink/t3-evidence/*", "/tmp/relink-t3-run/*.json"],
+    "token_handling": "全程未打印 access_token；仅记录 Bearer **** 末 4 位；SSE 中 thoughtSignature 长 base64 已替换为 <BASE64_REDACTED len=N>"
+  },
+  "limitations": [
+    "补丁本身未在运行 host 内实测（生成预算已用尽）；但补丁只改变端点选择，daily 端点在同账号同模型同代码路径下已由 n=3 证明 200",
+    "模型是否必须 gemini-3.5-flash-lite 未单独隔离：历史上 daily+旧 Gemini 模型曾 404，本轮只用 flash-lite 验证成功",
+    "daily 是日构建入口，可用性可能波动；补丁保留 production/sandbox 回退",
+    "T1 的 6 个境外出口对官方 CLI 全部 ineligible（location 层），与本任务生成 API 的 429 是两个层次；本轮未再尝试出口",
+    "LCA 的 UNSUPPORTED_LOCATION / UNSUPPORTED_CLIENT 是资格层判定（HTTP 仍 200），与生成 429 无关"
+  ]
+}

@@ -1,0 +1,6 @@
+# derived-from probe.mjs output — raw SSE frames NOT persisted by the probe
+# ts=2026-11-16T10:23:22.240Z status=200 contentType=text/event-stream bytes=1451 sseEventCount=4
+# model=gemini-3.5-flash-lite project=aicode-consumers endpoint=https://daily-cloudcode-pa.googleapis.com
+# plugin defaults: injection={"headers":false,"clientMetadata":false,"patchedCore":false,"ua":null,"coreSrc":"/tmp/relink-build/packages/core/src/client.ts","clientMetadataWhere":null}
+# text (first 35 chars of assembled assistant text):
+Hi there! How can I help you today?

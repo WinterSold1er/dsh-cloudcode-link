@@ -1,0 +1,8 @@
+watching /home/csy/.dsh/profiles/web/node_modules/dsh-cloudcode-link/dist/index.js (file_wd=1 dir_wd=2) for 20s; now=1794828842335
+1794828847334 OPEN name=index.js src=file pid=-
+1794828847397 ACCESS name=index.js src=file pid=-
+1794828847434 CLOSE_NOWRITE name=index.js src=file pid=-
+1794828847434 OPEN name=index.js src=file pid=-
+1794828847470 ACCESS name=index.js src=file pid=-
+1794828847506 CLOSE_NOWRITE name=index.js src=file pid=-
+1794828862346 PROBE_END

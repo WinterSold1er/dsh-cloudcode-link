@@ -1,0 +1,39 @@
+{
+  "method": "installed-dist-copy-direct-import",
+  "distCopy": "/tmp/relink-t13c/e2e/dist-copy.mjs",
+  "distCopySha256AfterExport": "12c1cef58a42d30d9ca0be69cddb7e414a97d50a97d332772914eb56778cb407",
+  "distCopyShaBeforeExport": "adba7687bbf0acf156118b9700219124dfdf32fc2941fb3bb9f20f156dcfefcd",
+  "distCopyShaMatchesInstalled": true,
+  "installedDistSha256": "adba7687bbf0acf156118b9700219124dfdf32fc2941fb3bb9f20f156dcfefcd",
+  "exportLineAppended": "export { streamGenerateContent, ENDPOINT_FALLBACKS }; (sole byte-level change vs installed dist)",
+  "generationRequests": 1,
+  "ok": true,
+  "endpointFallbacks": [
+    "https://daily-cloudcode-pa.googleapis.com",
+    "https://cloudcode-pa.googleapis.com",
+    "https://daily-cloudcode-pa.sandbox.googleapis.com"
+  ],
+  "endpointFallbacks0": "https://daily-cloudcode-pa.googleapis.com",
+  "tokenExpiresAt": null,
+  "tokenNotExpired": null,
+  "elapsedMs": 4634,
+  "endpoint": "https://daily-cloudcode-pa.googleapis.com",
+  "status": 200,
+  "contentType": "text/event-stream",
+  "bytes": 1526,
+  "sseDataLines": 2,
+  "sseJsonChunks": 2,
+  "modelVersion": "gemini-3.8-flash-n",
+  "usageMetadata": {
+    "promptTokenCount": 2,
+    "candidatesTokenCount": 9,
+    "totalTokenCount": 118,
+    "thoughtsTokenCount": 107
+  },
+  "textFirst200": "data: {\"response\": {\"candidates\": [{\"content\": {\"role\": \"model\",\"parts\": [{\"text\": \"Hello! How can I help you today?\"}]}}],\"usageMetadata\": {\"promptTokenCount\": 2,\"candidatesTokenCount\": 9,\"totalToken",
+  "responseOk": true,
+  "tokenExpiryField": "token.expiry",
+  "tokenExpiry": "2026-11-16T12:04:37.981Z",
+  "tokenNotExpiredAtRequest": true,
+  "tokenExpiryCheckNote": "runner read token.expires_at (absent) so its own guard was inconclusive; expiry re-verified post-hoc from token.expiry without issuing any request"
+}

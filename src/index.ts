@@ -5,6 +5,8 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { join } from 'node:path'
 import { mkdirSync, writeFileSync, existsSync, readFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+import { fileURLToPath } from 'node:url'
 import { dshHome, overridesPath, readOverrides, resolveConfig, stateDir } from './common/config.ts'
 import { PROVIDER_ID, type PluginConfig } from './common/types.ts'
 import { AgyAdapter } from './host/adapter.ts'
@@ -31,6 +33,16 @@ import {
   type AggregatedBucketMetric,
   type AccountUsageMetric,
 } from './host/stats.ts'
+
+// sha256 of the module file currently executing; lets /status prove the host
+// loaded the latest dist (vs. still running an older copy).
+const selfSha256 = (() => {
+  try {
+    return createHash('sha256').update(readFileSync(fileURLToPath(import.meta.url))).digest('hex')
+  } catch {
+    return null
+  }
+})()
 
 export interface SubagentEvent {
   id?: string
@@ -360,6 +372,7 @@ export function apply(ctx: Context, entryConfig: Record<string, unknown> = {}): 
           pool: pool.getPoolData(),
           catalog: { source: cat.source, count: cat.models.length, lastError: cat.lastError ?? null },
           lastRun,
+          distSha256: selfSha256,
         })
       })()
     })

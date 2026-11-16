@@ -1,0 +1,53 @@
+{
+  "built_at": "2026-11-16T10:56:07.006Z",
+  "repo": "/home/csy/Code/Github/dsh-cloudcode-link",
+  "dist": {
+    "before_sha256": "6b8e1fad176bfc5ba6e584b13f392b7c436a6e1dcb88161751871b08516a50a4",
+    "after_sha256": "677d9a81e70ba139a417e5fff5e7c784d3efdd6fa97a34f359b7db6e77f7ce82",
+    "before_size_bytes": 1250243,
+    "after_size_bytes": 1250243,
+    "after_mtime": "2026-11-16 18:54:29.773656605 +0800",
+    "size_delta_bytes": 0,
+    "note": "size unchanged because only array element order changed (same characters); sha differs"
+  },
+  "diff": {
+    "scope": "packages/core is a git submodule; outer git diff shows only submodule pointer",
+    "files": [
+      "packages/core/src/client.ts"
+    ],
+    "numstat": "1\t1\tsrc/client.ts",
+    "patch": "diff --git a/src/client.ts b/src/client.ts\nindex a6716fa..89a0bc0 100644\n--- a/src/client.ts\n+++ b/src/client.ts\n@@ -5,8 +5,8 @@ import { fnv1a64Signed } from './sessions.ts'\n \n export const DEFAULT_ENDPOINT = 'https://cloudcode-pa.googleapis.com'\n export const ENDPOINT_FALLBACKS: readonly string[] = [\n-  DEFAULT_ENDPOINT,\n   'https://daily-cloudcode-pa.googleapis.com',\n+  DEFAULT_ENDPOINT,\n   'https://daily-cloudcode-pa.sandbox.googleapis.com',\n ]"
+  },
+  "endpoint_order": {
+    "dist_snippet": "const ENDPOINT_FALLBACKS = [\n\t\"https://daily-cloudcode-pa.googleapis.com\",\n\t\"https://cloudcode-pa.googleapis.com\",\n\t\"https://daily-cloudcode-pa.sandbox.googleapis.com\"\n];\nconst PROJECT_CACHE_TTL_MS = ",
+    "dist_snippet_daily_first": true,
+    "runtime_import_from_source": [
+      "https://daily-cloudcode-pa.googleapis.com",
+      "https://cloudcode-pa.googleapis.com",
+      "https://daily-cloudcode-pa.sandbox.googleapis.com"
+    ],
+    "runtime_note": "node --experimental-strip-types import of packages/core/src/client.ts printed ENDPOINT_FALLBACKS with daily first (Node v26.13.1)"
+  },
+  "tests": {
+    "command": "unshare -rn sh -c 'ip link set lo up; pnpm test'",
+    "isolation_note": "network namespace with no external route: guarantees ZERO requests to Google; loopback up for e2e localhost tests",
+    "raw_log": "/tmp/relink-t13-build/test.log",
+    "tests": 255,
+    "pass": 255,
+    "fail": 0,
+    "skipped": 0,
+    "todo": 0,
+    "targeted": "node --test test/m1-client.test.ts -> 8/8 pass"
+  },
+  "safety": {
+    "touched_files": [
+      "packages/core/src/client.ts",
+      "dist/index.js"
+    ],
+    "dist_others_unchanged": "dist/client.js and dist/index.d.ts rebuilt byte-identical (not in git status)",
+    "home_dsh_touched": false,
+    "host_restarted": false,
+    "profile_overwritten": false,
+    "google_requests_sent": false
+  }
+}

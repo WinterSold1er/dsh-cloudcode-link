@@ -1,0 +1,440 @@
+{
+  "task": "t13a-hmr-new-instance-discriminator",
+  "agent": "worker-fix/t13a-runner",
+  "generated_at": "2026-11-16T11:41:13.604Z",
+  "question": "Does the running DSH host actually reload the installed plugin code (new module instance + new bytes)?",
+  "host": {
+    "unit": "deepseek-harness.service",
+    "pid": 2685153,
+    "pid_unchanged_across_all_runs": true,
+    "restarted": false,
+    "web": "http://127.0.0.1:3080",
+    "plugin": "dsh-cloudcode-link"
+  },
+  "method": {
+    "trigger": "append one legal YAML comment line to ~/.dsh/profiles/web/cordis.patch.yml (no other file touched)",
+    "discriminator": "A fresh ModelCatalog starts at source:\"fallback\" (12 models) and only becomes source:\"discovered\" (16) after async refreshIfNeeded(); therefore a transient fallback reading of /catalog proves a NEW plugin instance, and an inotify OPEN/ACCESS on the installed dist/index.js in the same second proves NEW BYTES were read.",
+    "poll_catalog_ms": 15,
+    "poll_status_ms": 50,
+    "inotify_mask": "IN_OPEN|IN_ACCESS|IN_CLOSE_NOWRITE|IN_MODIFY|IN_ATTRIB (+ dir watch)",
+    "no_upstream_generation": true,
+    "code_basis": [
+      "packages/core/src/models.ts:346-350 constructor sets source:\"fallback\", models:buildFallbackCatalog(), discoveredAt:0",
+      "src/index.ts:170-177 new ModelCatalog(async () => quota.discoverAvailableModels(), ...); void catalog.refreshIfNeeded()",
+      "packages/boot/hmr/src/index.ts:385-399 inputs = JSON of [bundles, RAW TEXT of both patch files]; if (inputs === lastInputs) return; else reconcileProfile()",
+      "packages/boot/hmr/src/index.ts:955 planReplacement(compared.stale, ...) -> re-import; :974 recomposeProfile",
+      "packages/boot/hmr/src/module-files.ts:28 identity = `${ino}:${size}:${mtimeMs}`; :72-85 stale when identity differs or mtime >= observedAt - TIMESTAMP_RESOLUTION_MS"
+    ]
+  },
+  "dist_history": [
+    {
+      "at_utc": "2026-11-16T11:01:46.850Z",
+      "sha256": "677d9a81e70ba139a417e5fff5e7c784d3efdd6fa97a34f359b7db6e77f7ce82",
+      "size": 1250243,
+      "note": "installed dist at baseline; loaded by the 11:01:47Z trigger (prior t13-deploy run)"
+    },
+    {
+      "at_utc": "2026-11-16T11:33:57.164Z",
+      "sha256": "e79aee63621b8eea1a002a5b8c646efeea219155e72a65dfdcfcc213086da22d",
+      "size": 1250502,
+      "note": "replaced by ANOTHER agent; made run2 a real reload trigger"
+    },
+    {
+      "at_utc": "2026-11-16T11:37:11.897Z",
+      "sha256": "e79aee63621b8eea1a002a5b8c646efeea219155e72a65dfdcfcc213086da22d",
+      "size": 1250502,
+      "note": "rewritten with IDENTICAL bytes (mtime bump only); made run3 reload on mtime alone"
+    }
+  ],
+  "runs": [
+    {
+      "id": "run1",
+      "kind": "negative-control (aggregate-only; raw series overwritten by run2 file move)",
+      "append_epoch_ms": 1794828571894,
+      "append_utc": "2026-11-16T11:29:31.894Z",
+      "comment": "# t13a-recomp 20261116T112931Z",
+      "dist_at_trigger": {
+        "sha256": "677d9a81e70ba139a417e5fff5e7c784d3efdd6fa97a34f359b7db6e77f7ce82",
+        "size": 1250243,
+        "mtime_utc": "2026-11-16T11:01:46.850Z",
+        "identity_vs_record": "unchanged since the 11:01:47Z reload"
+      },
+      "catalog": {
+        "samples": 1330,
+        "span_ms": 20421,
+        "all_discovered_16": true,
+        "non_discovered_samples": 0,
+        "window": {
+          "first_epoch_ms": 1794828569477,
+          "last_epoch_ms": 1794828589898
+        }
+      },
+      "status": {
+        "samples": 405,
+        "all_200_enabled": true
+      },
+      "inotify": {
+        "probe_header": "watching /home/csy/.dsh/profiles/web/node_modules/dsh-cloudcode-link/dist/index.js (file_wd=1 dir_wd=2) for 46s; now=1794828569110",
+        "event_total": 1,
+        "target_events": 0,
+        "target_detail": [],
+        "raw_lines": [
+          "1794828615141 PROBE_END"
+        ]
+      },
+      "result": "no reload"
+    },
+    {
+      "id": "run2",
+      "kind": "positive: dist bytes replaced before trigger",
+      "append_epoch_ms": 1794828845117,
+      "append_utc": "2026-11-16T11:34:05.117Z",
+      "comment": "# t13a-recomp2 20261116T113405Z",
+      "dist_at_trigger": {
+        "sha256": "e79aee63621b8eea1a002a5b8c646efeea219155e72a65dfdcfcc213086da22d",
+        "size": 1250502,
+        "mtime_utc": "2026-11-16T11:33:57.164Z",
+        "changed_by": "another agent (not this task)",
+        "identity_vs_record": "changed (size+mtime) 8s before the trigger"
+      },
+      "catalog": {
+        "samples": 766,
+        "window": {
+          "first_epoch_ms": 1794828842704,
+          "last_epoch_ms": 1794828855123,
+          "span_ms": 12419
+        },
+        "distinct_states": [
+          {
+            "state": "http=200 source=discovered count=16",
+            "n": 685,
+            "first_epoch_ms": 1794828842704,
+            "last_epoch_ms": 1794828855123
+          },
+          {
+            "state": "http=200 source=fallback count=12",
+            "n": 81,
+            "first_epoch_ms": 1794828847142,
+            "last_epoch_ms": 1794828848831
+          }
+        ],
+        "non_discovered_samples": 81,
+        "fallback_interval": {
+          "first_epoch_ms": 1794828847142,
+          "last_epoch_ms": 1794828848831,
+          "duration_ms": 1689,
+          "samples": 81,
+          "offset_from_append_ms": 2025,
+          "longest_request_ms": 312.882,
+          "raw_first": "{\"epoch_ms\":1794828847142,\"http\":200,\"ok\":true,\"source\":\"fallback\",\"count\":12,\"ms\":312.882}",
+          "raw_last": "{\"epoch_ms\":1794828848831,\"http\":200,\"ok\":true,\"source\":\"fallback\",\"count\":12,\"ms\":0.891}",
+          "raw_before": "{\"epoch_ms\":1794828847127,\"http\":200,\"ok\":true,\"source\":\"discovered\",\"count\":16,\"ms\":1.034}",
+          "raw_after": "{\"epoch_ms\":1794828848846,\"http\":200,\"ok\":true,\"source\":\"discovered\",\"count\":16,\"ms\":19.217}"
+        },
+        "non_200": 0
+      },
+      "status": {
+        "samples": 241,
+        "non_200": 0,
+        "disabled": 0,
+        "fallback_samples": 28,
+        "fallback_first_epoch_ms": 1794828847167,
+        "fallback_last_epoch_ms": 1794828848810,
+        "raw_fallback_first": "{\"epoch_ms\":1794828847167,\"http\":200,\"enabled\":true,\"dormantReason\":null,\"catSource\":\"fallback\",\"catCount\":12,\"lastRunNull\":true,\"ms\":288.377}",
+        "raw_fallback_last": "{\"epoch_ms\":1794828848810,\"http\":200,\"enabled\":true,\"dormantReason\":null,\"catSource\":\"fallback\",\"catCount\":12,\"lastRunNull\":true,\"ms\":0.844}"
+      },
+      "inotify": {
+        "probe_header": "watching /home/csy/.dsh/profiles/web/node_modules/dsh-cloudcode-link/dist/index.js (file_wd=1 dir_wd=2) for 20s; now=1794828842335",
+        "event_total": 7,
+        "target_events": 6,
+        "target_detail": [
+          {
+            "epoch_ms": 1794828847334,
+            "offset_from_append_ms": 2217,
+            "events": [
+              "OPEN"
+            ],
+            "raw": "1794828847334 OPEN name=index.js src=file pid=-"
+          },
+          {
+            "epoch_ms": 1794828847397,
+            "offset_from_append_ms": 2280,
+            "events": [
+              "ACCESS"
+            ],
+            "raw": "1794828847397 ACCESS name=index.js src=file pid=-"
+          },
+          {
+            "epoch_ms": 1794828847434,
+            "offset_from_append_ms": 2317,
+            "events": [
+              "CLOSE_NOWRITE"
+            ],
+            "raw": "1794828847434 CLOSE_NOWRITE name=index.js src=file pid=-"
+          },
+          {
+            "epoch_ms": 1794828847434,
+            "offset_from_append_ms": 2317,
+            "events": [
+              "OPEN"
+            ],
+            "raw": "1794828847434 OPEN name=index.js src=file pid=-"
+          },
+          {
+            "epoch_ms": 1794828847470,
+            "offset_from_append_ms": 2353,
+            "events": [
+              "ACCESS"
+            ],
+            "raw": "1794828847470 ACCESS name=index.js src=file pid=-"
+          },
+          {
+            "epoch_ms": 1794828847506,
+            "offset_from_append_ms": 2389,
+            "events": [
+              "CLOSE_NOWRITE"
+            ],
+            "raw": "1794828847506 CLOSE_NOWRITE name=index.js src=file pid=-"
+          }
+        ],
+        "raw_lines": [
+          "1794828847334 OPEN name=index.js src=file pid=-",
+          "1794828847397 ACCESS name=index.js src=file pid=-",
+          "1794828847434 CLOSE_NOWRITE name=index.js src=file pid=-",
+          "1794828847434 OPEN name=index.js src=file pid=-",
+          "1794828847470 ACCESS name=index.js src=file pid=-",
+          "1794828847506 CLOSE_NOWRITE name=index.js src=file pid=-",
+          "1794828862346 PROBE_END"
+        ]
+      },
+      "result": "RELOAD OBSERVED"
+    },
+    {
+      "id": "run3",
+      "kind": "positive: dist rewritten with IDENTICAL bytes (mtime-only identity change)",
+      "append_epoch_ms": 1794829041080,
+      "append_utc": "2026-11-16T11:37:21.080Z",
+      "comment": "# t13a-recomp3-control 20261116T113721Z",
+      "dist_at_trigger": {
+        "sha256": "e79aee63621b8eea1a002a5b8c646efeea219155e72a65dfdcfcc213086da22d",
+        "size": 1250502,
+        "mtime_utc": "2026-11-16T11:37:11.897Z",
+        "identity_vs_record": "changed (mtime only; ino and size and bytes identical)"
+      },
+      "catalog": {
+        "samples": 704,
+        "window": {
+          "first_epoch_ms": 1794829038664,
+          "last_epoch_ms": 1794829050075,
+          "span_ms": 11411
+        },
+        "distinct_states": [
+          {
+            "state": "http=200 source=discovered count=16",
+            "n": 613,
+            "first_epoch_ms": 1794829038664,
+            "last_epoch_ms": 1794829050075
+          },
+          {
+            "state": "http=200 source=fallback count=12",
+            "n": 91,
+            "first_epoch_ms": 1794829043148,
+            "last_epoch_ms": 1794829044806
+          }
+        ],
+        "non_discovered_samples": 91,
+        "fallback_interval": {
+          "first_epoch_ms": 1794829043148,
+          "last_epoch_ms": 1794829044806,
+          "duration_ms": 1658,
+          "samples": 91,
+          "offset_from_append_ms": 2068,
+          "longest_request_ms": 307.687,
+          "raw_first": "{\"epoch_ms\":1794829043148,\"http\":200,\"ok\":true,\"source\":\"fallback\",\"count\":12,\"ms\":307.687}",
+          "raw_last": "{\"epoch_ms\":1794829044806,\"http\":200,\"ok\":true,\"source\":\"fallback\",\"count\":12,\"ms\":0.906}",
+          "raw_before": "{\"epoch_ms\":1794829043133,\"http\":200,\"ok\":true,\"source\":\"discovered\",\"count\":16,\"ms\":1.024}",
+          "raw_after": "{\"epoch_ms\":1794829044821,\"http\":200,\"ok\":true,\"source\":\"discovered\",\"count\":16,\"ms\":21.851}"
+        },
+        "non_200": 0
+      },
+      "status": {
+        "samples": 221,
+        "non_200": 0,
+        "disabled": 0,
+        "fallback_samples": 29,
+        "fallback_first_epoch_ms": 1794829043191,
+        "fallback_last_epoch_ms": 1794829044814,
+        "raw_fallback_first": "{\"epoch_ms\":1794829043191,\"http\":200,\"enabled\":true,\"dormantReason\":null,\"catSource\":\"fallback\",\"catCount\":12,\"lastRunNull\":true,\"ms\":265.587}",
+        "raw_fallback_last": "{\"epoch_ms\":1794829044814,\"http\":200,\"enabled\":true,\"dormantReason\":null,\"catSource\":\"fallback\",\"catCount\":12,\"lastRunNull\":true,\"ms\":1.421}"
+      },
+      "inotify": {
+        "probe_header": "watching /home/csy/.dsh/profiles/web/node_modules/dsh-cloudcode-link/dist/index.js (file_wd=1 dir_wd=2) for 20s; now=1794829038297",
+        "event_total": 7,
+        "target_events": 6,
+        "target_detail": [
+          {
+            "epoch_ms": 1794829043385,
+            "offset_from_append_ms": 2305,
+            "events": [
+              "OPEN"
+            ],
+            "raw": "1794829043385 OPEN name=index.js src=file pid=-"
+          },
+          {
+            "epoch_ms": 1794829043453,
+            "offset_from_append_ms": 2373,
+            "events": [
+              "ACCESS"
+            ],
+            "raw": "1794829043453 ACCESS name=index.js src=file pid=-"
+          },
+          {
+            "epoch_ms": 1794829043499,
+            "offset_from_append_ms": 2419,
+            "events": [
+              "CLOSE_NOWRITE"
+            ],
+            "raw": "1794829043499 CLOSE_NOWRITE name=index.js src=file pid=-"
+          },
+          {
+            "epoch_ms": 1794829043500,
+            "offset_from_append_ms": 2420,
+            "events": [
+              "OPEN"
+            ],
+            "raw": "1794829043500 OPEN name=index.js src=file pid=-"
+          },
+          {
+            "epoch_ms": 1794829043533,
+            "offset_from_append_ms": 2453,
+            "events": [
+              "ACCESS"
+            ],
+            "raw": "1794829043533 ACCESS name=index.js src=file pid=-"
+          },
+          {
+            "epoch_ms": 1794829043559,
+            "offset_from_append_ms": 2479,
+            "events": [
+              "CLOSE_NOWRITE"
+            ],
+            "raw": "1794829043559 CLOSE_NOWRITE name=index.js src=file pid=-"
+          }
+        ],
+        "raw_lines": [
+          "1794829043385 OPEN name=index.js src=file pid=-",
+          "1794829043453 ACCESS name=index.js src=file pid=-",
+          "1794829043499 CLOSE_NOWRITE name=index.js src=file pid=-",
+          "1794829043500 OPEN name=index.js src=file pid=-",
+          "1794829043533 ACCESS name=index.js src=file pid=-",
+          "1794829043559 CLOSE_NOWRITE name=index.js src=file pid=-",
+          "1794829058299 PROBE_END"
+        ]
+      },
+      "result": "RELOAD OBSERVED"
+    },
+    {
+      "id": "run4",
+      "kind": "negative-control: raw, dist identity byte-and-mtime unchanged",
+      "append_epoch_ms": 1794829189556,
+      "append_utc": "2026-11-16T11:39:49.556Z",
+      "comment": "# t13a-recomp4-noop 20261116T113949Z",
+      "dist_at_trigger": {
+        "sha256": "e79aee63621b8eea1a002a5b8c646efeea219155e72a65dfdcfcc213086da22d",
+        "size": 1250502,
+        "mtime_utc": "2026-11-16T11:37:11.897Z",
+        "identity_vs_record": "unchanged (record refreshed by the 11:37:23Z reload)"
+      },
+      "catalog": {
+        "samples": 665,
+        "window": {
+          "first_epoch_ms": 1794829187200,
+          "last_epoch_ms": 1794829197560,
+          "span_ms": 10360
+        },
+        "distinct_states": [
+          {
+            "state": "http=200 source=discovered count=16",
+            "n": 665,
+            "first_epoch_ms": 1794829187200,
+            "last_epoch_ms": 1794829197560
+          }
+        ],
+        "non_discovered_samples": 0,
+        "fallback_interval": null,
+        "non_200": 0
+      },
+      "status": {
+        "samples": 203,
+        "non_200": 0,
+        "disabled": 0,
+        "fallback_samples": 0,
+        "fallback_first_epoch_ms": null,
+        "fallback_last_epoch_ms": null,
+        "raw_fallback_first": null,
+        "raw_fallback_last": null
+      },
+      "inotify": {
+        "probe_header": "watching /home/csy/.dsh/profiles/web/node_modules/dsh-cloudcode-link/dist/index.js (file_wd=1 dir_wd=2) for 18s; now=1794829186776",
+        "event_total": 1,
+        "target_events": 0,
+        "target_detail": [],
+        "raw_lines": [
+          "1794829204795 PROBE_END"
+        ]
+      },
+      "result": "no reload"
+    }
+  ],
+  "verdict": {
+    "result": "PROVEN",
+    "statement": "The running host re-imports the installed plugin code from dist/index.js and constructs a NEW plugin instance (new ModelCatalog) when a patch/manifest change triggers reconciliation AND the module file identity (ino:size:mtimeMs) differs from the recorded identity. The host was never restarted.",
+    "supporting_evidence": [
+      "run2: append at 1794828845117 -> dist OPEN/ACCESS/CLOSE at +2217ms and a second burst at +2317ms -> /catalog fallback/12 from 1794828847142 to 1794828848831 (1.69s) -> discovered/16 at 1794828848846; /status independently shows fallback/12 for 28 samples",
+      "run3: identical bytes, mtime-only identity change -> same pattern: OPEN/ACCESS at +2305ms/+2420ms, fallback/12 1794829043148..1794829044806 (1.66s)",
+      "run4 (raw negative control): identity unchanged -> 665 catalog samples all discovered/16, ZERO inotify events over 18s",
+      "run1 (aggregate negative control): identity unchanged -> 1330 samples all discovered/16, 0 events over 46s",
+      "host PID 2685153 identical before/after all runs; no restart; /status 200 enabled:true throughout"
+    ],
+    "failed_hypotheses": [
+      "NOT disproven-by-silence: an unchanged module produces no reload (run1/run4), so the discriminator is not noisy — absence of fallback is meaningful.",
+      "NOT a pure byte comparison: run3 proves mtime alone is sufficient (identical sha256 reloaded)."
+    ]
+  },
+  "caveats": [
+    "Reload is mtime-based: rewriting identical bytes bumps mtime and still forces a reload (run3).",
+    "Changing dist alone does NOT reload: dist was replaced at 11:33:57Z and 11:37:11Z, yet no reload/read occurred until the following patch append (run2/run3). The patch (or manifest) text change is the required trigger; module identity is the gate.",
+    "The changed dist bytes in run2/run3 were produced by ANOTHER agent, not by this task. This task proves the host reload mechanism and that the newest dist bytes were loaded; it did not itself deploy bytes.",
+    "inotify pid attribution failed (/proc scan resolved no holder; reads last 36-76ms). Attribution rests on timing (+2.2-2.4s after the append), exclusivity (46s/20s idle baselines show zero events), and the in-process fallback windows, which only a new plugin instance can produce.",
+    "During the 1.66-1.69s fallback window /catalog exposed 12 fallback models instead of 16 discovered ones; the first request after the swap took ~308-313ms (reload blocking). No 404 or connection error was observed in 766/704 samples.",
+    "Discovery after re-instantiation runs the plugin own agy models/quota lookup; this task issued no upstream generation request.",
+    "run1 raw catalog/status series was overwritten by run2 file-move (operator error). Its aggregates were recorded at analysis time; run4 is the raw replacement negative control.",
+    "An idle-control inotify watch was verified before/after: with no trigger the host never reads dist/index.js (0 events), so observed reads are trigger-caused."
+  ],
+  "artifacts": {
+    "t13-hmr-catalog-series.jsonl": "0e0a51ccb218572fe3a90ebd2e50fc8550af51178bc4bed3835f1f6339ae353b",
+    "t13-hmr-status-series.jsonl": "d4d63e83657de5e72df647dc21345213ecfc8cffcff591bda9b427edbd8a96b8",
+    "t13-hmr-inotify.log": "61ac4e854c3fb730cf2fc711d0f1b1339cbead1d8590348abb944b4e269e187b",
+    "t13-hmr-inotify-patch.log": "fb1f35bbbac53131d98ee1c7d161be063136254af399bf2fbd4e7a2123ea4a66",
+    "t13-hmr-catalog-series-mtimeonly.jsonl": "b50f096276002fd8efd9abed6e323a68ca60df9b1ab8d39aa61be1dd3a18fcb5",
+    "t13-hmr-inotify-mtimeonly.log": "1a3726136c0da5e3800e85d2894bd146d268998b000312540486af3b3a826693",
+    "t13-hmr-catalog-series-nochange.jsonl": "c18e98682f52cccdc1a89a2cd808d8efffacc98ffc9f928bf4b96d7f5dcda871",
+    "t13-hmr-status-series-nochange.jsonl": "ec02479b85b25e5bc0251ea3b213f2d418fecaf242b432c5586304189c4eda3a",
+    "t13-hmr-inotify-nochange.log": "464f1caa85b32a4e2618c65cbe58e040725904ee99889c35cabf0b20fcda6caf",
+    "t13-hmr-inotify-run1-empty.log": "00bfb5cefdd1f3338f82886f1a72076b63744ad2e8df0e14a8b5d28e6f0f887d"
+  },
+  "append_epochs": {
+    "run1": 1794828571894,
+    "run2": 1794828845117,
+    "run3": 1794829041080,
+    "run4": 1794829189556
+  },
+  "patch_file": {
+    "path": "/home/csy/.dsh/profiles/web/cordis.patch.yml",
+    "sha256_before": "dc7d1c3bd46de36a02ffaa773a8dba5ffa6789993a0af980759e14cf7f9b477d",
+    "backup": "/tmp/relink-t13a/cordis.patch.yml.bak",
+    "changes": [
+      "appended 4 comment lines (# t13a-recomp*, # t13a-recomp4-noop)"
+    ]
+  }
+}

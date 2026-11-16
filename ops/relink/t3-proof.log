@@ -1,0 +1,77 @@
+# T3 proof log — 插件真实代码路径的真实上游请求（脱敏）
+# agent=worker-fix  task=task-10
+# 生成请求预算：4 次（已用尽）；loadCodeAssist 非生成 2 次
+# 账号：acc_1788785623927_xhs7n（号池 index 1）
+# 出口：host 本机 TUN 默认路由（未设 PROXY，未切 Clash selector）
+# 时间均为 UTC；CST = UTC+8
+# ---------------------------------------------------------------------------
+
+## 0. 环境事实
+host unit           = deepseek-harness-official.service
+host main pid       = 2685153 (active since 2026-11-16 11:42:18 CST)
+installed plugin    = /home/csy/.dsh/profiles/web/node_modules/dsh-cloudcode-link
+installed dist sha  = 6b8e1fad176bfc5ba6e584b13f392b7c436a6e1dcb88161751871b08516a50a4
+repo dist sha       = 6b8e1fad176bfc5ba6e584b13f392b7c436a6e1dcb88161751871b08516a50a4   (相同 = production-first 版本)
+temp build          = /tmp/relink-build (rsync 副本；repo 工作区零改动)
+probe               = /tmp/relink-build/probe/probe.mjs (import packages/core/src/client.ts streamGenerateContent)
+
+## 1. 生成请求登记（4/4）
+generation=1 ts=2026-11-16T10:14:56.633Z account=acc_1788785623927_xhs7n endpoint=daily       status=404  what=官方34.7KB-body重放
+generation=2 ts=2026-11-16T10:21:26.726Z account=acc_1788785623927_xhs7n endpoint=daily       status=200  what=官方942B-checkpoint重放(换requestId)
+generation=3 ts=2026-11-16T10:23:22.240Z account=acc_1788785623927_xhs7n endpoint=daily       status=200  what=插件原样代码(零改动) daily+flash-lite impl=plugin-core
+generation=4 ts=2026-11-16T10:26:14.771Z account=acc_1788785623927_xhs7n endpoint=production  status=429  what=插件原样代码,仅换端点(隔离变量) impl=plugin-core
+
+## 2. 非生成元数据请求登记（2）
+loadCodeAssist#1 ts=2026-11-16T10:08:38.664Z identity=antigravity/hub/2.8.0(+IDE headers) status=200 ineligibleTiers=null currentTier=free-tier project=aicode-consumers
+loadCodeAssist#2 ts=2026-11-16T10:08:51.852Z identity=@google/gemini-cli@0.68.0               status=200 ineligibleTiers=[UNSUPPORTED_CLIENT] project=null
+
+## 3. 关键证据：插件原样代码 200（gen#3，核心证明）
+$ PROBE_ALLOW_UPSTREAM=1 PROBE_ENDPOINTS=https://daily-cloudcode-pa.googleapis.com \
+  PROBE_ACCOUNT_DIR=acc_1788785623927_xhs7n PROBE_MODEL=gemini-3.5-flash-lite \
+  PROBE_PROJECT=aicode-consumers PROBE_PROMPT=hi PROBE_TIMEOUT_MS=90000 \
+  node /tmp/relink-build/probe/probe.mjs
+{"ts":"2026-11-16T10:23:22.240Z","op":"generate","account":"acc_1788785623927_xhs7n",
+ "model":"gemini-3.5-flash-lite","endpoint":"https://daily-cloudcode-pa.googleapis.com",
+ "status":200,"contentType":"text/event-stream","bytes":1451,
+ "firstText":"Hi there! How can I help you today?","sseEventCount":4,
+ "injection":{"headers":false,"clientMetadata":false,"patchedCore":false,"ua":null,
+ "coreSrc":"/tmp/relink-build/packages/core/src/client.ts","clientMetadataWhere":null},
+ "durationMs":3092}
+stderr: (空)
+
+## 4. 对照：同账号同模型，仅端点=production（gen#4）
+{"ts":"2026-11-16T10:26:14.771Z","op":"generate","account":"acc_1788785623927_xhs7n",
+ "model":"gemini-3.5-flash-lite","endpoint":"https://cloudcode-pa.googleapis.com",
+ "status":429,"contentType":"text/event-stream","bytes":139,"firstText":"","sseEventCount":0,
+ "durationMs":2445,
+ "error":"HTTP 429: { \"error\": { \"code\": 429, \"message\": \"Resource has been exhausted (e.g. check quota).\", \"status\": \"RESOURCE_EXHAUSTED\" } }"}
+
+## 5. 官方 942B 配方重放 200（gen#2，配方来源证据）
+{"ts":"2026-11-16T10:21:26.726Z","account":"acc_1788785623927_xhs7n","endpoint":"daily",
+ "status":200,"content_type":"text/event-stream","bytes":1444,"data_lines":4,
+ "modelVersion":"gemini-3.5-flash-lite","usageMetadata":{"promptTokenCount":119,"totalTokenCount":119},
+ "elapsed_ms":2009}
+SSE head:
+data: {"response": {"candidates": [{"content": {"role": "model","parts": [{"thought": true,"text": ""}]}}],"usageMetadata": {"promptTokenCount": 119,"totalTokenCount": 119},"modelVersion": "gemini-3.5-flash-lite","responseId": "Jtn6apbSFMSsz7IPpqKs2Qk"},"traceId": "6383686f8b48b017","metadata": {}}}
+（后续帧 text="General"、" Greeting"、finishReason=STOP）
+
+## 6. 最小补丁验证（在 /tmp 干净副本上）
+$ git apply --check ops/relink/t3-patch.diff      -> APPLY_CHECK_OK
+$ git apply --numstat                             -> 1  1  packages/core/src/client.ts
+$ tsc --noEmit -p .                               -> exit=0
+$ node --test "test/**/*.test.ts"                 -> tests 212 / pass 212 / fail 0
+endpointCandidates() after patch (no env)         -> first = https://daily-cloudcode-pa.googleapis.com
+                                                     [daily, https://cloudcode-pa.googleapis.com, https://daily-cloudcode-pa.sandbox.googleapis.com]
+DEFAULT_ENDPOINT (未改)                           -> https://cloudcode-pa.googleapis.com
+regression: ANTIGRAVITY_BASE_URL=... 覆盖仍单端点  -> ["https://env.example.test/x"]（与 pristine 一致）
+
+## 7. 脱敏自检
+对 ops/relink/t3-* 用 t4-redact-scan 同款三类凭据前缀正则扫描 -> 0 / 0 / 0 / 0
+（三类前缀的连续字面量故意不写进本文件，否则会自命中；扫描命令见 t3-recipe.md 第 8 节）
+token 从未打印（仅 Bearer ****）；SSE thoughtSignature 长 base64 已替换 <BASE64_REDACTED len=140>
+
+## 8. 未验证 / 边界
+- 补丁未在运行 host 内实测（预算用尽）；HMR recomposition 路径来自 /tmp/relink-recon/RESTART.md 的源码级证据，未在本机执行。
+- 模型是否必须 flash-lite 未单独隔离（历史 daily+旧 Gemini 模型曾 404）。
+- daily 属日构建入口，可用性波动；补丁保留 production/sandbox 回退。
+- T1 的 6 个境外出口对官方 CLI 全 ineligible 属资格层，与本任务 429 无关。

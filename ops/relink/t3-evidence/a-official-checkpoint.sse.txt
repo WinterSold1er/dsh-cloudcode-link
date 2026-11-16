@@ -1,0 +1,8 @@
+data: {"response": {"candidates": [{"content": {"role": "model","parts": [{"thought": true,"text": ""}]}}],"usageMetadata": {"promptTokenCount": 119,"totalTokenCount": 119},"modelVersion": "gemini-3.5-flash-lite","responseId": "Jtn6apbSFMSsz7IPpqKs2Qk"},"traceId": "6383686f8b48b017","metadata": {}}
+
+data: {"response": {"candidates": [{"content": {"role": "model","parts": [{"text": "General"}]}}],"usageMetadata": {"promptTokenCount": 119,"candidatesTokenCount": 1,"totalTokenCount": 120},"modelVersion": "gemini-3.5-flash-lite","responseId": "Jtn6apbSFMSsz7IPpqKs2Qk"},"traceId": "6383686f8b48b017","metadata": {}}
+
+data: {"response": {"candidates": [{"content": {"role": "model","parts": [{"text": " Greeting"}]}}],"usageMetadata": {"promptTokenCount": 119,"candidatesTokenCount": 2,"totalTokenCount": 121},"modelVersion": "gemini-3.5-flash-lite","responseId": "Jtn6apbSFMSsz7IPpqKs2Qk"},"traceId": "6383686f8b48b017","metadata": {}}
+
+data: {"response": {"candidates": [{"content": {"role": "model","parts": [{"thoughtSignature": "<BASE64_REDACTED len=140>","text": ""}]},"finishReason": "STOP"}],"usageMetadata": {"promptTokenCount": 119,"candidatesTokenCount": 2,"totalTokenCount": 121},"modelVersion": "gemini-3.5-flash-lite","responseId": "Jtn6apbSFMSsz7IPpqKs2Qk"},"traceId": "6383686f8b48b017","metadata": {}}
+

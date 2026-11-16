@@ -1,0 +1,491 @@
+{
+  "task": "t13b: add distSha256 + build to plugin /status as hard load evidence (no host restart)",
+  "generated_at": "2026-11-16T11:43:04.146Z",
+  "endpoint": "http://127.0.0.1:3080/plugins/cloudcode-link/status",
+  "host": {
+    "pid": 2685153,
+    "started_local": "2026-11-16 11:42:17",
+    "restarted_during_work": false,
+    "note": "same PID/start-time observed before and after; no restart performed"
+  },
+  "dist": {
+    "old_sha256": "677d9a81e70ba139a417e5fff5e7c784d3efdd6fa97a34f359b7db6e77f7ce82",
+    "new_sha256": "e79aee63621b8eea1a002a5b8c646efeea219155e72a65dfdcfcc213086da22d",
+    "installed_path": "/home/csy/.dsh/profiles/web/node_modules/dsh-cloudcode-link/dist/index.js",
+    "installed_sha256_final": "e79aee63621b8eea1a002a5b8c646efeea219155e72a65dfdcfcc213086da22d",
+    "repo_dist_sha256_final": "e79aee63621b8eea1a002a5b8c646efeea219155e72a65dfdcfcc213086da22d",
+    "backup_path": "/tmp/relink-t13b/backup-index.js",
+    "backup_sha256": "677d9a81e70ba139a417e5fff5e7c784d3efdd6fa97a34f359b7db6e77f7ce82",
+    "dist_write_alone_reloads": false
+  },
+  "status_keys": {
+    "before": [
+      "askTool",
+      "auth",
+      "catalog",
+      "defaultEffort",
+      "defaultModel",
+      "dormantReason",
+      "enabled",
+      "lastRun",
+      "plugin",
+      "pool",
+      "poolAuth",
+      "transport"
+    ],
+    "after": [
+      "askTool",
+      "auth",
+      "build",
+      "catalog",
+      "defaultEffort",
+      "defaultModel",
+      "distSha256",
+      "dormantReason",
+      "enabled",
+      "lastRun",
+      "plugin",
+      "pool",
+      "poolAuth",
+      "transport"
+    ],
+    "added": [
+      "build",
+      "distSha256"
+    ]
+  },
+  "proof_fields_after": {
+    "build": "t13b",
+    "distSha256": "e79aee63621b8eea1a002a5b8c646efeea219155e72a65dfdcfcc213086da22d",
+    "enabled": true,
+    "plugin": "dsh-cloudcode-link",
+    "transport": "direct",
+    "catalog_source": "discovered",
+    "catalog_count": 16
+  },
+  "sha_match": true,
+  "rounds": {
+    "round1_patch_append_by_t13a_concurrent": {
+      "file": "status-series.jsonl",
+      "round": "round1",
+      "samples": 62,
+      "has_dist_sha_samples": 62,
+      "no_dist_sha_samples": 0,
+      "first_sample": {
+        "round": "round1",
+        "epoch_ms": 1794828873895,
+        "rel_ms": 0,
+        "http": 200,
+        "hasDistSha": true,
+        "hasBuild": true,
+        "distSha256": "e79aee63621b8eea1a002a5b8c646efeea219155e72a65dfdcfcc213086da22d",
+        "build": "t13b",
+        "enabled": true,
+        "plugin": "dsh-cloudcode-link",
+        "err": null
+      },
+      "last_sample": {
+        "round": "round1",
+        "epoch_ms": 1794828889747,
+        "rel_ms": 15852,
+        "http": 200,
+        "hasDistSha": true,
+        "hasBuild": true,
+        "distSha256": "e79aee63621b8eea1a002a5b8c646efeea219155e72a65dfdcfcc213086da22d",
+        "build": "t13b",
+        "enabled": true,
+        "plugin": "dsh-cloudcode-link",
+        "err": null
+      },
+      "false_window": null,
+      "true_after_false": null,
+      "note": "t13b poller started 19:34:33.895Z, fields already present at first sample. Root cause: concurrent agent t13a appended \"# t13a-recomp2 11:34:05Z\" to cordis.patch.yml 28s earlier, which reloaded the plugin and picked up the new dist that t13b had copied at 19:33:57."
+    },
+    "round2_revert_reinstall": {
+      "file": "status-series-round2.jsonl",
+      "round": "round2",
+      "samples": 125,
+      "has_dist_sha_samples": 125,
+      "no_dist_sha_samples": 0,
+      "first_sample": {
+        "round": "round2",
+        "epoch_ms": 1794828917997,
+        "rel_ms": 0,
+        "http": 200,
+        "hasDistSha": true,
+        "hasBuild": true,
+        "distSha256": "e79aee63621b8eea1a002a5b8c646efeea219155e72a65dfdcfcc213086da22d",
+        "build": "t13b",
+        "enabled": true,
+        "plugin": "dsh-cloudcode-link",
+        "err": null
+      },
+      "last_sample": {
+        "round": "round2",
+        "epoch_ms": 1794828949746,
+        "rel_ms": 31749,
+        "http": 200,
+        "hasDistSha": true,
+        "hasBuild": true,
+        "distSha256": "e79aee63621b8eea1a002a5b8c646efeea219155e72a65dfdcfcc213086da22d",
+        "build": "t13b",
+        "enabled": true,
+        "plugin": "dsh-cloudcode-link",
+        "err": null
+      },
+      "false_window": null,
+      "true_after_false": null,
+      "note": "dist write only (old then new); no patch change -> no reload; status stayed on cached new build."
+    },
+    "round3_hold_old_42s": {
+      "file": "status-series-round3.jsonl",
+      "round": "round3",
+      "samples": 215,
+      "has_dist_sha_samples": 215,
+      "no_dist_sha_samples": 0,
+      "first_sample": {
+        "round": "round3",
+        "epoch_ms": 1794828986919,
+        "rel_ms": 0,
+        "http": 200,
+        "hasDistSha": true,
+        "hasBuild": true,
+        "distSha256": "e79aee63621b8eea1a002a5b8c646efeea219155e72a65dfdcfcc213086da22d",
+        "build": "t13b",
+        "enabled": true,
+        "plugin": "dsh-cloudcode-link",
+        "err": null
+      },
+      "last_sample": {
+        "round": "round3",
+        "epoch_ms": 1794829041748,
+        "rel_ms": 54829,
+        "http": 200,
+        "hasDistSha": true,
+        "hasBuild": true,
+        "distSha256": "e79aee63621b8eea1a002a5b8c646efeea219155e72a65dfdcfcc213086da22d",
+        "build": "t13b",
+        "enabled": true,
+        "plugin": "dsh-cloudcode-link",
+        "err": null
+      },
+      "false_window": null,
+      "true_after_false": null,
+      "note": "old dist held on disk 42s with no patch change -> zero flips (215/215 still new). Proves a dist write alone does NOT reload."
+    },
+    "round4_self_caused_transition": {
+      "file": "status-series-round4.jsonl",
+      "round": "round4",
+      "samples": 235,
+      "has_dist_sha_samples": 148,
+      "no_dist_sha_samples": 87,
+      "first_sample": {
+        "round": "round4",
+        "epoch_ms": 1794829145207,
+        "rel_ms": 0,
+        "http": 200,
+        "hasDistSha": true,
+        "hasBuild": true,
+        "distSha256": "e79aee63621b8eea1a002a5b8c646efeea219155e72a65dfdcfcc213086da22d",
+        "build": "t13b",
+        "enabled": true,
+        "plugin": "dsh-cloudcode-link",
+        "err": null
+      },
+      "last_sample": {
+        "round": "round4",
+        "epoch_ms": 1794829207186,
+        "rel_ms": 61979,
+        "http": 200,
+        "hasDistSha": true,
+        "hasBuild": true,
+        "distSha256": "e79aee63621b8eea1a002a5b8c646efeea219155e72a65dfdcfcc213086da22d",
+        "build": "t13b",
+        "enabled": true,
+        "plugin": "dsh-cloudcode-link",
+        "err": null
+      },
+      "false_window": {
+        "first_epoch_ms": 1794829159225,
+        "last_epoch_ms": 1794829181994,
+        "duration_ms": 22769
+      },
+      "true_after_false": {
+        "epoch_ms": 1794829182249,
+        "build": "t13b",
+        "distSha256": "e79aee63621b8eea1a002a5b8c646efeea219155e72a65dfdcfcc213086da22d",
+        "enabled": true
+      },
+      "note": "SELF-CAUSED causal proof: (1) disk=OLD, status still cached NEW; (2) t13b appends patch -> reload picks up OLD -> distSha256/build disappear (87 no-field samples); (3) disk=NEW, t13b appends patch again -> reload picks up NEW -> distSha256=e79aee.. build=t13b return.",
+      "events": [
+        "1794829149076 STEP1_DISK=OLD sha=677d9a81e70b",
+        "1794829157123 STEP2_APPEND_TRIGGER_A (disk=OLD, expect reload->no fields)",
+        "1794829175131 SNAPSHOT_AFTER_TRIGGER_A http_hasDistSha=false",
+        "1794829175131 STEP3_DISK=NEW sha=e79aee63621b",
+        "1794829180178 STEP4_APPEND_TRIGGER_B (disk=NEW, expect reload->fields)"
+      ]
+    }
+  },
+  "reload_mechanism": {
+    "trigger": "change to profiles/web/cordis.patch.yml",
+    "does_not_trigger": "replacing dist/index.js alone",
+    "observed_reload_latency_ms_approx": "2.1s - 2.4s (append -> status flip)",
+    "inotify_round4": [
+      {
+        "epoch_ms": 1794829149080,
+        "event": "OPEN",
+        "name": "index.js"
+      },
+      {
+        "epoch_ms": 1794829149148,
+        "event": "MODIFY",
+        "name": "index.js"
+      },
+      {
+        "epoch_ms": 1794829149148,
+        "event": "MODIFY",
+        "name": "index.js"
+      },
+      {
+        "epoch_ms": 1794829149148,
+        "event": "MODIFY",
+        "name": "index.js"
+      },
+      {
+        "epoch_ms": 1794829149148,
+        "event": "MODIFY",
+        "name": "index.js"
+      },
+      {
+        "epoch_ms": 1794829149148,
+        "event": "MODIFY",
+        "name": "index.js"
+      },
+      {
+        "epoch_ms": 1794829149148,
+        "event": "MODIFY",
+        "name": "index.js"
+      },
+      {
+        "epoch_ms": 1794829149148,
+        "event": "MODIFY",
+        "name": "index.js"
+      },
+      {
+        "epoch_ms": 1794829149148,
+        "event": "MODIFY",
+        "name": "index.js"
+      },
+      {
+        "epoch_ms": 1794829149148,
+        "event": "MODIFY",
+        "name": "index.js"
+      },
+      {
+        "epoch_ms": 1794829149148,
+        "event": "MODIFY",
+        "name": "index.js"
+      },
+      {
+        "epoch_ms": 1794829149148,
+        "event": "MODIFY",
+        "name": "index.js"
+      },
+      {
+        "epoch_ms": 1794829149148,
+        "event": "MODIFY",
+        "name": "index.js"
+      },
+      {
+        "epoch_ms": 1794829149148,
+        "event": "ATTRIB",
+        "name": "index.js"
+      },
+      {
+        "epoch_ms": 1794829149148,
+        "event": "CLOSE_WRITE",
+        "name": "index.js"
+      },
+      {
+        "epoch_ms": 1794829149148,
+        "event": "CLOSE_WRITE",
+        "name": "index.js"
+      },
+      {
+        "epoch_ms": 1794829149148,
+        "event": "OPEN",
+        "name": "index.js"
+      },
+      {
+        "epoch_ms": 1794829149198,
+        "event": "ACCESS",
+        "name": "index.js"
+      },
+      {
+        "epoch_ms": 1794829149262,
+        "event": "CLOSE_NOWRITE",
+        "name": "index.js"
+      },
+      {
+        "epoch_ms": 1794829159521,
+        "event": "OPEN",
+        "name": "index.js"
+      },
+      {
+        "epoch_ms": 1794829159592,
+        "event": "ACCESS",
+        "name": "index.js"
+      },
+      {
+        "epoch_ms": 1794829159662,
+        "event": "CLOSE_NOWRITE",
+        "name": "index.js"
+      },
+      {
+        "epoch_ms": 1794829175154,
+        "event": "OPEN",
+        "name": "index.js"
+      },
+      {
+        "epoch_ms": 1794829175224,
+        "event": "MODIFY",
+        "name": "index.js"
+      },
+      {
+        "epoch_ms": 1794829175224,
+        "event": "MODIFY",
+        "name": "index.js"
+      },
+      {
+        "epoch_ms": 1794829175224,
+        "event": "MODIFY",
+        "name": "index.js"
+      },
+      {
+        "epoch_ms": 1794829175224,
+        "event": "MODIFY",
+        "name": "index.js"
+      },
+      {
+        "epoch_ms": 1794829175224,
+        "event": "CLOSE_WRITE",
+        "name": "index.js"
+      },
+      {
+        "epoch_ms": 1794829175224,
+        "event": "CLOSE_WRITE",
+        "name": "index.js"
+      },
+      {
+        "epoch_ms": 1794829175224,
+        "event": "OPEN",
+        "name": "index.js"
+      },
+      {
+        "epoch_ms": 1794829175284,
+        "event": "ACCESS",
+        "name": "index.js"
+      },
+      {
+        "epoch_ms": 1794829175335,
+        "event": "CLOSE_NOWRITE",
+        "name": "index.js"
+      },
+      {
+        "epoch_ms": 1794829182507,
+        "event": "OPEN",
+        "name": "index.js"
+      },
+      {
+        "epoch_ms": 1794829182596,
+        "event": "ACCESS",
+        "name": "index.js"
+      },
+      {
+        "epoch_ms": 1794829182673,
+        "event": "CLOSE_NOWRITE",
+        "name": "index.js"
+      },
+      {
+        "epoch_ms": 1794829182673,
+        "event": "OPEN",
+        "name": "index.js"
+      },
+      {
+        "epoch_ms": 1794829182718,
+        "event": "ACCESS",
+        "name": "index.js"
+      },
+      {
+        "epoch_ms": 1794829182771,
+        "event": "CLOSE_NOWRITE",
+        "name": "index.js"
+      },
+      {
+        "epoch_ms": 1794829186733,
+        "event": "OPEN",
+        "name": "index.js"
+      },
+      {
+        "epoch_ms": 1794829186789,
+        "event": "ACCESS",
+        "name": "index.js"
+      },
+      {
+        "epoch_ms": 1794829186850,
+        "event": "CLOSE_NOWRITE",
+        "name": "index.js"
+      },
+      {
+        "epoch_ms": 1794829204812,
+        "event": "OPEN",
+        "name": "index.js"
+      },
+      {
+        "epoch_ms": 1794829204874,
+        "event": "ACCESS",
+        "name": "index.js"
+      },
+      {
+        "epoch_ms": 1794829204913,
+        "event": "ACCESS",
+        "name": "index.js"
+      },
+      {
+        "epoch_ms": 1794829204943,
+        "event": "CLOSE_NOWRITE",
+        "name": "index.js"
+      }
+    ],
+    "inotify_round1": [
+      {
+        "epoch_ms": 1794828885782,
+        "event": "OPEN",
+        "name": "index.js"
+      },
+      {
+        "epoch_ms": 1794828885846,
+        "event": "ACCESS",
+        "name": "index.js"
+      },
+      {
+        "epoch_ms": 1794828885884,
+        "event": "ACCESS",
+        "name": "index.js"
+      },
+      {
+        "epoch_ms": 1794828885912,
+        "event": "CLOSE_NOWRITE",
+        "name": "index.js"
+      }
+    ]
+  },
+  "verdict": "LOADED_PROVEN",
+  "verdict_detail": "/status reports build=\"t13b\" and distSha256=e79aee63... which is byte-identical to the newly built dist (repo + installed), computed at module load from import.meta.url. Host PID 2685153 unchanged since 11:42:17, so the new code was loaded by a runtime plugin reload, not a restart. Causality confirmed bidirectionally in round4.",
+  "caveats": [
+    "Round1 fields appeared before t13b's own patch append because concurrent agent worker-fix/t13a-runner appended a patch marker at 11:34:05Z; evidence for round1 is therefore not self-caused and is reported as such.",
+    "distSha256 is computed from the module file content, so it proves WHICH BUILD is executing, not which path it was loaded from (repo dist and installed dist are byte-identical).",
+    "Both t13a-runner and t13b-runner wrote the same installed dist and cordis.patch.yml concurrently; final state was verified new/healthy after both.",
+    "ops/relink/t13-hmr-proof.md was overwritten by t13a-runner (same path); the B section was appended to t13a's A content instead of replacing it, so both sections survive."
+  ]
+}

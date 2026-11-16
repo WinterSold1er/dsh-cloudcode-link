@@ -1,0 +1,132 @@
+# t13b inotify: installed dist (round1 window, triggered by t13a concurrent patch append)
+watching /home/csy/.dsh/profiles/web/node_modules/dsh-cloudcode-link/dist/index.js (file_wd=1 dir_wd=2) for 40s; now=1794828873262
+1794828885782 OPEN name=index.js src=file pid=-
+1794828885846 ACCESS name=index.js src=file pid=-
+1794828885884 ACCESS name=index.js src=file pid=-
+1794828885912 CLOSE_NOWRITE name=index.js src=file pid=-
+1794828913286 PROBE_END
+
+# t13b inotify round2 (revert/reinstall, dist-write only)
+watching /home/csy/.dsh/profiles/web/node_modules/dsh-cloudcode-link/dist/index.js (file_wd=1 dir_wd=2) for 34s; now=1794828917367
+1794828922954 OPEN name=index.js src=file pid=-
+1794828923020 MODIFY name=index.js src=dir pid=-
+1794828923020 MODIFY name=index.js src=file pid=-
+1794828923020 MODIFY name=index.js src=dir pid=-
+1794828923020 MODIFY name=index.js src=file pid=-
+1794828923020 MODIFY name=index.js src=dir pid=-
+1794828923020 MODIFY name=index.js src=file pid=-
+1794828923020 MODIFY name=index.js src=dir pid=-
+1794828923020 MODIFY name=index.js src=file pid=-
+1794828923020 MODIFY name=index.js src=dir pid=-
+1794828923020 MODIFY name=index.js src=file pid=-
+1794828923020 MODIFY name=index.js src=dir pid=-
+1794828923020 MODIFY name=index.js src=file pid=-
+1794828923020 ATTRIB name=index.js src=file pid=-
+1794828923020 CLOSE_WRITE name=index.js src=dir pid=-
+1794828923020 CLOSE_WRITE name=index.js src=file pid=-
+1794828923020 OPEN name=index.js src=file pid=-
+1794828923056 ACCESS name=index.js src=file pid=-
+1794828923082 CLOSE_NOWRITE name=index.js src=file pid=-
+1794828933977 OPEN name=index.js src=file pid=-
+1794828934041 MODIFY name=index.js src=dir pid=-
+1794828934041 MODIFY name=index.js src=file pid=-
+1794828934041 MODIFY name=index.js src=dir pid=-
+1794828934041 MODIFY name=index.js src=file pid=-
+1794828934041 CLOSE_WRITE name=index.js src=dir pid=-
+1794828934041 CLOSE_WRITE name=index.js src=file pid=-
+1794828934041 OPEN name=index.js src=file pid=-
+1794828934078 ACCESS name=index.js src=file pid=-
+1794828934108 CLOSE_NOWRITE name=index.js src=file pid=-
+1794828951408 PROBE_END
+
+# t13b inotify round3 (hold old 42s)
+watching /home/csy/.dsh/profiles/web/node_modules/dsh-cloudcode-link/dist/index.js (file_wd=1 dir_wd=2) for 58s; now=1794828986288
+1794828989874 OPEN name=index.js src=file pid=-
+1794828989917 MODIFY name=index.js src=dir pid=-
+1794828989917 MODIFY name=index.js src=file pid=-
+1794828989917 MODIFY name=index.js src=dir pid=-
+1794828989917 MODIFY name=index.js src=file pid=-
+1794828989917 MODIFY name=index.js src=dir pid=-
+1794828989917 MODIFY name=index.js src=file pid=-
+1794828989917 MODIFY name=index.js src=dir pid=-
+1794828989917 MODIFY name=index.js src=file pid=-
+1794828989917 MODIFY name=index.js src=dir pid=-
+1794828989917 MODIFY name=index.js src=file pid=-
+1794828989917 MODIFY name=index.js src=dir pid=-
+1794828989917 MODIFY name=index.js src=file pid=-
+1794828989917 ATTRIB name=index.js src=file pid=-
+1794828989917 CLOSE_WRITE name=index.js src=dir pid=-
+1794828989917 CLOSE_WRITE name=index.js src=file pid=-
+1794828989917 OPEN name=index.js src=file pid=-
+1794828989952 ACCESS name=index.js src=file pid=-
+1794828989981 CLOSE_NOWRITE name=index.js src=file pid=-
+1794829031898 OPEN name=index.js src=file pid=-
+1794829031964 MODIFY name=index.js src=dir pid=-
+1794829031964 MODIFY name=index.js src=file pid=-
+1794829031964 MODIFY name=index.js src=dir pid=-
+1794829031964 MODIFY name=index.js src=file pid=-
+1794829031964 CLOSE_WRITE name=index.js src=dir pid=-
+1794829031964 CLOSE_WRITE name=index.js src=file pid=-
+1794829031964 OPEN name=index.js src=file pid=-
+1794829032000 ACCESS name=index.js src=file pid=-
+1794829032026 CLOSE_NOWRITE name=index.js src=file pid=-
+1794829038268 OPEN name=index.js src=file pid=-
+1794829038331 ACCESS name=index.js src=file pid=-
+1794829038368 ACCESS name=index.js src=file pid=-
+1794829038395 CLOSE_NOWRITE name=index.js src=file pid=-
+1794829043385 OPEN name=index.js src=file pid=-
+1794829043453 ACCESS name=index.js src=file pid=-
+1794829043499 CLOSE_NOWRITE name=index.js src=file pid=-
+1794829043500 OPEN name=index.js src=file pid=-
+1794829043529 ACCESS name=index.js src=file pid=-
+1794829043554 CLOSE_NOWRITE name=index.js src=file pid=-
+1794829044306 PROBE_END
+
+# t13b inotify round4 (SELF-CAUSED patch-triggered reloads)
+watching /home/csy/.dsh/profiles/web/node_modules/dsh-cloudcode-link/dist/index.js (file_wd=1 dir_wd=2) for 64s; now=1794829144509
+1794829149080 OPEN name=index.js src=file pid=-
+1794829149148 MODIFY name=index.js src=dir pid=-
+1794829149148 MODIFY name=index.js src=file pid=-
+1794829149148 MODIFY name=index.js src=dir pid=-
+1794829149148 MODIFY name=index.js src=file pid=-
+1794829149148 MODIFY name=index.js src=dir pid=-
+1794829149148 MODIFY name=index.js src=file pid=-
+1794829149148 MODIFY name=index.js src=dir pid=-
+1794829149148 MODIFY name=index.js src=file pid=-
+1794829149148 MODIFY name=index.js src=dir pid=-
+1794829149148 MODIFY name=index.js src=file pid=-
+1794829149148 MODIFY name=index.js src=dir pid=-
+1794829149148 MODIFY name=index.js src=file pid=-
+1794829149148 ATTRIB name=index.js src=file pid=-
+1794829149148 CLOSE_WRITE name=index.js src=dir pid=-
+1794829149148 CLOSE_WRITE name=index.js src=file pid=-
+1794829149148 OPEN name=index.js src=file pid=-
+1794829149198 ACCESS name=index.js src=file pid=-
+1794829149262 CLOSE_NOWRITE name=index.js src=file pid=-
+1794829159521 OPEN name=index.js src=file pid=-
+1794829159592 ACCESS name=index.js src=file pid=-
+1794829159662 CLOSE_NOWRITE name=index.js src=file pid=-
+1794829175154 OPEN name=index.js src=file pid=-
+1794829175224 MODIFY name=index.js src=dir pid=-
+1794829175224 MODIFY name=index.js src=file pid=-
+1794829175224 MODIFY name=index.js src=dir pid=-
+1794829175224 MODIFY name=index.js src=file pid=-
+1794829175224 CLOSE_WRITE name=index.js src=dir pid=-
+1794829175224 CLOSE_WRITE name=index.js src=file pid=-
+1794829175224 OPEN name=index.js src=file pid=-
+1794829175284 ACCESS name=index.js src=file pid=-
+1794829175335 CLOSE_NOWRITE name=index.js src=file pid=-
+1794829182507 OPEN name=index.js src=file pid=-
+1794829182596 ACCESS name=index.js src=file pid=-
+1794829182673 CLOSE_NOWRITE name=index.js src=file pid=-
+1794829182673 OPEN name=index.js src=file pid=-
+1794829182718 ACCESS name=index.js src=file pid=-
+1794829182771 CLOSE_NOWRITE name=index.js src=file pid=-
+1794829186733 OPEN name=index.js src=file pid=-
+1794829186789 ACCESS name=index.js src=file pid=-
+1794829186850 CLOSE_NOWRITE name=index.js src=file pid=-
+1794829204812 OPEN name=index.js src=file pid=-
+1794829204874 ACCESS name=index.js src=file pid=-
+1794829204913 ACCESS name=index.js src=file pid=-
+1794829204943 CLOSE_NOWRITE name=index.js src=file pid=-
+1794829208553 PROBE_END

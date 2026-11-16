@@ -1,0 +1,62 @@
+# t13c e2e — 用安装副本 dist 直连真实上游（1 次生成预算）
+
+日期：2026-11-16（Asia/Shanghai 19:51；UTC 11:51:21Z）
+方法：**安装副本直连**（非替代方案）——把 `~/.dsh/profiles/web/node_modules/dsh-cloudcode-link/dist/index.js`
+逐字节复制为 `dist-copy.mjs`，仅在**文件末尾追加一行 export**，然后 import 并调用 bundle 内真实的
+`streamGenerateContent`，**不传 endpoints / proxyUrl**（第 4、5 参数为 `undefined`），因此走插件自身的
+`ENDPOINT_FALLBACKS` 首位（daily）。
+
+## 字节级完整性
+
+| 文件 | sha256 |
+|---|---|
+| 安装副本 dist（= repo dist，t13c 新构建） | `adba7687bbf0acf156118b9700219124dfdf32fc2941fb3bb9f20f156dcfefcd` |
+| `dist-copy.mjs` 追加 export **前**（回归校验） | `adba7687bbf0acf156118b9700219124dfdf32fc2941fb3bb9f20f156dcfefcd`（== 安装副本，一致） |
+| `dist-copy.mjs` 追加 export **后** | `12c1cef58a42d30d9ca0be69cddb7e414a97d50a97d332772914eb56778cb407` |
+| `runner.mjs` | `ea1fb3c786cf7a85fd8061136a536c1cef7ac2b1131b1e4fdf46b572e42d3941` |
+
+唯一改动 = 末尾追加的 **55 字节**（reviewer 复算口径：`\n` + `export { streamGenerateContent, ENDPOINT_FALLBACKS };\n` = 1 + 54 = 55；文件大小差 1250537 − 1250482 = 55）：
+```
+export { streamGenerateContent, ENDPOINT_FALLBACKS };
+```
+除此之外 **零字节改动**（bundle 本身是 ESM，顶层已有 `export { apply, inject, name };`，两个目标标识符
+`async function streamGenerateContent(` 与 `const ENDPOINT_FALLBACKS = [` 均为模块顶层声明，追加 export 即可导出）。
+追加前 1541 字节的差异由上述 export 行完全解释（sha 回算一致）。
+
+## 宿主依赖解析（未拷贝任何宿主包）
+
+`/tmp/relink-t13c/e2e/node_modules/@deepseek-ai/` 下建软链：
+- `dsh-llm` -> `/home/csy/Code/installer/deepseek-harness-0.2.2-rc.2/node_modules/@deepseek-ai/dsh-llm`
+- `dsh-tools` -> `/home/csy/Code/installer/deepseek-harness-0.2.2-rc.2/packages/core/tools`
+
+import 冒烟测试（0 次生成）：`import ok; exports: ENDPOINT_FALLBACKS,apply,inject,name,streamGenerateContent`。
+
+## 请求
+
+```js
+streamGenerateContent(token, {
+  project: 'aicode-consumers', model: 'gemini-3.8-flash-high',
+  request: { contents: [{ role: 'user', parts: [{ text: 'hi' }] }], generationConfig: {} },
+  requestType: 'AGENT', userAgent: 'ANTIGRAVITY', requestId: 'agent/t13c-e2e/1',
+}, AbortSignal.timeout(90000), undefined, undefined)   // 无 endpoints/proxy 覆盖
+```
+
+凭据：只读 `acc_1788785623927_xhs7n/.../antigravity-oauth-token`，仅内存使用，未打印（日志只出现
+`Bearer ****` 语义），未 refresh、未写回。token 过期时间取自 `token.expiry` =
+`2026-11-16T12:04:37.981Z`（UTC），请求发生在 `11:51:21Z`，**未过期**。
+说明：runner 的过期守卫读的是不存在的 `token.expires_at` 字段，故其内部判定为“不适用”；
+上句的过期结论是**请求后**从 `token.expiry` 复核得出（未额外发请求）。
+
+## 结果（1 次生成，无重试）
+
+- endpoint 实际命中：`https://daily-cloudcode-pa.googleapis.com`（= ENDPOINT_FALLBACKS[0]，200 即止，未 failover）
+- status: **200**，content-type: **text/event-stream**，响应体 1526 bytes
+- SSE `data:` 帧数：**2**（2 个 JSON chunk）
+- modelVersion: `gemini-3.8-flash-n`
+- 耗时：**4634 ms**
+- 正文前 200 字：见 `t13-e2e-installed.json.textFirst200`
+
+## 脱敏
+
+产物中所有长 base64 串替换为 `<BASE64_REDACTED len=N>`；三类凭据模式（Google access token 前缀、
+OAuth refresh token 前缀、JWT 头）在全部产物中扫描 **0 命中**（正文与 result.json 均为脱敏后内容）。

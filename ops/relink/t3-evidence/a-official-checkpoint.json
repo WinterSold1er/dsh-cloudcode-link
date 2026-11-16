@@ -1,0 +1,33 @@
+{
+  "generation": 2,
+  "ts": "2026-11-16T10:21:26.726Z",
+  "account": "acc_1788785623927_xhs7n",
+  "endpoint": "daily",
+  "url": "https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse",
+  "request": {
+    "body_bytes": 942,
+    "body_sha256": "314ea6e448c0cdd371ea4f56c7f14ca7a4dc68270dfd1c711e68f8690bbbbd1f",
+    "requestId": "checkpoint/341298b1-deff-49ac-b130-8f307d2ec1bb",
+    "project": "aicode-consumers",
+    "model": "gemini-3.5-flash-lite",
+    "requestType": "checkpoint",
+    "userAgent": "antigravity",
+    "sessionId": "-3750763034362895579",
+    "only_change": "requestId uuid -> crypto.randomUUID()"
+  },
+  "net_error": null,
+  "status": 200,
+  "status_text": "",
+  "elapsed_ms": 2009,
+  "resp_headers": {},
+  "content_type": "text/event-stream",
+  "bytes": 1444,
+  "data_lines": 4,
+  "sse_first_300": "data: {\"response\": {\"candidates\": [{\"content\": {\"role\": \"model\",\"parts\": [{\"thought\": true,\"text\": \"\"}]}}],\"usageMetadata\": {\"promptTokenCount\": 119,\"totalTokenCount\": 119},\"modelVersion\": \"gemini-3.5-flash-lite\",\"responseId\": \"Jtn6apbSFMSsz7IPpqKs2Qk\"},\"traceId\": \"6383686f8b48b017\",\"metadata\": {}}\r",
+  "modelVersion": "gemini-3.5-flash-lite",
+  "usageMetadata": {
+    "promptTokenCount": 119,
+    "totalTokenCount": 119
+  },
+  "error_body_600": null
+}
