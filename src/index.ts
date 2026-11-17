@@ -370,7 +370,14 @@ export function apply(ctx: Context, entryConfig: Record<string, unknown> = {}): 
           auth: authStatus,
           poolAuth: poolAuth.status(),
           pool: pool.getPoolData(),
-          catalog: { source: cat.source, count: cat.models.length, lastError: cat.lastError ?? null },
+          catalog: {
+            source: cat.source,
+            count: cat.models.length,
+            lastError: cat.lastError ?? null,
+            accountFailures: cat.accountFailures ?? null,
+            endpointErrors: (quota.lastEndpointErrors && quota.lastEndpointErrors.length > 0) ? quota.lastEndpointErrors : (cat.endpointErrors ?? null),
+            discoveryDiagnostics: quota.lastDiscoveryDiagnostics ?? null,
+          },
           lastRun,
           distSha256: selfSha256,
         })

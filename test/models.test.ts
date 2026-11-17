@@ -355,7 +355,7 @@ test('resolveModel and listModels populate inputModalities for multimodal and te
   assert.deepEqual(gptInList?.inputModalities, ['text'])
 })
 
-test('ModelCatalog discovers models from CloudCode DiscoveredModelsResponse and merges with fallback', async () => {
+test('ModelCatalog discovers models from CloudCode DiscoveredModelsResponse WITHOUT merging the built-in table', async () => {
   let callCount = 0
   const mockDiscover = async () => {
     callCount++
@@ -400,10 +400,12 @@ test('ModelCatalog discovers models from CloudCode DiscoveredModelsResponse and 
   assert.equal(f39?.name, 'Gemini 3.9 Flash')
   assert.deepEqual(f39?.efforts, ['low', 'medium', 'high'])
 
-  // Fallback models not returned by discovery (Claude, GPT-OSS) are merged
-  assert.ok(ids.includes('claude-sonnet-4-6'), 'claude-sonnet-4-6 merged from fallback')
-  assert.ok(ids.includes('claude-opus-4-6-thinking'), 'claude-opus merged from fallback')
-  assert.ok(ids.includes('gpt-oss-120b-medium'), 'gpt-oss merged from fallback')
+  // Models that only exist in the built-in table must NOT be merged in.
+  // (gemini-3.7-flash above is present because upstream returned it, not because of merging.)
+  assert.ok(!ids.includes('claude-sonnet-4-6'), 'claude-sonnet-4-6 must not leak from fallback')
+  assert.ok(!ids.includes('claude-opus-4-6-thinking'), 'claude-opus must not leak from fallback')
+  assert.ok(!ids.includes('gpt-oss-120b-medium'), 'gpt-oss must not leak from fallback')
+  assert.equal(ids.length, 3, 'discovered catalog holds exactly the upstream models')
 
   // No duplicate IDs
   assert.equal(new Set(ids).size, ids.length, 'all catalog IDs must be unique')
@@ -439,6 +441,79 @@ test('ModelCatalog gracefully handles discover returning null or throwing error'
   assert.equal(errorCatalog.get().models.length, DEFAULT_FALLBACK_MODELS.length)
 })
 
+test('ModelCatalog: a successful discovery never leaks ids that only exist in DEFAULT_FALLBACK_MODELS', async () => {
+  // Upstream serves 5 keys (1 internal). None of the four ids that used to leak in
+  // through the built-in table are served by this payload.
+  const upstream = {
+    models: {
+      'gemini-3.8-flash-tiered': { displayName: 'Gemini 3.8 Flash (Tiered)' },
+      'claude-opus-5-5-low': {},
+      'claude-opus-5-5-medium': {},
+      'claude-opus-5-5-high': {},
+      'claude-sonnet-5-5-high': { quotaInfo: { remainingFraction: 0.5 } },
+      chat_20706: {},
+    },
+  }
+  const catalog = new ModelCatalog(async () => upstream, DEFAULT_FALLBACK_MODELS, 60_000)
+  assert.equal(catalog.get().source, 'fallback', 'initial catalog is the built-in table')
+
+  await catalog.refreshIfNeeded()
+  const cat = catalog.get()
+  assert.equal(cat.source, 'discovered')
+  assert.equal(cat.lastError, undefined)
+
+  const ids = cat.models.map((m) => m.id)
+  for (const phantom of ['gemini-3.7-flash', 'gemini-3.6-flash', 'gemini-3.5-flash', 'gemini-3.1-pro']) {
+    assert.ok(!ids.includes(phantom), `${phantom} must not leak in from DEFAULT_FALLBACK_MODELS`)
+  }
+
+  // Nothing but upstream: exactly one catalog entry per non-internal upstream key.
+  assert.equal(ids.length, 5, 'catalog size must equal the upstream entry count')
+  const traceable = new Set<string>()
+  for (const key of Object.keys(upstream.models)) {
+    traceable.add(key)
+    traceable.add(key.replace(/-(tiered|low|medium|high)$/, ''))
+  }
+  for (const id of ids) {
+    assert.ok(traceable.has(id), `catalog id ${id} must trace back to an upstream model key`)
+  }
+  // Built-in ids that upstream does not serve must be absent (gemini-3.8-flash is
+  // served upstream, so only the non-traceable ones are checked here).
+  for (const fb of DEFAULT_FALLBACK_MODELS) {
+    if (traceable.has(fb.id)) continue
+    assert.ok(!ids.includes(fb.id), `fallback-only id ${fb.id} must not appear in a discovered catalog`)
+  }
+
+  // Claude ids that upstream actually serves DO show up (defect B counterpart).
+  assert.ok(ids.includes('claude-opus-5-5-low'), 'claude-opus-5-5-low served by upstream must be listed')
+  assert.ok(ids.includes('claude-sonnet-5-5-high'))
+
+  // Internal editor/tab models stay filtered out.
+  assert.ok(!ids.includes('chat_20706'))
+})
+
+test('ModelCatalog: a failing refresh keeps the previous catalog and records lastError', async () => {
+  let fail = false
+  const catalog = new ModelCatalog(
+    async () => {
+      if (fail) throw new Error('upstream 502')
+      return { models: { 'gemini-3.8-flash-tiered': { displayName: 'Gemini 3.8 Flash (Tiered)' } } }
+    },
+    DEFAULT_FALLBACK_MODELS,
+    0,
+  )
+
+  const good = await catalog.forceRefresh()
+  assert.equal(good.source, 'discovered')
+  assert.deepEqual(good.models.map((m) => m.id), ['gemini-3.8-flash'])
+
+  fail = true
+  const after = await catalog.forceRefresh()
+  assert.equal(after.source, 'discovered', 'a failed refresh must not downgrade a good catalog to fallback')
+  assert.deepEqual(after.models.map((m) => m.id), ['gemini-3.8-flash'], 'previous catalog is preserved')
+  assert.equal(after.lastError, 'upstream 502')
+})
+
 test('AgyAdapter listModels and resolveModel with dynamic discovery', async () => {
   const mockDiscover = async () => ({
     models: {
@@ -459,7 +534,9 @@ test('AgyAdapter listModels and resolveModel with dynamic discovery', async () =
 
   const models = await adapter.listModels('antigravity')
   assert.ok(models.some((m) => m.id === 'gemini-3.9-flash'))
-  assert.ok(models.some((m) => m.id === 'claude-sonnet-4-6'))
+  assert.ok(models.some((m) => m.id === 'gemini-3.1-pro'), 'gemini-3.1-pro is listed because upstream served it')
+  assert.ok(!models.some((m) => m.id === 'claude-sonnet-4-6'), 'fallback-only claude must NOT be listed')
+  assert.equal(models.length, 2, 'listModels mirrors the upstream-discovered catalog only')
 
   // Resolve dynamic gemini-3.9-flash
   const resolved39 = await adapter.resolveModel('antigravity', 'gemini-3.9-flash')

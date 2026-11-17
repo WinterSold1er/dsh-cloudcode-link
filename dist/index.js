@@ -7,8 +7,8 @@ import { homedir } from "node:os";
 import { LlmAdapter } from "@deepseek-ai/dsh-llm";
 import { createServer } from "node:http";
 import { readFile } from "node:fs/promises";
-import { defineTool } from "@deepseek-ai/dsh-tools";
 import { execFile, execFileSync } from "node:child_process";
+import { defineTool } from "@deepseek-ai/dsh-tools";
 //#region \0rolldown/runtime.js
 var __commonJSMin = (cb, mod) => () => (mod || (cb((mod = { exports: {} }).exports, mod), cb = null), mod.exports);
 var __require = /* #__PURE__ */ (() => createRequire(import.meta.url))();
@@ -1134,7 +1134,7 @@ function prettifyModelSlug(slug) {
 }
 function isInternalModel(slug) {
 	const s = slug.trim().toLowerCase();
-	return /^chat_\d+$/i.test(s) || /^tab[_-]/i.test(s) || /_preview$/i.test(s) || /-preview$/i.test(s);
+	return /^chat_\d+$/i.test(s) || /^tab[_-]/i.test(s) || /_preview$/i.test(s) || /-preview$/i.test(s) || /-(?:disabled|sonar)(?:-|$)/i.test(s) || /-tiered-/i.test(s);
 }
 /** Parse `agy models` stdout: JSON shapes first, then two-column text. */
 function parseModelsOutput(stdout) {
@@ -1185,15 +1185,59 @@ function extractModelList(parsed) {
 	if (Array.isArray(parsed)) arr = parsed;
 	else if (parsed && typeof parsed === "object") {
 		const o = parsed;
-		if (o.models && typeof o.models === "object" && !Array.isArray(o.models)) {
+		const modelsMap = o.models && typeof o.models === "object" && !Array.isArray(o.models) ? o.models : null;
+		if (Array.isArray(o.agentModelSorts) && o.agentModelSorts.length > 0) {
+			const sortedIds = [];
+			for (const sortItem of o.agentModelSorts) if (Array.isArray(sortItem.groups)) {
+				for (const group of sortItem.groups) if (Array.isArray(group.modelIds)) {
+					for (const mid of group.modelIds) if (typeof mid === "string" && mid.trim() !== "") sortedIds.push(mid.trim());
+				}
+			} else if (Array.isArray(sortItem.modelIds)) {
+				for (const mid of sortItem.modelIds) if (typeof mid === "string" && mid.trim() !== "") sortedIds.push(mid.trim());
+			}
+			if (sortedIds.length > 0) {
+				const out = [];
+				const seen = /* @__PURE__ */ new Set();
+				for (const mid of sortedIds) {
+					if (seen.has(mid)) continue;
+					seen.add(mid);
+					if (isInternalModel(mid)) continue;
+					const entry = modelsMap?.[mid];
+					if (entry && (entry.disabled === true || entry.enabled === false)) continue;
+					const rawLabel = typeof entry?.displayName === "string" && entry.displayName.trim() !== "" ? entry.displayName.trim() : typeof entry?.display_name === "string" && entry.display_name.trim() !== "" ? entry.display_name.trim() : typeof entry?.modelName === "string" && entry.modelName.trim() !== "" ? entry.modelName.trim() : typeof entry?.name === "string" && entry.name.trim() !== "" ? entry.name.trim() : "";
+					const label = rawLabel !== "" && rawLabel !== mid ? rawLabel : prettifyModelSlug(mid);
+					out.push({
+						slug: mid,
+						label
+					});
+				}
+				if (out.length > 0) return out;
+			}
+		}
+		if (modelsMap) {
 			const out = [];
-			for (const [key, val] of Object.entries(o.models)) {
+			const labelOwners = /* @__PURE__ */ new Map();
+			const duplicateLabels = /* @__PURE__ */ new Set();
+			for (const [key, val] of Object.entries(modelsMap)) {
 				if (!key || typeof key !== "string") continue;
 				const trimmedKey = key.trim();
 				if (isInternalModel(trimmedKey)) continue;
 				const v = val && typeof val === "object" ? val : {};
+				if (v.disabled === true || v.enabled === false) continue;
 				const rawLabel = typeof v.displayName === "string" && v.displayName.trim() !== "" ? v.displayName.trim() : typeof v.display_name === "string" && v.display_name.trim() !== "" ? v.display_name.trim() : typeof v.modelName === "string" && v.modelName.trim() !== "" ? v.modelName.trim() : typeof v.name === "string" && v.name.trim() !== "" ? v.name.trim() : "";
-				const label = rawLabel !== "" && rawLabel !== trimmedKey ? rawLabel : prettifyModelSlug(trimmedKey);
+				if (rawLabel !== "") {
+					if (labelOwners.has(rawLabel)) duplicateLabels.add(rawLabel);
+					else labelOwners.set(rawLabel, trimmedKey);
+				}
+			}
+			for (const [key, val] of Object.entries(modelsMap)) {
+				if (!key || typeof key !== "string") continue;
+				const trimmedKey = key.trim();
+				if (isInternalModel(trimmedKey)) continue;
+				const v = val && typeof val === "object" ? val : {};
+				if (v.disabled === true || v.enabled === false) continue;
+				const rawLabel = typeof v.displayName === "string" && v.displayName.trim() !== "" ? v.displayName.trim() : typeof v.display_name === "string" && v.display_name.trim() !== "" ? v.display_name.trim() : typeof v.modelName === "string" && v.modelName.trim() !== "" ? v.modelName.trim() : typeof v.name === "string" && v.name.trim() !== "" ? v.name.trim() : "";
+				const label = rawLabel !== "" && rawLabel !== trimmedKey && !duplicateLabels.has(rawLabel) ? rawLabel : prettifyModelSlug(trimmedKey);
 				out.push({
 					slug: trimmedKey,
 					label
@@ -1229,6 +1273,7 @@ function extractModelList(parsed) {
 		if (typeof slugV !== "string" || slugV.trim() === "") continue;
 		const trimmedSlug = slugV.trim();
 		if (isInternalModel(trimmedSlug)) continue;
+		if (o.disabled === true || o.enabled === false) continue;
 		const rawLabel = o.label ?? o.display_name ?? o.displayName ?? o.title;
 		const labelStr = typeof rawLabel === "string" && rawLabel.trim() !== "" && rawLabel.trim() !== trimmedSlug ? rawLabel.trim() : prettifyModelSlug(trimmedSlug);
 		out.push({
@@ -1241,7 +1286,8 @@ function extractModelList(parsed) {
 const EFFORT_SUFFIXES = [
 	"low",
 	"medium",
-	"high"
+	"high",
+	"xhigh"
 ];
 function getInputModalitiesForModel(modelId) {
 	if (resolveModelSlug(modelId).toLowerCase().startsWith("gpt-oss-")) return ["text"];
@@ -1250,6 +1296,12 @@ function getInputModalitiesForModel(modelId) {
 function deriveEffortsForModel(modelId) {
 	const id = modelId.toLowerCase();
 	if (id === "gemini-3.1-pro" || id.startsWith("gemini-3.1-pro")) return ["low", "high"];
+	if (id === "gemini-4-hydrogen" || id.startsWith("gemini-4-hydrogen")) return [
+		"low",
+		"medium",
+		"high",
+		"xhigh"
+	];
 	if (/^gemini-(?:[3-9]|\d{2,})(?:[.-]|$)/i.test(id)) return [
 		"low",
 		"medium",
@@ -1259,6 +1311,9 @@ function deriveEffortsForModel(modelId) {
 }
 function stripTieredLabel(label) {
 	return label.replace(/\s*\((?:Tiered|tiered)\)\s*$/i, "").replace(/\s+(?:Tiered|tiered)\s*$/i, "").trim();
+}
+function isValidGeminiBase(base) {
+	return !base.includes("-tiered") && !base.includes("-sonar") && !base.includes("-disabled");
 }
 /** Fold Gemini effort variants into base + effort set (spec ADR-10). */
 function foldEfforts(raw) {
@@ -1278,6 +1333,7 @@ function foldEfforts(raw) {
 		}
 		if (r.slug.endsWith("-tiered")) {
 			const base = r.slug.slice(0, -7);
+			if (!isValidGeminiBase(base)) continue;
 			const inferredEfforts = deriveEffortsForModel(base);
 			const cleanLabel = stripTieredLabel(r.label);
 			const displayLabel = cleanLabel !== "" && cleanLabel !== base && cleanLabel !== r.slug ? cleanLabel : prettifyModelSlug(base);
@@ -1296,7 +1352,7 @@ function foldEfforts(raw) {
 				const base = r.slug.slice(0, -suffix.length);
 				const hasBare = slugSet.has(base);
 				const hasSibling = raw.some((x) => x.slug.startsWith(base + "-") && EFFORT_SUFFIXES.some((e) => x.slug.endsWith("-" + e)) && x.slug !== r.slug);
-				if (hasBare || hasSibling) {
+				if ((hasBare || hasSibling) && isValidGeminiBase(base)) {
 					const stripped = stripEffortLabel(r.label, eff);
 					const displayLabel = stripped !== "" && stripped !== base && stripped !== r.slug ? stripped : prettifyModelSlug(base);
 					const entry = bases.get(base) ?? {
@@ -1311,6 +1367,7 @@ function foldEfforts(raw) {
 			}
 		}
 		if (!folded) {
+			if (!isValidGeminiBase(r.slug)) continue;
 			const displayLabel = r.label && r.label.trim() !== "" && r.label.trim() !== r.slug ? r.label.trim() : prettifyModelSlug(r.slug);
 			verbatim.push({
 				id: r.slug,
@@ -1351,27 +1408,6 @@ function buildFallbackCatalog(defs) {
 		efforts: Array.isArray(d.efforts) && d.efforts.length > 0 ? d.efforts.filter((e) => typeof e === "string" && e.trim() !== "") : null,
 		inputModalities: d.inputModalities ?? getInputModalitiesForModel(d.id)
 	}));
-}
-function mergeDiscoveredWithFallback(discovered, fallbackDefs = DEFAULT_FALLBACK_MODELS$1) {
-	const fallbackEntries = buildFallbackCatalog(fallbackDefs);
-	if (discovered.length === 0) return fallbackEntries;
-	const existingIds = /* @__PURE__ */ new Set();
-	for (const e of discovered) {
-		existingIds.add(e.id.toLowerCase());
-		const resolved = resolveModelSlug(e.id).toLowerCase();
-		existingIds.add(resolved);
-	}
-	const result = [...discovered];
-	for (const fb of fallbackEntries) {
-		const fbId = fb.id.toLowerCase();
-		const resolvedFbId = resolveModelSlug(fb.id).toLowerCase();
-		if (!existingIds.has(fbId) && !existingIds.has(resolvedFbId)) {
-			result.push(fb);
-			existingIds.add(fbId);
-			existingIds.add(resolvedFbId);
-		}
-	}
-	return result;
 }
 var ModelCatalog = class {
 	current;
@@ -1429,12 +1465,16 @@ var ModelCatalog = class {
 					const list = extractModelList(res);
 					if (list) raw = dedupeBySlug(list);
 				}
+				const accountFailures = typeof res === "object" && res && "accountFailures" in res && Array.isArray(res.accountFailures) ? res.accountFailures : void 0;
+				const endpointErrors = typeof res === "object" && res && "endpointErrors" in res && Array.isArray(res.endpointErrors) ? res.endpointErrors : void 0;
 				if (raw.length > 0) {
-					const merged = mergeDiscoveredWithFallback(foldEfforts(raw), this.fallbackDefs);
+					const folded = foldEfforts(raw);
 					this.current = {
 						source: "discovered",
-						models: merged,
-						discoveredAt: Date.now()
+						models: folded,
+						discoveredAt: Date.now(),
+						...accountFailures && accountFailures.length > 0 ? { accountFailures } : {},
+						...endpointErrors && endpointErrors.length > 0 ? { endpointErrors } : {}
 					};
 					return;
 				}
@@ -1634,14 +1674,14 @@ function getAntigravityRequestModelId(modelId, effort) {
 	const resolvedId = resolveModelSlug(modelId);
 	const r = ANTIGRAVITY_ROUTING[resolvedId] ?? ANTIGRAVITY_ROUTING[modelId];
 	if (!r) {
-		const isWireModel = resolvedId.endsWith("-low") || resolvedId.endsWith("-medium") || resolvedId.endsWith("-high") || resolvedId.endsWith("-tiered") || resolvedId.endsWith("-extra-low") || resolvedId.endsWith("-thinking");
+		const isWireModel = resolvedId.endsWith("-low") || resolvedId.endsWith("-medium") || resolvedId.endsWith("-high") || resolvedId.endsWith("-xhigh") || resolvedId.endsWith("-tiered") || resolvedId.endsWith("-extra-low") || resolvedId.endsWith("-thinking");
 		if (/^gemini-(?:[3-9]|\d{2,})(?:[.-]|$)/i.test(resolvedId) && !isWireModel) {
 			if (effort && effort !== "off" && [
 				"low",
 				"medium",
 				"high",
 				"xhigh"
-			].includes(effort.toLowerCase())) return `${resolvedId}-${effort.toLowerCase() === "xhigh" ? "high" : effort.toLowerCase()}`;
+			].includes(effort.toLowerCase())) return `${resolvedId}-${effort.toLowerCase()}`;
 			return `${resolvedId}-low`;
 		}
 		return resolvedId;
@@ -25484,6 +25524,915 @@ function agyFetch(url, init = {}, proxyUrl) {
 	});
 }
 //#endregion
+//#region packages/core/src/oauth.ts
+const AGY_PUBLIC_CLIENT_ID = ["1071006060591", "tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com"].join("-");
+const AGY_PUBLIC_CLIENT_SECRET = ["GOCSPX", "K58FWR486LdLJ1mLB8sXC4z6qDAf"].join("-");
+function resolveClientCredentials() {
+	return {
+		clientId: process.env.AGY_CLIENT_ID || AGY_PUBLIC_CLIENT_ID,
+		clientSecret: process.env.AGY_CLIENT_SECRET || AGY_PUBLIC_CLIENT_SECRET
+	};
+}
+const AGY_SCOPES = [
+	"https://www.googleapis.com/auth/cloud-platform",
+	"https://www.googleapis.com/auth/userinfo.email",
+	"https://www.googleapis.com/auth/userinfo.profile",
+	"https://www.googleapis.com/auth/cclog",
+	"https://www.googleapis.com/auth/experimentsandconfigs"
+];
+const OAUTH_AUTHORIZE_URL = "https://accounts.google.com/o/oauth2/v2/auth";
+const OAUTH_TOKEN_URL = "https://oauth2.googleapis.com/token";
+const OAUTH_USERINFO_URL = "https://www.googleapis.com/oauth2/v1/userinfo";
+const OAUTH_CALLBACK_PORT = 51121;
+const OAUTH_CALLBACK_PATH = "/oauth-callback";
+/** Redirect URI for the registered callback port; overridable so a listener can bind an isolated port. */
+function oauthRedirectUri(port = OAUTH_CALLBACK_PORT) {
+	return `http://localhost:${port}${OAUTH_CALLBACK_PATH}`;
+}
+const OAUTH_REDIRECT_URI = oauthRedirectUri();
+const AGY_ENDPOINTS = [
+	"https://daily-cloudcode-pa.googleapis.com",
+	"https://cloudcode-pa.googleapis.com",
+	"https://daily-cloudcode-pa.sandbox.googleapis.com",
+	"https://autopush-cloudcode-pa.sandbox.googleapis.com"
+];
+function generatePkce() {
+	const verifier = randomBytes(32).toString("base64url");
+	return {
+		verifier,
+		challenge: createHash("sha256").update(verifier).digest("base64url")
+	};
+}
+function buildAuthorizeUrl(challenge, state, redirectUri = OAUTH_REDIRECT_URI) {
+	const { clientId } = resolveClientCredentials();
+	const url = new URL(OAUTH_AUTHORIZE_URL);
+	url.searchParams.set("client_id", clientId);
+	url.searchParams.set("response_type", "code");
+	url.searchParams.set("redirect_uri", redirectUri);
+	url.searchParams.set("scope", AGY_SCOPES.join(" "));
+	url.searchParams.set("code_challenge", challenge);
+	url.searchParams.set("code_challenge_method", "S256");
+	url.searchParams.set("state", state);
+	url.searchParams.set("access_type", "offline");
+	url.searchParams.set("prompt", "consent");
+	return url.toString();
+}
+async function postTokenForm(fields, proxyUrl) {
+	const { clientId, clientSecret } = resolveClientCredentials();
+	const body = new URLSearchParams({
+		client_id: clientId,
+		client_secret: clientSecret,
+		...fields
+	});
+	const res = await agyFetch(OAUTH_TOKEN_URL, {
+		method: "POST",
+		headers: { "Content-Type": "application/x-www-form-urlencoded" },
+		body: body.toString()
+	}, proxyUrl);
+	const payload = await res.json().catch(() => ({}));
+	if (!res.ok) {
+		const code = typeof payload.error === "string" ? payload.error : payload.error?.status;
+		const desc = payload.error_description ?? (typeof payload.error === "object" ? payload.error?.message : void 0);
+		throw new Error(`token endpoint ${res.status}: ${[code, desc].filter(Boolean).join(" — ") || "unknown error"}`);
+	}
+	if (!payload.access_token) throw new Error("token endpoint returned no access_token");
+	return payload;
+}
+function toTokenSet(payload, refreshTokenFallback) {
+	return {
+		access_token: payload.access_token,
+		token_type: payload.token_type ?? "Bearer",
+		refresh_token: payload.refresh_token ?? refreshTokenFallback,
+		expiryMs: typeof payload.expires_in === "number" ? Date.now() + payload.expires_in * 1e3 : void 0
+	};
+}
+/** Exchange an authorization code for tokens (PKCE-verified). */
+async function exchangeCode(code, verifier, proxyUrl, redirectUri = OAUTH_REDIRECT_URI) {
+	return toTokenSet(await postTokenForm({
+		grant_type: "authorization_code",
+		code: code.trim(),
+		redirect_uri: redirectUri,
+		code_verifier: verifier
+	}, proxyUrl));
+}
+/** Refresh an access token; throws on invalid_grant (credential revoked). */
+async function refreshTokens(refreshToken, proxyUrl) {
+	return toTokenSet(await postTokenForm({
+		grant_type: "refresh_token",
+		refresh_token: refreshToken
+	}, proxyUrl), refreshToken);
+}
+/** Fetch the account email for a valid access token (best effort). */
+async function fetchUserEmail(accessToken, proxyUrl) {
+	try {
+		const res = await agyFetch(OAUTH_USERINFO_URL, { headers: { Authorization: `Bearer ${accessToken}` } }, proxyUrl);
+		if (!res.ok) return void 0;
+		const info = await res.json();
+		return typeof info.email === "string" && info.email ? info.email : void 0;
+	} catch {
+		return;
+	}
+}
+/**
+* Persist tokens in on-disk format:
+*   {"token": {access_token, token_type, refresh_token, expiry}, "auth_method": "consumer"}
+*/
+function writeAgyTokenFile(homeDir, tokens) {
+	const geminiDir = join(homeDir, ".gemini");
+	const dir = join(geminiDir, "antigravity-cli");
+	mkdirSync(dir, {
+		recursive: true,
+		mode: 448
+	});
+	try {
+		chmodSync(homeDir, 448);
+		chmodSync(geminiDir, 448);
+		chmodSync(dir, 448);
+	} catch {}
+	const file = join(dir, "antigravity-oauth-token");
+	const expiryIso = tokens.expiryMs ? formatLocalIso(tokens.expiryMs) : formatLocalIso(Date.now() + 36e5);
+	const doc = {
+		token: {
+			access_token: tokens.access_token,
+			token_type: tokens.token_type ?? "Bearer",
+			...tokens.refresh_token ? { refresh_token: tokens.refresh_token } : {},
+			expiry: expiryIso
+		},
+		auth_method: "consumer"
+	};
+	writeFileSync(file, JSON.stringify(doc), {
+		encoding: "utf8",
+		mode: 384
+	});
+	try {
+		chmodSync(file, 384);
+	} catch {}
+	return file;
+}
+function formatLocalIso(ms) {
+	const d = new Date(ms);
+	const pad = (n, w = 2) => String(n).padStart(w, "0");
+	const offMin = -d.getTimezoneOffset();
+	const sign = offMin >= 0 ? "+" : "-";
+	const abs = Math.abs(offMin);
+	return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}.${pad(d.getMilliseconds(), 3)}${sign}${pad(Math.floor(abs / 60))}:${pad(abs % 60)}`;
+}
+const CALLBACK_SUCCESS_HTML = `<!doctype html><html><head><meta charset="utf-8"><title>登录成功</title></head>
+<body style="font-family:system-ui;text-align:center;padding:3rem">
+<h2>✓ 授权成功</h2>
+<p>可以关闭此标签页返回终端或应用。</p>
+</body></html>`;
+function startCallbackListener(options = {}) {
+	const timeoutMs = options.timeoutMs ?? 3e5;
+	const port = options.port ?? 51121;
+	let resolveResult;
+	let rejectResult;
+	const result = new Promise((resolve, reject) => {
+		resolveResult = resolve;
+		rejectResult = reject;
+	});
+	const server = createServer((req, res) => {
+		const url = new URL(req.url ?? "/", "http://localhost");
+		if (url.pathname !== "/oauth-callback") {
+			res.writeHead(404);
+			res.end("Not found");
+			return;
+		}
+		const code = url.searchParams.get("code");
+		const state = url.searchParams.get("state");
+		const oauthError = url.searchParams.get("error");
+		if (oauthError) {
+			res.writeHead(400, {
+				"Content-Type": "text/html",
+				connection: "close"
+			});
+			res.end(`<h2>Authorization failed: ${oauthError}</h2>`);
+			rejectResult(/* @__PURE__ */ new Error(`oauth error: ${oauthError}`));
+			setTimeout(() => server.close(), 1500);
+			return;
+		}
+		if (!code || !state) {
+			res.writeHead(400, { "Content-Type": "text/html" });
+			res.end("<h2>Missing code or state</h2>");
+			return;
+		}
+		res.writeHead(200, {
+			"Content-Type": "text/html",
+			connection: "close"
+		});
+		res.end(CALLBACK_SUCCESS_HTML);
+		resolveResult({
+			code,
+			state
+		});
+		setTimeout(() => server.close(), 1500);
+	});
+	server.on("error", (error) => {
+		rejectResult(error.code === "EADDRINUSE" ? /* @__PURE__ */ new Error(`port ${port} is busy`) : error);
+	});
+	server.listen(port, "127.0.0.1");
+	const timeout = setTimeout(() => {
+		rejectResult(/* @__PURE__ */ new Error("timed out waiting for the OAuth callback"));
+		server.close();
+	}, timeoutMs);
+	return {
+		result,
+		async close() {
+			clearTimeout(timeout);
+			if (server.listening) {
+				server.closeAllConnections();
+				await new Promise((resolve) => server.close(() => resolve()));
+			}
+		}
+	};
+}
+function openBrowser(url) {
+	return new Promise((resolve) => {
+		try {
+			if (process.platform === "darwin") execFile("open", [url], (err) => resolve(!err));
+			else if (process.platform === "win32") execFile("cmd.exe", [
+				"/d",
+				"/s",
+				"/c",
+				`start "" "${url}"`
+			], { windowsVerbatimArguments: true }, (err) => resolve(!err));
+			else execFile("xdg-open", [url], (err) => resolve(!err));
+		} catch {
+			resolve(false);
+		}
+	});
+}
+function parsePastedCode(input) {
+	const text = input.trim();
+	if (!text) return null;
+	if (/^https?:\/\//i.test(text)) try {
+		const url = new URL(text);
+		const code = url.searchParams.get("code");
+		if (!code) return null;
+		return {
+			code,
+			state: url.searchParams.get("state") ?? void 0
+		};
+	} catch {
+		return null;
+	}
+	if (/^[\w\-/.%]+$/.test(text) && text.length >= 10) return { code: text };
+	return null;
+}
+//#endregion
+//#region packages/core/src/quota.ts
+function mergeFallbackFamilyQuota(prev, fallback) {
+	if (!prev) return fallback;
+	return {
+		...prev,
+		remainingFraction: fallback.remainingFraction ?? prev.remainingFraction,
+		resetTime: fallback.resetTime ?? prev.resetTime,
+		updatedAt: fallback.updatedAt ?? Date.now()
+	};
+}
+function detectEmailFromAgyLogs(homeDir) {
+	const logDir = join(homeDir, ".gemini", "antigravity-cli", "log");
+	if (!existsSync(logDir)) return void 0;
+	try {
+		const files = readdirSync(logDir).filter((f) => f.startsWith("cli-") && f.endsWith(".log")).map((f) => ({
+			name: f,
+			time: statSync(join(logDir, f)).mtimeMs
+		})).sort((a, b) => b.time - a.time).slice(0, 5);
+		for (const file of files) try {
+			const content = readFileSync(join(logDir, file.name), "utf8");
+			const re = /(?:authenticated successfully as|applyAuthResult:\s*email=|"email"\s*:\s*"|User:\s*)\s*([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/gi;
+			let last;
+			for (let m = re.exec(content); m !== null; m = re.exec(content)) if (m[1]) last = m[1];
+			if (last) return last;
+		} catch {}
+	} catch {}
+}
+function resolveClientPlatform() {
+	return {
+		osType: process.platform === "win32" ? "windows" : process.platform === "darwin" ? "darwin" : "linux",
+		arch: process.arch === "x64" ? "amd64" : process.arch === "arm64" ? "arm64" : process.arch
+	};
+}
+function buildAgyCliUserAgent(version = "1.3.5") {
+	const { osType, arch } = resolveClientPlatform();
+	return `antigravity/cli/${version} (aidev_client; os_type=${osType}; arch=${arch}; cl=998863838; auth_method=consumer)`;
+}
+buildAgyCliUserAgent("1.3.5");
+const AGY_QUOTA_USER_AGENT = "antigravity/1.1.15 linux/amd64";
+function agyUserAgent(version = "1.3.5") {
+	return buildAgyCliUserAgent(version);
+}
+function agyQuotaUserAgent() {
+	return AGY_QUOTA_USER_AGENT;
+}
+function parseExpiryMs(value) {
+	if (typeof value === "number" && Number.isFinite(value)) return value < 1e11 ? value * 1e3 : value;
+	if (typeof value === "string") {
+		const parsed = Date.parse(value);
+		return Number.isNaN(parsed) ? void 0 : parsed;
+	}
+}
+function stringField(obj, ...keys) {
+	for (const key of keys) {
+		const v = obj[key];
+		if (typeof v === "string" && v) return v;
+	}
+}
+function normalizeStoredToken(raw) {
+	const nested = raw.token;
+	const source = nested && typeof nested === "object" && !Array.isArray(nested) ? nested : raw;
+	const accessToken = stringField(source, "access_token", "accessToken");
+	const refreshToken = stringField(source, "refresh_token", "refreshToken") ?? (source === raw ? void 0 : stringField(raw, "refresh_token", "refreshToken"));
+	const expiryMs = parseExpiryMs(source.expiry) ?? parseExpiryMs(source.expiresAt) ?? parseExpiryMs(source.expires_in ? Date.now() / 1e3 + Number(source.expires_in) : void 0) ?? parseExpiryMs(raw.expiry);
+	if (!accessToken && !refreshToken) return null;
+	return {
+		accessToken: accessToken ?? "",
+		refreshToken,
+		expiryMs
+	};
+}
+function mergeAgentModelSorts(target, incoming) {
+	if (!incoming || !Array.isArray(incoming) || incoming.length === 0) return target;
+	if (!target || !Array.isArray(target) || target.length === 0) return incoming.map((s) => ({
+		...s,
+		groups: s.groups?.map((g) => ({
+			...g,
+			modelIds: g.modelIds ? [...g.modelIds] : void 0
+		})),
+		modelIds: s.modelIds ? [...s.modelIds] : void 0
+	}));
+	for (const incSort of incoming) {
+		const matchedSort = target.find((t) => t.displayName === incSort.displayName);
+		if (!matchedSort) {
+			target.push({
+				...incSort,
+				groups: incSort.groups?.map((g) => ({
+					...g,
+					modelIds: g.modelIds ? [...g.modelIds] : void 0
+				})),
+				modelIds: incSort.modelIds ? [...incSort.modelIds] : void 0
+			});
+			continue;
+		}
+		if (Array.isArray(incSort.groups)) {
+			matchedSort.groups = matchedSort.groups || [];
+			for (const incGroup of incSort.groups) {
+				const matchedGroup = matchedSort.groups.find((g) => g.displayName === incGroup.displayName);
+				if (!matchedGroup) {
+					matchedSort.groups.push({
+						...incGroup,
+						modelIds: incGroup.modelIds ? [...incGroup.modelIds] : void 0
+					});
+					continue;
+				}
+				if (Array.isArray(incGroup.modelIds)) {
+					const incIds = incGroup.modelIds;
+					const curIds = matchedGroup.modelIds || [];
+					if (incIds.length > curIds.length) {
+						const seen = new Set(incIds);
+						const mergedIds = [...incIds];
+						for (const mid of curIds) if (!seen.has(mid)) {
+							seen.add(mid);
+							mergedIds.push(mid);
+						}
+						matchedGroup.modelIds = mergedIds;
+					} else {
+						const seen = new Set(curIds);
+						matchedGroup.modelIds = [...curIds];
+						for (const mid of incIds) if (!seen.has(mid)) {
+							seen.add(mid);
+							matchedGroup.modelIds.push(mid);
+						}
+					}
+				}
+			}
+		}
+		if (Array.isArray(incSort.modelIds)) {
+			const incIds = incSort.modelIds;
+			const curIds = matchedSort.modelIds || [];
+			if (incIds.length > curIds.length) {
+				const seen = new Set(incIds);
+				const mergedIds = [...incIds];
+				for (const mid of curIds) if (!seen.has(mid)) {
+					seen.add(mid);
+					mergedIds.push(mid);
+				}
+				matchedSort.modelIds = mergedIds;
+			} else {
+				const seen = new Set(curIds);
+				matchedSort.modelIds = [...curIds];
+				for (const mid of incIds) if (!seen.has(mid)) {
+					seen.add(mid);
+					matchedSort.modelIds.push(mid);
+				}
+			}
+		}
+	}
+	return target;
+}
+const DISCOVER_MAX_CONCURRENCY = 4;
+const DISCOVER_ACCOUNT_TIMEOUT_MS = 8e3;
+const DISCOVER_TOTAL_BUDGET_MS = 2e4;
+/** Resolve to `value` or `null` once `ms` elapses; the underlying promise keeps running. */
+function raceTimeout(value, ms) {
+	let timer;
+	const timeout = new Promise((resolve) => {
+		timer = setTimeout(() => resolve(null), ms);
+	});
+	return Promise.race([value, timeout]).finally(() => {
+		if (timer !== void 0) clearTimeout(timer);
+	});
+}
+function readMacKeychainToken() {
+	if (process.platform !== "darwin") return null;
+	try {
+		const raw = execFileSync("security", [
+			"find-generic-password",
+			"-s",
+			"gemini",
+			"-a",
+			"antigravity",
+			"-w"
+		], {
+			encoding: "utf8",
+			timeout: 3e3,
+			stdio: [
+				"ignore",
+				"pipe",
+				"ignore"
+			]
+		}).trim();
+		if (!raw) return null;
+		let jsonStr = raw;
+		if (raw.startsWith("go-keyring-base64:")) {
+			const b64 = raw.slice(18);
+			jsonStr = Buffer.from(b64, "base64").toString("utf8");
+		}
+		return normalizeStoredToken(JSON.parse(jsonStr));
+	} catch {
+		return null;
+	}
+}
+var QuotaService = class {
+	preferredEndpointIndex = 0;
+	pool;
+	refreshLocks = /* @__PURE__ */ new Map();
+	lastEndpointErrors = [];
+	lastQuotaEndpointErrors = [];
+	lastDiscoveryDiagnostics;
+	constructor(pool) {
+		this.pool = pool;
+	}
+	getTokenFilePath(account) {
+		const home = account.systemHome || !account.dir ? homedir() : account.dir;
+		return join(home, ".gemini", "antigravity-cli", "antigravity-oauth-token");
+	}
+	doRefreshToken(refreshToken, proxyUrl) {
+		return refreshTokens(refreshToken, proxyUrl);
+	}
+	readSystemKeychainToken() {
+		return readMacKeychainToken();
+	}
+	getStoredToken(account) {
+		const disk = (() => {
+			const file = this.getTokenFilePath(account);
+			if (!existsSync(file)) return null;
+			try {
+				const tok = normalizeStoredToken(JSON.parse(readFileSync(file, "utf8")));
+				if (tok && (tok.accessToken || tok.refreshToken)) return tok;
+			} catch {}
+			return null;
+		})();
+		if (account.systemHome || !account.dir) {
+			const keychainToken = this.readSystemKeychainToken();
+			if (keychainToken && (keychainToken.accessToken || keychainToken.refreshToken)) return keychainToken;
+		}
+		return disk;
+	}
+	persistRefreshedToken(account, tokens) {
+		this.pool.setMemoryToken(account.id, tokens.access_token, tokens.expiryMs);
+		const file = this.getTokenFilePath(account);
+		try {
+			const dir = dirname(file);
+			const geminiDir = dirname(dir);
+			mkdirSync(dir, {
+				recursive: true,
+				mode: 448
+			});
+			try {
+				chmodSync(geminiDir, 448);
+				chmodSync(dir, 448);
+			} catch {}
+			let raw = {};
+			if (existsSync(file)) try {
+				raw = JSON.parse(readFileSync(file, "utf8"));
+			} catch {
+				raw = {};
+			}
+			const expiryIso = tokens.expiryMs ? new Date(tokens.expiryMs).toISOString() : void 0;
+			if (raw && typeof raw.token === "object" && raw.token !== null) {
+				const nested = raw.token;
+				nested.access_token = tokens.access_token;
+				if (expiryIso) nested.expiry = expiryIso;
+			} else {
+				raw.access_token = tokens.access_token;
+				if (tokens.expiryMs) raw.expiry = tokens.expiryMs;
+			}
+			writeFileSync(file, JSON.stringify(raw), {
+				encoding: "utf8",
+				mode: 384
+			});
+			try {
+				chmodSync(file, 384);
+			} catch {}
+		} catch {}
+	}
+	async getValidAccessToken(account) {
+		if (process.env.ANTIGRAVITY_TOKEN?.trim()) return process.env.ANTIGRAVITY_TOKEN.trim();
+		const mem = this.pool.getMemoryToken(account.id);
+		if (mem) return mem;
+		const tok = this.getStoredToken(account);
+		if (!tok) return null;
+		if (tok.accessToken && (!tok.expiryMs || tok.expiryMs > Date.now() + 6e4)) {
+			this.pool.setMemoryToken(account.id, tok.accessToken, tok.expiryMs);
+			if (account.authRequired) this.pool.clearAuthRequired(account.id);
+			return tok.accessToken;
+		}
+		if (tok.refreshToken) {
+			const existing = this.refreshLocks.get(account.id);
+			if (existing) return existing;
+			const refreshPromise = (async () => {
+				try {
+					const refreshed = await this.doRefreshToken(tok.refreshToken, account.proxyUrl);
+					if (refreshed?.access_token) {
+						this.persistRefreshedToken(account, {
+							access_token: refreshed.access_token,
+							expiryMs: refreshed.expiryMs
+						});
+						if (account.authRequired) this.pool.clearAuthRequired(account.id);
+						return refreshed.access_token;
+					}
+				} catch (err) {
+					const errMsg = String(err);
+					if (/invalid_grant|revoked|disabled|unauthorized_client|token endpoint 400/i.test(errMsg)) this.pool.markAuthRequired(account.id, errMsg);
+				}
+				return tok.accessToken || null;
+			})().finally(() => {
+				this.refreshLocks.delete(account.id);
+			});
+			this.refreshLocks.set(account.id, refreshPromise);
+			return refreshPromise;
+		}
+		return tok.accessToken || null;
+	}
+	async fetchUserInfo(accessToken, proxyUrl) {
+		try {
+			const res = await agyFetch(OAUTH_USERINFO_URL, { headers: { Authorization: `Bearer ${accessToken}` } }, proxyUrl);
+			if (res.ok) return await res.json();
+		} catch {}
+		return null;
+	}
+	getOrderedEndpoints() {
+		const total = AGY_ENDPOINTS.length;
+		const ordered = [];
+		for (let i = 0; i < total; i++) ordered.push(AGY_ENDPOINTS[(this.preferredEndpointIndex + i) % total]);
+		return ordered;
+	}
+	async fetchQuotaSummary(accessToken, proxyUrl) {
+		const endpoints = this.getOrderedEndpoints();
+		const endpointErrors = [];
+		for (let i = 0; i < endpoints.length; i++) {
+			const endpoint = endpoints[i];
+			try {
+				const res = await agyFetch(`${endpoint}/v1internal:retrieveUserQuotaSummary`, {
+					method: "POST",
+					headers: {
+						Authorization: `Bearer ${accessToken}`,
+						"Content-Type": "application/json",
+						"User-Agent": agyQuotaUserAgent()
+					},
+					body: JSON.stringify({})
+				}, proxyUrl);
+				if (res.ok) {
+					this.preferredEndpointIndex = AGY_ENDPOINTS.indexOf(endpoint);
+					this.lastQuotaEndpointErrors = endpointErrors;
+					return await res.json();
+				}
+				endpointErrors.push(`${endpoint} returned ${res.status}`);
+				if (res.status === 401 || res.status === 403) continue;
+			} catch (err) {
+				endpointErrors.push(`${endpoint} error: ${err instanceof Error ? err.message : String(err)}`);
+			}
+		}
+		this.lastQuotaEndpointErrors = endpointErrors;
+		return null;
+	}
+	async fetchAvailableModels(accessToken, proxyUrl) {
+		const endpoints = this.getOrderedEndpoints();
+		const endpointErrors = [];
+		for (let i = 0; i < endpoints.length; i++) {
+			const endpoint = endpoints[i];
+			try {
+				const res = await agyFetch(`${endpoint}/v1internal:fetchAvailableModels`, {
+					method: "POST",
+					headers: {
+						Authorization: `Bearer ${accessToken}`,
+						"Content-Type": "application/json",
+						"User-Agent": agyUserAgent()
+					},
+					body: JSON.stringify({})
+				}, proxyUrl);
+				if (res.ok) {
+					this.preferredEndpointIndex = AGY_ENDPOINTS.indexOf(endpoint);
+					this.lastEndpointErrors = endpointErrors;
+					return await res.json();
+				}
+				endpointErrors.push(`${endpoint} returned ${res.status}`);
+				if (res.status === 401 || res.status === 403) continue;
+			} catch (err) {
+				endpointErrors.push(`${endpoint} error: ${err instanceof Error ? err.message : String(err)}`);
+			}
+		}
+		this.lastEndpointErrors = endpointErrors;
+		return null;
+	}
+	/**
+	* Discover the models this installation can actually serve.
+	*
+	* Upstream answers per account: an id can be missing from the primary account's
+	* `fetchAvailableModels` payload yet present in a pooled secondary account. So the
+	* whole usable pool is fetched and the `models` maps are unioned by model id —
+	* same id in several accounts keeps the entry that carries `quotaInfo`, otherwise
+	* the first one seen (primary account first). A single failing account never fails
+	* the discovery; only an all-failed pool returns null (which makes ModelCatalog
+	* keep its previous catalog and record `lastError`).
+	*
+	* Budget: at most `concurrency` accounts in flight, `accountTimeoutMs` per account,
+	* and `totalBudgetMs` overall — accounts started after the budget is exhausted are
+	* skipped rather than delaying the merge.
+	*/
+	async discoverAvailableModels(options) {
+		if (process.env.ANTIGRAVITY_TOKEN?.trim()) return this.fetchAvailableModels(process.env.ANTIGRAVITY_TOKEN.trim());
+		const poolData = this.pool.getPoolData();
+		const primaryAcc = poolData.primaryAccountId ? this.pool.getAccount(poolData.primaryAccountId) : void 0;
+		const usable = this.pool.getAccounts().filter((a) => a.enabled && !a.authRequired);
+		if (usable.length === 0) return null;
+		const ordered = [];
+		if (primaryAcc && primaryAcc.enabled && !primaryAcc.authRequired) ordered.push(primaryAcc);
+		for (const acc of usable) if (!ordered.some((a) => a.id === acc.id)) ordered.push(acc);
+		const concurrency = Math.max(1, Math.min(options?.concurrency ?? DISCOVER_MAX_CONCURRENCY, ordered.length));
+		const accountTimeoutMs = options?.accountTimeoutMs ?? DISCOVER_ACCOUNT_TIMEOUT_MS;
+		const deadline = Date.now() + (options?.totalBudgetMs ?? DISCOVER_TOTAL_BUDGET_MS);
+		const merged = /* @__PURE__ */ new Map();
+		const accountSorts = /* @__PURE__ */ new Map();
+		let succeeded = 0;
+		let failures = 0;
+		let skippedOverBudget = 0;
+		const failureDetails = [];
+		let cursor = 0;
+		const fetchOne = async (acc) => {
+			const accessToken = await this.getValidAccessToken(acc);
+			if (!accessToken) return {
+				res: null,
+				error: "Failed to acquire valid access token"
+			};
+			try {
+				const res = await this.fetchAvailableModels(accessToken, acc.proxyUrl);
+				if (!res) return {
+					res: null,
+					error: "fetchAvailableModels returned null from all endpoints"
+				};
+				return { res };
+			} catch (err) {
+				return {
+					res: null,
+					error: err instanceof Error ? err.message : String(err)
+				};
+			}
+		};
+		const workers = Array.from({ length: concurrency }, async () => {
+			for (;;) {
+				const acc = ordered[cursor++];
+				if (acc === void 0) return;
+				const remaining = deadline - Date.now();
+				if (remaining <= 0) {
+					skippedOverBudget++;
+					failureDetails.push({
+						accountId: acc.id,
+						error: "Skipped over budget"
+					});
+					continue;
+				}
+				try {
+					const outcome = await raceTimeout(fetchOne(acc), Math.min(accountTimeoutMs, remaining));
+					if (!outcome?.res) {
+						failures++;
+						failureDetails.push({
+							accountId: acc.id,
+							error: outcome?.error ?? "Timeout or empty response"
+						});
+						continue;
+					}
+					const res = outcome.res;
+					succeeded++;
+					if (Array.isArray(res.agentModelSorts) && res.agentModelSorts.length > 0) accountSorts.set(acc.id, res.agentModelSorts);
+					for (const [modelId, entry] of Object.entries(res.models ?? {})) {
+						const prev = merged.get(modelId);
+						if (!prev) {
+							merged.set(modelId, entry ?? {});
+							continue;
+						}
+						const prevHasQuota = prev.quotaInfo !== void 0;
+						const nextHasQuota = entry?.quotaInfo !== void 0;
+						if (!prevHasQuota && nextHasQuota) merged.set(modelId, entry);
+					}
+				} catch (err) {
+					failures++;
+					failureDetails.push({
+						accountId: acc.id,
+						error: err instanceof Error ? err.message : String(err)
+					});
+				}
+			}
+		});
+		await Promise.allSettled(workers);
+		if (succeeded === 0 || merged.size === 0) return null;
+		let primarySorts = void 0;
+		for (const acc of ordered) {
+			const sorts = accountSorts.get(acc.id);
+			if (sorts) primarySorts = mergeAgentModelSorts(primarySorts, sorts);
+		}
+		this.lastDiscoveryDiagnostics = {
+			at: Date.now(),
+			succeeded,
+			failures,
+			skippedOverBudget,
+			accountFailures: failureDetails,
+			endpointErrors: this.lastEndpointErrors
+		};
+		return {
+			models: Object.fromEntries(merged),
+			...primarySorts ? { agentModelSorts: primarySorts } : {},
+			discoveredFromAccounts: succeeded,
+			discoveredAccountFailures: failures,
+			discoveredSkippedOverBudget: skippedOverBudget,
+			accountFailures: failureDetails,
+			endpointErrors: this.lastEndpointErrors
+		};
+	}
+	async refreshAccountQuota(account, force = false, options) {
+		const now = Date.now();
+		if (!force && account.quotas) {
+			const latestUpdate = Math.max(...Object.values(account.quotas).map((q) => q?.updatedAt ?? 0));
+			if (latestUpdate > 0 && now - latestUpdate < 1e4) return account.quotas;
+		}
+		const home = account.systemHome || !account.dir ? homedir() : account.dir;
+		let email = account.email;
+		if (account.systemHome || !email) {
+			const detected = detectEmailFromAgyLogs(home);
+			if (detected) email = detected;
+		}
+		const accessToken = await this.getValidAccessToken(account);
+		if (!accessToken) return null;
+		const isLightweight = Boolean(options?.lightweight || options?.summaryOnly);
+		if (force && !isLightweight) {
+			const info = await this.fetchUserInfo(accessToken, account.proxyUrl);
+			if (info?.email) email = info.email;
+		}
+		if (email && email !== account.email) this.pool.resetAccountIdentity(account.id, email);
+		let summary = null;
+		let discovered = null;
+		if (options?.summaryOnly) {
+			summary = await this.fetchQuotaSummary(accessToken, account.proxyUrl);
+			if (!summary?.groups?.some((g) => {
+				const dName = (g.displayName || "").toLowerCase();
+				const desc = (g.description || "").toLowerCase();
+				return dName.includes("gemini") || desc.includes("gemini");
+			})) discovered = await this.fetchAvailableModels(accessToken, account.proxyUrl);
+		} else {
+			const [sum, disc] = await Promise.all([this.fetchQuotaSummary(accessToken, account.proxyUrl), this.fetchAvailableModels(accessToken, account.proxyUrl)]);
+			summary = sum;
+			discovered = disc;
+		}
+		if (!email && !isLightweight) {
+			const info = await this.fetchUserInfo(accessToken, account.proxyUrl);
+			if (info?.email) email = info.email;
+		}
+		if (!summary && (!discovered || !discovered.models)) return null;
+		if (account.authRequired) this.pool.clearAuthRequired(account.id);
+		const familyQuotas = {};
+		const summaryFamilies = /* @__PURE__ */ new Set();
+		if (summary && Array.isArray(summary.groups)) for (const group of summary.groups) {
+			const dName = (group.displayName || "").toLowerCase();
+			const desc = (group.description || "").toLowerCase();
+			const isGoogle = dName.includes("gemini") || desc.includes("gemini");
+			const is3P = dName.includes("claude") || dName.includes("gpt") || desc.includes("claude") || desc.includes("gpt");
+			const targetFamilies = isGoogle ? ["google"] : is3P ? ["anthropic", "openai"] : [];
+			let fiveHourFrac;
+			let fiveHourReset;
+			let weeklyFrac;
+			let weeklyReset;
+			for (const b of group.buckets || []) {
+				const w = (b.window || b.bucketId || "").toLowerCase();
+				if (w.includes("5h")) {
+					fiveHourFrac = b.remainingFraction;
+					fiveHourReset = b.resetTime;
+				} else if (w.includes("weekly")) {
+					weeklyFrac = b.remainingFraction;
+					weeklyReset = b.resetTime;
+				}
+			}
+			for (const fam of targetFamilies) {
+				summaryFamilies.add(fam);
+				const prev = familyQuotas[fam];
+				familyQuotas[fam] = {
+					remainingFraction: fiveHourFrac !== void 0 ? fiveHourFrac : prev?.remainingFraction,
+					resetTime: fiveHourReset !== void 0 ? fiveHourReset : prev?.resetTime,
+					weeklyFraction: weeklyFrac !== void 0 ? weeklyFrac : prev?.weeklyFraction,
+					weeklyResetTime: weeklyReset !== void 0 ? weeklyReset : prev?.weeklyResetTime,
+					description: group.description || prev?.description,
+					updatedAt: now
+				};
+			}
+		}
+		const familyModels = {};
+		if (discovered && discovered.models) for (const [modelId, entry] of Object.entries(discovered.models)) {
+			const fam = modelFamilyOf(modelId);
+			if (fam === "unknown") continue;
+			const remaining = entry.quotaInfo?.remainingFraction;
+			const resetTime = entry.quotaInfo?.resetTime;
+			if (typeof remaining !== "number" || !Number.isFinite(remaining)) continue;
+			if (!familyModels[fam]) familyModels[fam] = [];
+			familyModels[fam].push({
+				modelId,
+				displayName: entry.displayName || modelId,
+				remainingFraction: remaining,
+				resetTime
+			});
+			if (!familyQuotas[fam]) familyQuotas[fam] = mergeFallbackFamilyQuota(account.quotas[fam], {
+				remainingFraction: remaining,
+				resetTime,
+				updatedAt: now
+			});
+			else if (!summaryFamilies.has(fam) || familyQuotas[fam].remainingFraction === void 0) {
+				const curRemaining = familyQuotas[fam].remainingFraction ?? 1;
+				if (remaining < curRemaining) {
+					familyQuotas[fam].remainingFraction = remaining;
+					familyQuotas[fam].resetTime = resetTime;
+				} else if (remaining === curRemaining) {
+					if (resetTime && (!familyQuotas[fam].resetTime || Date.parse(resetTime) > Date.parse(familyQuotas[fam].resetTime))) familyQuotas[fam].resetTime = resetTime;
+				}
+			}
+		}
+		for (const [famKey, list] of Object.entries(familyModels)) {
+			const fam = famKey;
+			if (familyQuotas[fam]) familyQuotas[fam].models = list;
+		}
+		if (options?.summaryOnly && account.quotas) {
+			for (const fam of Object.keys(familyQuotas)) if (familyQuotas[fam] && !familyQuotas[fam].models && account.quotas[fam]?.models) familyQuotas[fam].models = account.quotas[fam].models;
+		}
+		this.pool.updateAccountQuotas(account.id, familyQuotas, email);
+		return familyQuotas;
+	}
+	async refreshQuotaSummaryOnly(account) {
+		return this.refreshAccountQuota(account, true, {
+			lightweight: true,
+			summaryOnly: true
+		});
+	}
+	async selfHealQuarantinedAccounts() {
+		let healed = 0;
+		for (const acc of this.pool.getAccounts()) {
+			if (!acc.enabled || !acc.authRequired) continue;
+			const tok = this.getStoredToken(acc);
+			if (!tok) continue;
+			if (!tok.refreshToken && (!tok.accessToken || tok.expiryMs && tok.expiryMs <= Date.now() + 6e4)) continue;
+			try {
+				if (await this.getValidAccessToken(acc)) {
+					this.pool.clearAuthRequired(acc.id);
+					healed++;
+				}
+			} catch {}
+		}
+		return healed;
+	}
+	async refreshAllQuotas(force = false) {
+		if (!force) {
+			const now = Date.now();
+			for (const acc of this.pool.getAccounts()) {
+				const flagged = acc.authRequired || Object.values(acc.cooldowns).some((cd) => cd && cd.cooldownUntil > now);
+				if (!acc.systemHome || !flagged) continue;
+				const detected = detectEmailFromAgyLogs(acc.systemHome || !acc.dir ? homedir() : acc.dir);
+				if (detected && detected !== acc.email) this.pool.resetAccountIdentity(acc.id, detected);
+			}
+			await this.selfHealQuarantinedAccounts();
+		}
+		let accounts = this.pool.getAccounts();
+		if (!force) accounts = accounts.filter(shouldPollAccount);
+		await Promise.allSettled(accounts.map((acc) => this.refreshAccountQuota(acc, force)));
+	}
+};
+//#endregion
 //#region packages/core/src/sessions.ts
 /**
 * Deterministic FNV-1a 64-bit hash algorithm producing a signed 64-bit integer string.
@@ -25662,9 +26611,7 @@ function endpointCandidates(customBaseUrl) {
 	return [...ENDPOINT_FALLBACKS];
 }
 function defaultUserAgent() {
-	const version = process.env.ANTIGRAVITY_HUB_VERSION || "2.8.0";
-	const cl = process.env.ANTIGRAVITY_HUB_CL || "963137146";
-	return `antigravity/hub/${version} (aidev_client; os_type=${process.platform === "darwin" ? "darwin" : process.platform === "win32" ? "windows" : "linux"}; arch=${process.arch === "arm64" ? "arm64" : "x64"}; cl=${cl})`;
+	return buildAgyCliUserAgent(process.env.ANTIGRAVITY_CLI_VERSION || "1.3.5");
 }
 function antigravityHeaders(token) {
 	const platform = process.platform === "darwin" ? "PLATFORM_DARWIN" : process.platform === "win32" ? "PLATFORM_WINDOWS" : "PLATFORM_LINUX";
@@ -27758,262 +28705,6 @@ function writeDoctorReport(deps) {
 	return file;
 }
 //#endregion
-//#region packages/core/src/oauth.ts
-const AGY_PUBLIC_CLIENT_ID = ["1071006060591", "tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com"].join("-");
-const AGY_PUBLIC_CLIENT_SECRET = ["GOCSPX", "K58FWR486LdLJ1mLB8sXC4z6qDAf"].join("-");
-function resolveClientCredentials() {
-	return {
-		clientId: process.env.AGY_CLIENT_ID || AGY_PUBLIC_CLIENT_ID,
-		clientSecret: process.env.AGY_CLIENT_SECRET || AGY_PUBLIC_CLIENT_SECRET
-	};
-}
-const AGY_SCOPES = [
-	"https://www.googleapis.com/auth/cloud-platform",
-	"https://www.googleapis.com/auth/userinfo.email",
-	"https://www.googleapis.com/auth/userinfo.profile",
-	"https://www.googleapis.com/auth/cclog",
-	"https://www.googleapis.com/auth/experimentsandconfigs"
-];
-const OAUTH_AUTHORIZE_URL = "https://accounts.google.com/o/oauth2/v2/auth";
-const OAUTH_TOKEN_URL = "https://oauth2.googleapis.com/token";
-const OAUTH_USERINFO_URL = "https://www.googleapis.com/oauth2/v1/userinfo";
-const OAUTH_CALLBACK_PORT = 51121;
-const OAUTH_CALLBACK_PATH = "/oauth-callback";
-/** Redirect URI for the registered callback port; overridable so a listener can bind an isolated port. */
-function oauthRedirectUri(port = OAUTH_CALLBACK_PORT) {
-	return `http://localhost:${port}${OAUTH_CALLBACK_PATH}`;
-}
-const OAUTH_REDIRECT_URI = oauthRedirectUri();
-const AGY_ENDPOINTS = [
-	"https://cloudcode-pa.googleapis.com",
-	"https://daily-cloudcode-pa.googleapis.com",
-	"https://daily-cloudcode-pa.sandbox.googleapis.com",
-	"https://autopush-cloudcode-pa.sandbox.googleapis.com"
-];
-function generatePkce() {
-	const verifier = randomBytes(32).toString("base64url");
-	return {
-		verifier,
-		challenge: createHash("sha256").update(verifier).digest("base64url")
-	};
-}
-function buildAuthorizeUrl(challenge, state, redirectUri = OAUTH_REDIRECT_URI) {
-	const { clientId } = resolveClientCredentials();
-	const url = new URL(OAUTH_AUTHORIZE_URL);
-	url.searchParams.set("client_id", clientId);
-	url.searchParams.set("response_type", "code");
-	url.searchParams.set("redirect_uri", redirectUri);
-	url.searchParams.set("scope", AGY_SCOPES.join(" "));
-	url.searchParams.set("code_challenge", challenge);
-	url.searchParams.set("code_challenge_method", "S256");
-	url.searchParams.set("state", state);
-	url.searchParams.set("access_type", "offline");
-	url.searchParams.set("prompt", "consent");
-	return url.toString();
-}
-async function postTokenForm(fields, proxyUrl) {
-	const { clientId, clientSecret } = resolveClientCredentials();
-	const body = new URLSearchParams({
-		client_id: clientId,
-		client_secret: clientSecret,
-		...fields
-	});
-	const res = await agyFetch(OAUTH_TOKEN_URL, {
-		method: "POST",
-		headers: { "Content-Type": "application/x-www-form-urlencoded" },
-		body: body.toString()
-	}, proxyUrl);
-	const payload = await res.json().catch(() => ({}));
-	if (!res.ok) {
-		const code = typeof payload.error === "string" ? payload.error : payload.error?.status;
-		const desc = payload.error_description ?? (typeof payload.error === "object" ? payload.error?.message : void 0);
-		throw new Error(`token endpoint ${res.status}: ${[code, desc].filter(Boolean).join(" — ") || "unknown error"}`);
-	}
-	if (!payload.access_token) throw new Error("token endpoint returned no access_token");
-	return payload;
-}
-function toTokenSet(payload, refreshTokenFallback) {
-	return {
-		access_token: payload.access_token,
-		token_type: payload.token_type ?? "Bearer",
-		refresh_token: payload.refresh_token ?? refreshTokenFallback,
-		expiryMs: typeof payload.expires_in === "number" ? Date.now() + payload.expires_in * 1e3 : void 0
-	};
-}
-/** Exchange an authorization code for tokens (PKCE-verified). */
-async function exchangeCode(code, verifier, proxyUrl, redirectUri = OAUTH_REDIRECT_URI) {
-	return toTokenSet(await postTokenForm({
-		grant_type: "authorization_code",
-		code: code.trim(),
-		redirect_uri: redirectUri,
-		code_verifier: verifier
-	}, proxyUrl));
-}
-/** Refresh an access token; throws on invalid_grant (credential revoked). */
-async function refreshTokens(refreshToken, proxyUrl) {
-	return toTokenSet(await postTokenForm({
-		grant_type: "refresh_token",
-		refresh_token: refreshToken
-	}, proxyUrl), refreshToken);
-}
-/** Fetch the account email for a valid access token (best effort). */
-async function fetchUserEmail(accessToken, proxyUrl) {
-	try {
-		const res = await agyFetch(OAUTH_USERINFO_URL, { headers: { Authorization: `Bearer ${accessToken}` } }, proxyUrl);
-		if (!res.ok) return void 0;
-		const info = await res.json();
-		return typeof info.email === "string" && info.email ? info.email : void 0;
-	} catch {
-		return;
-	}
-}
-/**
-* Persist tokens in on-disk format:
-*   {"token": {access_token, token_type, refresh_token, expiry}, "auth_method": "consumer"}
-*/
-function writeAgyTokenFile(homeDir, tokens) {
-	const geminiDir = join(homeDir, ".gemini");
-	const dir = join(geminiDir, "antigravity-cli");
-	mkdirSync(dir, {
-		recursive: true,
-		mode: 448
-	});
-	try {
-		chmodSync(homeDir, 448);
-		chmodSync(geminiDir, 448);
-		chmodSync(dir, 448);
-	} catch {}
-	const file = join(dir, "antigravity-oauth-token");
-	const expiryIso = tokens.expiryMs ? formatLocalIso(tokens.expiryMs) : formatLocalIso(Date.now() + 36e5);
-	const doc = {
-		token: {
-			access_token: tokens.access_token,
-			token_type: tokens.token_type ?? "Bearer",
-			...tokens.refresh_token ? { refresh_token: tokens.refresh_token } : {},
-			expiry: expiryIso
-		},
-		auth_method: "consumer"
-	};
-	writeFileSync(file, JSON.stringify(doc), {
-		encoding: "utf8",
-		mode: 384
-	});
-	try {
-		chmodSync(file, 384);
-	} catch {}
-	return file;
-}
-function formatLocalIso(ms) {
-	const d = new Date(ms);
-	const pad = (n, w = 2) => String(n).padStart(w, "0");
-	const offMin = -d.getTimezoneOffset();
-	const sign = offMin >= 0 ? "+" : "-";
-	const abs = Math.abs(offMin);
-	return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}.${pad(d.getMilliseconds(), 3)}${sign}${pad(Math.floor(abs / 60))}:${pad(abs % 60)}`;
-}
-const CALLBACK_SUCCESS_HTML = `<!doctype html><html><head><meta charset="utf-8"><title>登录成功</title></head>
-<body style="font-family:system-ui;text-align:center;padding:3rem">
-<h2>✓ 授权成功</h2>
-<p>可以关闭此标签页返回终端或应用。</p>
-</body></html>`;
-function startCallbackListener(options = {}) {
-	const timeoutMs = options.timeoutMs ?? 3e5;
-	const port = options.port ?? 51121;
-	let resolveResult;
-	let rejectResult;
-	const result = new Promise((resolve, reject) => {
-		resolveResult = resolve;
-		rejectResult = reject;
-	});
-	const server = createServer((req, res) => {
-		const url = new URL(req.url ?? "/", "http://localhost");
-		if (url.pathname !== "/oauth-callback") {
-			res.writeHead(404);
-			res.end("Not found");
-			return;
-		}
-		const code = url.searchParams.get("code");
-		const state = url.searchParams.get("state");
-		const oauthError = url.searchParams.get("error");
-		if (oauthError) {
-			res.writeHead(400, {
-				"Content-Type": "text/html",
-				connection: "close"
-			});
-			res.end(`<h2>Authorization failed: ${oauthError}</h2>`);
-			rejectResult(/* @__PURE__ */ new Error(`oauth error: ${oauthError}`));
-			setTimeout(() => server.close(), 1500);
-			return;
-		}
-		if (!code || !state) {
-			res.writeHead(400, { "Content-Type": "text/html" });
-			res.end("<h2>Missing code or state</h2>");
-			return;
-		}
-		res.writeHead(200, {
-			"Content-Type": "text/html",
-			connection: "close"
-		});
-		res.end(CALLBACK_SUCCESS_HTML);
-		resolveResult({
-			code,
-			state
-		});
-		setTimeout(() => server.close(), 1500);
-	});
-	server.on("error", (error) => {
-		rejectResult(error.code === "EADDRINUSE" ? /* @__PURE__ */ new Error(`port ${port} is busy`) : error);
-	});
-	server.listen(port, "127.0.0.1");
-	const timeout = setTimeout(() => {
-		rejectResult(/* @__PURE__ */ new Error("timed out waiting for the OAuth callback"));
-		server.close();
-	}, timeoutMs);
-	return {
-		result,
-		async close() {
-			clearTimeout(timeout);
-			if (server.listening) {
-				server.closeAllConnections();
-				await new Promise((resolve) => server.close(() => resolve()));
-			}
-		}
-	};
-}
-function openBrowser(url) {
-	return new Promise((resolve) => {
-		try {
-			if (process.platform === "darwin") execFile("open", [url], (err) => resolve(!err));
-			else if (process.platform === "win32") execFile("cmd.exe", [
-				"/d",
-				"/s",
-				"/c",
-				`start "" "${url}"`
-			], { windowsVerbatimArguments: true }, (err) => resolve(!err));
-			else execFile("xdg-open", [url], (err) => resolve(!err));
-		} catch {
-			resolve(false);
-		}
-	});
-}
-function parsePastedCode(input) {
-	const text = input.trim();
-	if (!text) return null;
-	if (/^https?:\/\//i.test(text)) try {
-		const url = new URL(text);
-		const code = url.searchParams.get("code");
-		if (!code) return null;
-		return {
-			code,
-			state: url.searchParams.get("state") ?? void 0
-		};
-	} catch {
-		return null;
-	}
-	if (/^[\w\-/.%]+$/.test(text) && text.length >= 10) return { code: text };
-	return null;
-}
-//#endregion
 //#region packages/core/src/pool-auth.ts
 const DONE_STATUS_TTL_MS = 3e4;
 var PoolAuthFlow = class {
@@ -28204,422 +28895,6 @@ var PoolAuthFlow = class {
 		this.flow = null;
 		if (flow.listener) await flow.listener.close().catch(() => void 0);
 		if (!flow.primary) this.pool.cleanupStagingSlot(flow.dir);
-	}
-};
-//#endregion
-//#region packages/core/src/quota.ts
-function mergeFallbackFamilyQuota(prev, fallback) {
-	if (!prev) return fallback;
-	return {
-		...prev,
-		remainingFraction: fallback.remainingFraction ?? prev.remainingFraction,
-		resetTime: fallback.resetTime ?? prev.resetTime,
-		updatedAt: fallback.updatedAt ?? Date.now()
-	};
-}
-function detectEmailFromAgyLogs(homeDir) {
-	const logDir = join(homeDir, ".gemini", "antigravity-cli", "log");
-	if (!existsSync(logDir)) return void 0;
-	try {
-		const files = readdirSync(logDir).filter((f) => f.startsWith("cli-") && f.endsWith(".log")).map((f) => ({
-			name: f,
-			time: statSync(join(logDir, f)).mtimeMs
-		})).sort((a, b) => b.time - a.time).slice(0, 5);
-		for (const file of files) try {
-			const content = readFileSync(join(logDir, file.name), "utf8");
-			const re = /(?:authenticated successfully as|applyAuthResult:\s*email=|"email"\s*:\s*"|User:\s*)\s*([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/gi;
-			let last;
-			for (let m = re.exec(content); m !== null; m = re.exec(content)) if (m[1]) last = m[1];
-			if (last) return last;
-		} catch {}
-	} catch {}
-}
-function agyUserAgent(version = "1.1.15") {
-	return `antigravity/${version} ${process.platform === "win32" ? "windows" : process.platform}/${process.arch === "x64" ? "amd64" : process.arch}`;
-}
-function parseExpiryMs(value) {
-	if (typeof value === "number" && Number.isFinite(value)) return value < 1e11 ? value * 1e3 : value;
-	if (typeof value === "string") {
-		const parsed = Date.parse(value);
-		return Number.isNaN(parsed) ? void 0 : parsed;
-	}
-}
-function stringField(obj, ...keys) {
-	for (const key of keys) {
-		const v = obj[key];
-		if (typeof v === "string" && v) return v;
-	}
-}
-function normalizeStoredToken(raw) {
-	const nested = raw.token;
-	const source = nested && typeof nested === "object" && !Array.isArray(nested) ? nested : raw;
-	const accessToken = stringField(source, "access_token", "accessToken");
-	const refreshToken = stringField(source, "refresh_token", "refreshToken") ?? (source === raw ? void 0 : stringField(raw, "refresh_token", "refreshToken"));
-	const expiryMs = parseExpiryMs(source.expiry) ?? parseExpiryMs(source.expiresAt) ?? parseExpiryMs(source.expires_in ? Date.now() / 1e3 + Number(source.expires_in) : void 0) ?? parseExpiryMs(raw.expiry);
-	if (!accessToken && !refreshToken) return null;
-	return {
-		accessToken: accessToken ?? "",
-		refreshToken,
-		expiryMs
-	};
-}
-function readMacKeychainToken() {
-	if (process.platform !== "darwin") return null;
-	try {
-		const raw = execFileSync("security", [
-			"find-generic-password",
-			"-s",
-			"gemini",
-			"-a",
-			"antigravity",
-			"-w"
-		], {
-			encoding: "utf8",
-			timeout: 3e3,
-			stdio: [
-				"ignore",
-				"pipe",
-				"ignore"
-			]
-		}).trim();
-		if (!raw) return null;
-		let jsonStr = raw;
-		if (raw.startsWith("go-keyring-base64:")) {
-			const b64 = raw.slice(18);
-			jsonStr = Buffer.from(b64, "base64").toString("utf8");
-		}
-		return normalizeStoredToken(JSON.parse(jsonStr));
-	} catch {
-		return null;
-	}
-}
-var QuotaService = class {
-	preferredEndpointIndex = 0;
-	pool;
-	refreshLocks = /* @__PURE__ */ new Map();
-	constructor(pool) {
-		this.pool = pool;
-	}
-	getTokenFilePath(account) {
-		const home = account.systemHome || !account.dir ? homedir() : account.dir;
-		return join(home, ".gemini", "antigravity-cli", "antigravity-oauth-token");
-	}
-	doRefreshToken(refreshToken, proxyUrl) {
-		return refreshTokens(refreshToken, proxyUrl);
-	}
-	readSystemKeychainToken() {
-		return readMacKeychainToken();
-	}
-	getStoredToken(account) {
-		const disk = (() => {
-			const file = this.getTokenFilePath(account);
-			if (!existsSync(file)) return null;
-			try {
-				const tok = normalizeStoredToken(JSON.parse(readFileSync(file, "utf8")));
-				if (tok && (tok.accessToken || tok.refreshToken)) return tok;
-			} catch {}
-			return null;
-		})();
-		if (account.systemHome || !account.dir) {
-			const keychainToken = this.readSystemKeychainToken();
-			if (keychainToken && (keychainToken.accessToken || keychainToken.refreshToken)) return keychainToken;
-		}
-		return disk;
-	}
-	persistRefreshedToken(account, tokens) {
-		this.pool.setMemoryToken(account.id, tokens.access_token, tokens.expiryMs);
-		const file = this.getTokenFilePath(account);
-		try {
-			const dir = dirname(file);
-			const geminiDir = dirname(dir);
-			mkdirSync(dir, {
-				recursive: true,
-				mode: 448
-			});
-			try {
-				chmodSync(geminiDir, 448);
-				chmodSync(dir, 448);
-			} catch {}
-			let raw = {};
-			if (existsSync(file)) try {
-				raw = JSON.parse(readFileSync(file, "utf8"));
-			} catch {
-				raw = {};
-			}
-			const expiryIso = tokens.expiryMs ? new Date(tokens.expiryMs).toISOString() : void 0;
-			if (raw && typeof raw.token === "object" && raw.token !== null) {
-				const nested = raw.token;
-				nested.access_token = tokens.access_token;
-				if (expiryIso) nested.expiry = expiryIso;
-			} else {
-				raw.access_token = tokens.access_token;
-				if (tokens.expiryMs) raw.expiry = tokens.expiryMs;
-			}
-			writeFileSync(file, JSON.stringify(raw), {
-				encoding: "utf8",
-				mode: 384
-			});
-			try {
-				chmodSync(file, 384);
-			} catch {}
-		} catch {}
-	}
-	async getValidAccessToken(account) {
-		if (process.env.ANTIGRAVITY_TOKEN?.trim()) return process.env.ANTIGRAVITY_TOKEN.trim();
-		const mem = this.pool.getMemoryToken(account.id);
-		if (mem) return mem;
-		const tok = this.getStoredToken(account);
-		if (!tok) return null;
-		if (tok.accessToken && (!tok.expiryMs || tok.expiryMs > Date.now() + 6e4)) {
-			this.pool.setMemoryToken(account.id, tok.accessToken, tok.expiryMs);
-			if (account.authRequired) this.pool.clearAuthRequired(account.id);
-			return tok.accessToken;
-		}
-		if (tok.refreshToken) {
-			const existing = this.refreshLocks.get(account.id);
-			if (existing) return existing;
-			const refreshPromise = (async () => {
-				try {
-					const refreshed = await this.doRefreshToken(tok.refreshToken, account.proxyUrl);
-					if (refreshed?.access_token) {
-						this.persistRefreshedToken(account, {
-							access_token: refreshed.access_token,
-							expiryMs: refreshed.expiryMs
-						});
-						if (account.authRequired) this.pool.clearAuthRequired(account.id);
-						return refreshed.access_token;
-					}
-				} catch (err) {
-					const errMsg = String(err);
-					if (/invalid_grant|revoked|disabled|unauthorized_client|token endpoint 400/i.test(errMsg)) this.pool.markAuthRequired(account.id, errMsg);
-				}
-				return tok.accessToken || null;
-			})().finally(() => {
-				this.refreshLocks.delete(account.id);
-			});
-			this.refreshLocks.set(account.id, refreshPromise);
-			return refreshPromise;
-		}
-		return tok.accessToken || null;
-	}
-	async fetchUserInfo(accessToken, proxyUrl) {
-		try {
-			const res = await agyFetch(OAUTH_USERINFO_URL, { headers: { Authorization: `Bearer ${accessToken}` } }, proxyUrl);
-			if (res.ok) return await res.json();
-		} catch {}
-		return null;
-	}
-	getOrderedEndpoints() {
-		const total = AGY_ENDPOINTS.length;
-		const ordered = [];
-		for (let i = 0; i < total; i++) ordered.push(AGY_ENDPOINTS[(this.preferredEndpointIndex + i) % total]);
-		return ordered;
-	}
-	async fetchQuotaSummary(accessToken, proxyUrl) {
-		const endpoints = this.getOrderedEndpoints();
-		for (let i = 0; i < endpoints.length; i++) {
-			const endpoint = endpoints[i];
-			try {
-				const res = await agyFetch(`${endpoint}/v1internal:retrieveUserQuotaSummary`, {
-					method: "POST",
-					headers: {
-						Authorization: `Bearer ${accessToken}`,
-						"Content-Type": "application/json",
-						"User-Agent": agyUserAgent()
-					},
-					body: JSON.stringify({})
-				}, proxyUrl);
-				if (res.ok) {
-					this.preferredEndpointIndex = AGY_ENDPOINTS.indexOf(endpoint);
-					return await res.json();
-				}
-				if (res.status === 401 || res.status === 403) break;
-			} catch {}
-		}
-		return null;
-	}
-	async fetchAvailableModels(accessToken, proxyUrl) {
-		const endpoints = this.getOrderedEndpoints();
-		for (let i = 0; i < endpoints.length; i++) {
-			const endpoint = endpoints[i];
-			try {
-				const res = await agyFetch(`${endpoint}/v1internal:fetchAvailableModels`, {
-					method: "POST",
-					headers: {
-						Authorization: `Bearer ${accessToken}`,
-						"Content-Type": "application/json",
-						"User-Agent": agyUserAgent()
-					},
-					body: JSON.stringify({})
-				}, proxyUrl);
-				if (res.ok) {
-					this.preferredEndpointIndex = AGY_ENDPOINTS.indexOf(endpoint);
-					return await res.json();
-				}
-				if (res.status === 401 || res.status === 403) break;
-			} catch {}
-		}
-		return null;
-	}
-	async discoverAvailableModels() {
-		if (process.env.ANTIGRAVITY_TOKEN?.trim()) return this.fetchAvailableModels(process.env.ANTIGRAVITY_TOKEN.trim());
-		const poolData = this.pool.getPoolData();
-		const primaryAcc = poolData.primaryAccountId ? this.pool.getAccount(poolData.primaryAccountId) : void 0;
-		const candidate = primaryAcc && primaryAcc.enabled && !primaryAcc.authRequired ? primaryAcc : this.pool.getAccounts().find((a) => a.enabled && !a.authRequired);
-		if (!candidate) return null;
-		const accessToken = await this.getValidAccessToken(candidate);
-		if (!accessToken) return null;
-		return this.fetchAvailableModels(accessToken, candidate.proxyUrl);
-	}
-	async refreshAccountQuota(account, force = false, options) {
-		const now = Date.now();
-		if (!force && account.quotas) {
-			const latestUpdate = Math.max(...Object.values(account.quotas).map((q) => q?.updatedAt ?? 0));
-			if (latestUpdate > 0 && now - latestUpdate < 1e4) return account.quotas;
-		}
-		const home = account.systemHome || !account.dir ? homedir() : account.dir;
-		let email = account.email;
-		if (account.systemHome || !email) {
-			const detected = detectEmailFromAgyLogs(home);
-			if (detected) email = detected;
-		}
-		const accessToken = await this.getValidAccessToken(account);
-		if (!accessToken) return null;
-		const isLightweight = Boolean(options?.lightweight || options?.summaryOnly);
-		if (force && !isLightweight) {
-			const info = await this.fetchUserInfo(accessToken, account.proxyUrl);
-			if (info?.email) email = info.email;
-		}
-		if (email && email !== account.email) this.pool.resetAccountIdentity(account.id, email);
-		let summary = null;
-		let discovered = null;
-		if (options?.summaryOnly) {
-			summary = await this.fetchQuotaSummary(accessToken, account.proxyUrl);
-			if (!summary?.groups?.some((g) => {
-				const dName = (g.displayName || "").toLowerCase();
-				const desc = (g.description || "").toLowerCase();
-				return dName.includes("gemini") || desc.includes("gemini");
-			})) discovered = await this.fetchAvailableModels(accessToken, account.proxyUrl);
-		} else {
-			const [sum, disc] = await Promise.all([this.fetchQuotaSummary(accessToken, account.proxyUrl), this.fetchAvailableModels(accessToken, account.proxyUrl)]);
-			summary = sum;
-			discovered = disc;
-		}
-		if (!email && !isLightweight) {
-			const info = await this.fetchUserInfo(accessToken, account.proxyUrl);
-			if (info?.email) email = info.email;
-		}
-		if (!summary && (!discovered || !discovered.models)) return null;
-		if (account.authRequired) this.pool.clearAuthRequired(account.id);
-		const familyQuotas = {};
-		const summaryFamilies = /* @__PURE__ */ new Set();
-		if (summary && Array.isArray(summary.groups)) for (const group of summary.groups) {
-			const dName = (group.displayName || "").toLowerCase();
-			const desc = (group.description || "").toLowerCase();
-			const isGoogle = dName.includes("gemini") || desc.includes("gemini");
-			const is3P = dName.includes("claude") || dName.includes("gpt") || desc.includes("claude") || desc.includes("gpt");
-			const targetFamilies = isGoogle ? ["google"] : is3P ? ["anthropic", "openai"] : [];
-			let fiveHourFrac;
-			let fiveHourReset;
-			let weeklyFrac;
-			let weeklyReset;
-			for (const b of group.buckets || []) {
-				const w = (b.window || b.bucketId || "").toLowerCase();
-				if (w.includes("5h")) {
-					fiveHourFrac = b.remainingFraction;
-					fiveHourReset = b.resetTime;
-				} else if (w.includes("weekly")) {
-					weeklyFrac = b.remainingFraction;
-					weeklyReset = b.resetTime;
-				}
-			}
-			for (const fam of targetFamilies) {
-				summaryFamilies.add(fam);
-				familyQuotas[fam] = {
-					remainingFraction: fiveHourFrac,
-					resetTime: fiveHourReset,
-					weeklyFraction: weeklyFrac,
-					weeklyResetTime: weeklyReset,
-					description: group.description,
-					updatedAt: now
-				};
-			}
-		}
-		const familyModels = {};
-		if (discovered && discovered.models) for (const [modelId, entry] of Object.entries(discovered.models)) {
-			const fam = modelFamilyOf(modelId);
-			if (fam === "unknown") continue;
-			const remaining = entry.quotaInfo?.remainingFraction;
-			const resetTime = entry.quotaInfo?.resetTime;
-			if (typeof remaining !== "number" || !Number.isFinite(remaining)) continue;
-			if (!familyModels[fam]) familyModels[fam] = [];
-			familyModels[fam].push({
-				modelId,
-				displayName: entry.displayName || modelId,
-				remainingFraction: remaining,
-				resetTime
-			});
-			if (!familyQuotas[fam]) familyQuotas[fam] = mergeFallbackFamilyQuota(account.quotas[fam], {
-				remainingFraction: remaining,
-				resetTime,
-				updatedAt: now
-			});
-			else if (!summaryFamilies.has(fam) || familyQuotas[fam].remainingFraction === void 0) {
-				const curRemaining = familyQuotas[fam].remainingFraction ?? 1;
-				if (remaining < curRemaining) {
-					familyQuotas[fam].remainingFraction = remaining;
-					familyQuotas[fam].resetTime = resetTime;
-				} else if (remaining === curRemaining) {
-					if (resetTime && (!familyQuotas[fam].resetTime || Date.parse(resetTime) > Date.parse(familyQuotas[fam].resetTime))) familyQuotas[fam].resetTime = resetTime;
-				}
-			}
-		}
-		for (const [famKey, list] of Object.entries(familyModels)) {
-			const fam = famKey;
-			if (familyQuotas[fam]) familyQuotas[fam].models = list;
-		}
-		if (options?.summaryOnly && account.quotas) {
-			for (const fam of Object.keys(familyQuotas)) if (familyQuotas[fam] && !familyQuotas[fam].models && account.quotas[fam]?.models) familyQuotas[fam].models = account.quotas[fam].models;
-		}
-		this.pool.updateAccountQuotas(account.id, familyQuotas, email);
-		return familyQuotas;
-	}
-	async refreshQuotaSummaryOnly(account) {
-		return this.refreshAccountQuota(account, true, {
-			lightweight: true,
-			summaryOnly: true
-		});
-	}
-	async selfHealQuarantinedAccounts() {
-		let healed = 0;
-		for (const acc of this.pool.getAccounts()) {
-			if (!acc.enabled || !acc.authRequired) continue;
-			const tok = this.getStoredToken(acc);
-			if (!tok) continue;
-			if (!tok.refreshToken && (!tok.accessToken || tok.expiryMs && tok.expiryMs <= Date.now() + 6e4)) continue;
-			try {
-				if (await this.getValidAccessToken(acc)) {
-					this.pool.clearAuthRequired(acc.id);
-					healed++;
-				}
-			} catch {}
-		}
-		return healed;
-	}
-	async refreshAllQuotas(force = false) {
-		if (!force) {
-			const now = Date.now();
-			for (const acc of this.pool.getAccounts()) {
-				const flagged = acc.authRequired || Object.values(acc.cooldowns).some((cd) => cd && cd.cooldownUntil > now);
-				if (!acc.systemHome || !flagged) continue;
-				const detected = detectEmailFromAgyLogs(acc.systemHome || !acc.dir ? homedir() : acc.dir);
-				if (detected && detected !== acc.email) this.pool.resetAccountIdentity(acc.id, detected);
-			}
-			await this.selfHealQuarantinedAccounts();
-		}
-		let accounts = this.pool.getAccounts();
-		if (!force) accounts = accounts.filter(shouldPollAccount);
-		await Promise.allSettled(accounts.map((acc) => this.refreshAccountQuota(acc, force)));
 	}
 };
 //#endregion
@@ -30310,7 +30585,10 @@ function apply(ctx, entryConfig = {}) {
 					catalog: {
 						source: cat.source,
 						count: cat.models.length,
-						lastError: cat.lastError ?? null
+						lastError: cat.lastError ?? null,
+						accountFailures: cat.accountFailures ?? null,
+						endpointErrors: quota.lastEndpointErrors && quota.lastEndpointErrors.length > 0 ? quota.lastEndpointErrors : cat.endpointErrors ?? null,
+						discoveryDiagnostics: quota.lastDiscoveryDiagnostics ?? null
 					},
 					lastRun,
 					distSha256: selfSha256
