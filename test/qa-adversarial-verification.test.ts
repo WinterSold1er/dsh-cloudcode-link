@@ -323,10 +323,10 @@ describe('QA Adversarial Verification Suite: Boundary, Failure Paths & Externali
 
     it('AC-04: requestId byte-level determinism without Date.now() or Math.random()', () => {
       const traj = 'constant-traj-id'
-      const envelopeA = antigravityRequestEnvelope('gemini-3.7-flash', false, { trajectoryId: traj, step: 5 })
-      const envelopeB = antigravityRequestEnvelope('gemini-3.7-flash', false, { trajectoryId: traj, step: 5 })
+      const envelopeA = antigravityRequestEnvelope('gemini-3.7-flash', false, { trajectoryId: traj, step: 5, now: () => 1794817091999 })
+      const envelopeB = antigravityRequestEnvelope('gemini-3.7-flash', false, { trajectoryId: traj, step: 5, now: () => 1794817091999 })
 
-      assert.equal(envelopeA.requestId, 'agent/constant-traj-id/5')
+      assert.equal(envelopeA.requestId, 'agent/constant-traj-id/1794817091999/constant-traj-id/5')
       assert.equal(envelopeA.requestId, envelopeB.requestId)
       assert.equal(envelopeA.labels.last_step_index, '5')
       assert.equal(envelopeA.labels.trajectory_id, traj)

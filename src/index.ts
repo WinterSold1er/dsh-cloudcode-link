@@ -10,6 +10,7 @@ import { fileURLToPath } from 'node:url'
 import { dshHome, overridesPath, readOverrides, resolveConfig, stateDir } from './common/config.ts'
 import { PROVIDER_ID, type PluginConfig } from './common/types.ts'
 import { AgyAdapter } from './host/adapter.ts'
+import { describePoolAuthHealth, reauthGuidanceResolver } from './host/account-health.ts'
 import { defineAgyAskTool } from './host/ask-tool.ts'
 import { AuthHelper } from './host/auth.ts'
 import { cclCommandDefinition } from './host/commands.ts'
@@ -232,6 +233,12 @@ export function apply(ctx: Context, entryConfig: Record<string, unknown> = {}): 
     acquire: () => semaphore.acquire(),
     log,
     readImage,
+    // The failover loop must not guess whether a 403 means "this account does not serve this
+    // model" or "this account's Google grant is missing a scope". It asks this resolver, which
+    // answers from the account's own recorded grant and returns undefined otherwise.
+    reauthGuidanceFor: reauthGuidanceResolver((accountId) =>
+      pool.getAccounts().find((account) => account.id === accountId),
+    ),
     onRun: (info) => {
       lastRun = info
     },
@@ -395,7 +402,9 @@ export function apply(ctx: Context, entryConfig: Record<string, unknown> = {}): 
     })
 
     regBoth('pool', (_req, res) => {
-      sendJson(res as RawRes, 200, pool.getPoolData())
+      // The account list the GUI renders: every account carries its own auth verdict so a
+      // grant that predates a required scope is visible before the upstream answers 401/403.
+      sendJson(res as RawRes, 200, describePoolAuthHealth(pool.getPoolData()))
     })
 
     regBoth('pool/begin-add', (req, res) => {

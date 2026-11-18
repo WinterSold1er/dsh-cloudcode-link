@@ -161,6 +161,86 @@ function defaultPoolDir(customBase) {
 	if (process.env.ANTIGRAVITY_ACCOUNTS_DIR?.trim()) return process.env.ANTIGRAVITY_ACCOUNTS_DIR.trim();
 	return join(homedir(), ".cloudcode", "accounts");
 }
+/**
+* Effort / routing modifiers the backend appends to a wire model id
+* (`gemini-4-hydrogen-high`, `gemini-4-hydrogen-tiered-high`, `gemini-2.5-flash-thinking`).
+* They are stripped from the tail so a requested wire id can be compared with the model ids an
+* account is actually entitled to: an account that serves `gemini-4-hydrogen-medium` can serve a
+* `gemini-4-hydrogen-high` request even when that exact effort string is absent from its list.
+* Longer modifiers come first so `-xhigh` is never half-stripped as `-high`.
+*/
+const MODEL_EFFORT_SUFFIXES = [
+	"xhigh",
+	"high",
+	"medium",
+	"low",
+	"minimal",
+	"none",
+	"off",
+	"auto",
+	"thinking",
+	"tiered"
+];
+/**
+* Suffixes the backend uses to publish a model id it refuses to serve
+* (`gemini-4-hydrogen-disabled`, `gemini-4-hydrogen-sonar`). These are entitlement
+* declarations, never effort variants: a list holding only such entries does not make the base
+* model available.
+*/
+const MODEL_UNSERVABLE_SUFFIXES = ["disabled", "sonar"];
+/** Quarantine window for one (account, family, model base) triple after an upstream 403. */
+const MODEL_UNSUPPORTED_COOLDOWN_MS = 3e5;
+/** Repeated 403s for the same model escalate the quarantine, but never past this bound. */
+const MODEL_UNSUPPORTED_MAX_COOLDOWN_MS = 18e5;
+/** `gemini-4-hydrogen-tiered-high` -> `gemini-4-hydrogen`; unservable markers are NOT stripped. */
+function modelBaseOf(modelId) {
+	let base = modelId.trim().toLowerCase();
+	for (;;) {
+		const modifier = MODEL_EFFORT_SUFFIXES.find((suffix) => base.endsWith(`-${suffix}`) && base.length > suffix.length + 1);
+		if (!modifier) return base;
+		base = base.slice(0, -(modifier.length + 1));
+	}
+}
+/** False for ids the backend marks as not serviceable (`...-disabled`, `...-sonar`). */
+function isServableModelId(modelId) {
+	const id = modelId.trim().toLowerCase();
+	if (!id) return false;
+	return !MODEL_UNSERVABLE_SUFFIXES.some((marker) => id === marker || id.endsWith(`-${marker}`));
+}
+/**
+* Model-level entitlement of one account.
+*
+* An account whose family quota carries no `models[]` list (never refreshed, or the backend did
+* not send the breakdown) is treated as ENTITLED: missing data must not disqualify the whole pool.
+*/
+function modelEntitlementOf(account, family, wireModel) {
+	const requested = wireModel.trim().toLowerCase();
+	const base = modelBaseOf(requested);
+	const listing = account.quotas[family]?.models;
+	if (!Array.isArray(listing) || listing.length === 0) return {
+		base,
+		known: false,
+		supported: true
+	};
+	if (!isServableModelId(requested)) return {
+		base,
+		known: true,
+		supported: false
+	};
+	return {
+		base,
+		known: true,
+		supported: listing.some((entry) => {
+			const listed = typeof entry.modelId === "string" ? entry.modelId.trim().toLowerCase() : "";
+			if (!listed || !isServableModelId(listed)) return false;
+			return listed === requested || modelBaseOf(listed) === base;
+		})
+	};
+}
+/** Key of the model quarantine map: one account, one family, one effort-stripped model base. */
+function modelQuarantineKey(id, family, wireModel) {
+	return `${id}|${family}|${modelBaseOf(wireModel)}`;
+}
 var Semaphore$1 = class {
 	active = 0;
 	queue = [];
@@ -194,6 +274,13 @@ var AccountPoolManager = class {
 	activeMemoryTokens = /* @__PURE__ */ new Map();
 	accountSemaphores = /* @__PURE__ */ new Map();
 	runtimeActiveAccountIds = /* @__PURE__ */ new Map();
+	/**
+	* Model-scoped soft failures: `id|family|modelBase` -> quarantine state. Populated when the
+	* backend answers 403 for a model an account is not entitled to. Runtime-only on purpose —
+	* entitlement is re-probed from `quotas[family].models` after a quota refresh, and a stale
+	* "this account cannot do X" verdict must never outlive the process that observed it.
+	*/
+	modelQuarantine = /* @__PURE__ */ new Map();
 	writeQueue = Promise.resolve();
 	lowQuotaThreshold = .05;
 	constructor(baseDir = defaultPoolDir(), lowQuotaThreshold = .05) {
@@ -638,6 +725,47 @@ var AccountPoolManager = class {
 		};
 		this.persist();
 	}
+	/**
+	* Soft-fail an account for ONE model only (upstream 403 / "no such model for this user").
+	*
+	* This is deliberately NOT `markAuthRequired`: a 403 says "this credential may be fine, but not
+	* for this model". Quarantining the whole account turns a model mismatch into a pool-wide
+	* "sign in again" error, which is what made the pool report
+	* `No authenticated Antigravity account available` while every account was actually signed in.
+	* Repeated refusals for the same model escalate the quarantine within
+	* {@link MODEL_UNSUPPORTED_MAX_COOLDOWN_MS}.
+	*/
+	recordModelUnsupported(id, family, wireModel, reason) {
+		if (!this.getAccount(id)) return;
+		const key = modelQuarantineKey(id, family, wireModel);
+		const consecutiveFailures = (this.modelQuarantine.get(key)?.consecutiveFailures ?? 0) + 1;
+		const cooldownMs = Math.min(MODEL_UNSUPPORTED_COOLDOWN_MS * consecutiveFailures, MODEL_UNSUPPORTED_MAX_COOLDOWN_MS);
+		this.modelQuarantine.set(key, {
+			cooldownUntil: Date.now() + cooldownMs,
+			reason: reason || `Model '${wireModel}' refused by this account`,
+			consecutiveFailures
+		});
+	}
+	/** Current model quarantine for an account, or null when none applies (expired entries cleared). */
+	getModelQuarantine(id, family, wireModel) {
+		const key = modelQuarantineKey(id, family, wireModel);
+		const entry = this.modelQuarantine.get(key);
+		if (!entry) return null;
+		if (entry.cooldownUntil <= Date.now()) {
+			this.modelQuarantine.delete(key);
+			return null;
+		}
+		return entry;
+	}
+	/** Drop model quarantines (all accounts / one account / one family). Used by `/ccl` remediation. */
+	clearModelQuarantine(id, family) {
+		for (const key of [...this.modelQuarantine.keys()]) {
+			const [accId, accFamily] = key.split("|");
+			if (id && accId !== id) continue;
+			if (family && accFamily !== family) continue;
+			this.modelQuarantine.delete(key);
+		}
+	}
 	recordSuccess(id, family) {
 		const acc = this.getAccount(id);
 		if (!acc) return;
@@ -659,7 +787,9 @@ var AccountPoolManager = class {
 		else acc.cooldowns = {};
 		this.persist();
 	}
-	isAccountHealthy(account, family, threshold = this.lowQuotaThreshold) {
+	isAccountHealthy(account, family, thresholdOrWireModel, maybeWireModel) {
+		const threshold = typeof thresholdOrWireModel === "number" ? thresholdOrWireModel : this.lowQuotaThreshold;
+		const wireModel = typeof thresholdOrWireModel === "string" ? thresholdOrWireModel : maybeWireModel;
 		if (!account.enabled || account.authRequired) return false;
 		const now = Date.now();
 		const cd = account.cooldowns[family];
@@ -677,10 +807,19 @@ var AccountPoolManager = class {
 				if (!Number.isNaN(resetMs) && resetMs > now) return false;
 			}
 		}
+		if (wireModel?.trim()) {
+			if (!modelEntitlementOf(account, family, wireModel).supported) return false;
+			if (this.getModelQuarantine(account.id, family, wireModel)) return false;
+		}
 		return true;
 	}
-	selectAccount(family) {
-		const candidates = this.data.accounts.filter((acc) => this.isAccountHealthy(acc, family));
+	/**
+	* Pick a schedulable account. When `wireModel` is given, entitlement filtering happens HERE so
+	* every strategy below (pin, round-robin, sticky drain) only ever sees accounts that can serve
+	* the requested model. Without `wireModel` the behaviour is unchanged.
+	*/
+	selectAccount(family, wireModel) {
+		const candidates = this.data.accounts.filter((acc) => this.isAccountHealthy(acc, family, wireModel));
 		if (candidates.length === 0) return null;
 		const pinned = this.getPinnedAccount();
 		if (pinned && candidates.some((c) => c.id === pinned.id)) {
@@ -754,7 +893,13 @@ var AccountPoolManager = class {
 		}
 		return earliest !== null ? Math.max(0, earliest - now) : null;
 	}
-	getFamilyStatus(family) {
+	/**
+	* Pool verdict for one family. With `wireModel` the verdict is model-aware: when every signed-in
+	* account publishes a model list that excludes the requested model, the reason is
+	* `model_not_available` — NOT `auth_required`, which would send the user to `/ccl auth` for a
+	* problem re-authenticating cannot fix.
+	*/
+	getFamilyStatus(family, wireModel) {
 		const accounts = this.data.accounts;
 		if (accounts.length === 0) return {
 			hasAccount: false,
@@ -776,11 +921,19 @@ var AccountPoolManager = class {
 			reason: "auth_required",
 			resetInMs: null
 		};
-		if (this.selectAccount(family)) return {
+		if (this.selectAccount(family, wireModel)) return {
 			hasAccount: true,
 			suppressed: false,
 			resetInMs: null
 		};
+		if (wireModel?.trim()) {
+			if (authValidAccounts.every((a) => !modelEntitlementOf(a, family, wireModel).supported)) return {
+				hasAccount: true,
+				suppressed: true,
+				reason: "model_not_available",
+				resetInMs: null
+			};
+		}
 		const resetInMs = this.getEarliestResetCountdown(family);
 		return {
 			hasAccount: true,
@@ -1529,13 +1682,140 @@ function defaultEffortFor(entry, cfg) {
 	]) if (entry.efforts.includes(pref)) return pref;
 	return entry.efforts[entry.efforts.length - 1];
 }
-const ANTIGRAVITY_MODEL_ENUM = {
-	"gemini-3.5-flash-extra-low": "MODEL_PLACEHOLDER_M187",
-	"gemini-3.5-flash-low": "MODEL_PLACEHOLDER_M20",
-	"gemini-3-flash-agent": "MODEL_PLACEHOLDER_M132",
-	"gemini-3.1-pro-low": "MODEL_PLACEHOLDER_M36",
-	"gemini-pro-agent": "MODEL_PLACEHOLDER_M16"
+/**
+* agy (Antigravity CLI) 1.3.5 wire model id -> `exa.codeium_common_pb.Model` enum name,
+* i.e. the value agy puts in `request.labels.model_enum`. Single source of truth;
+* `ANTIGRAVITY_MODEL_ENUM` below is derived from it.
+*
+* Evidence (every row is a measured pair — no `1000 + n` back-computation here):
+*  - agy 1.3.5 binary descriptor: the enum is `exa.codeium_common_pb.Model`, and
+*    `MODEL_PLACEHOLDER_M{n}` carries the value `1000 + n` (1651 placeholder members).
+*    The numbering rule is only used to *read* pairs found elsewhere, never to invent one.
+*  - Per-variant values come from `test/fixtures/fetch-available-models.json`, a real
+*    `FetchAvailableModelsResponse` capture: the map key is the wire model id and
+*    `ModelDetails.model` (field 15) is the enum the server issues for that exact variant
+*    (gemini-4-hydrogen-high -> M525, -medium -> M526, -low -> M527, -xhigh -> M528,
+*    -tiered-high -> M530, -tiered-xhigh -> M531, -sonar -> M578; gemini-4-argon-high -> M417,
+*    -medium -> M418, -low -> M419; gemini-4-carbon-disabled -> M670; gemini-3.5-flash-lite -> M198).
+*  - Family rows (bare ids) come from agy's own `conversations/*.db`, where `model_enum` and the
+*    wire model string appear together: `gemini-4-hydrogen` -> M526,
+*    `gemini-4-argon-medium` / `gemini-4-argon-trial` -> M418. They also serve as the fallback
+*    for a variant the capture does not list.
+*  - Captured upstream request (ops/relink/t2-traffic-findings.md:57/65/121): body
+*    `model: "gemini-4-hydrogen-medium"` with `labels.model_enum = MODEL_PLACEHOLDER_M526`,
+*    which is exactly the `-medium` variant row below — the reason exact variants win.
+*  - The three rows the capture does not carry (`gemini-4-hydrogen`, `gemini-4-argon`,
+*    `gemini-4-argon-trial`) are the pairs written down in ops/relink/t2-model-enum-evidence.md:
+*    read out of agy's own `gen_metadata` blobs (`gemini-4-argon-trial` -> M418 observed; the two
+*    family values derived from the captured `-medium` variant, which the live request pairs with
+*    the same enum). The capture neither lists nor contradicts them.
+*
+* A row exists for every entry the capture serves, and for nothing else: ids with no measured
+* pair (`claude-opus-4-6-thinking`, `claude-opus-4-8`, `claude-sonnet-4-6`, `claude-haiku-4-5`,
+* `gemini-3.6-flash-*`, `gemini-3.7-flash-*`, the bare `gemini-3.5-flash` / `gemini-3.8-flash` /
+* `gemini-4-carbon` families, and the five ids whose pairing reviewer2 could not source —
+* `gemini-3.5-flash-extra-low`, `gemini-3.5-flash-low`, `gemini-3-flash-agent`,
+* `gemini-3.1-pro-low`, `gemini-pro-agent`, all five deleted from this table on 2026-11-18)
+* resolve to `undefined` rather than a guess. That bidirectional lock is asserted by
+* test/agy-models-alignment.test.ts.
+*
+* Lookup order: the exact wire id wins, and only a variant the capture does not list falls back
+* to its family row (e.g. `gemini-4-hydrogen-tiered-low` -> M526). Internal variants keep their
+* measured enum here but never reach the catalog (see isInternalModel), so they stay unselectable.
+*/
+const AGY_MODEL_ENUM_BY_WIRE_ID = {
+	"gemini-4-hydrogen": "MODEL_PLACEHOLDER_M526",
+	"gemini-4-hydrogen-high": "MODEL_PLACEHOLDER_M525",
+	"gemini-4-hydrogen-medium": "MODEL_PLACEHOLDER_M526",
+	"gemini-4-hydrogen-low": "MODEL_PLACEHOLDER_M527",
+	"gemini-4-hydrogen-xhigh": "MODEL_PLACEHOLDER_M528",
+	"gemini-4-hydrogen-tiered-high": "MODEL_PLACEHOLDER_M530",
+	"gemini-4-hydrogen-tiered-xhigh": "MODEL_PLACEHOLDER_M531",
+	"gemini-4-hydrogen-sonar": "MODEL_PLACEHOLDER_M578",
+	"gemini-4-argon": "MODEL_PLACEHOLDER_M418",
+	"gemini-4-argon-high": "MODEL_PLACEHOLDER_M417",
+	"gemini-4-argon-medium": "MODEL_PLACEHOLDER_M418",
+	"gemini-4-argon-low": "MODEL_PLACEHOLDER_M419",
+	"gemini-4-argon-trial": "MODEL_PLACEHOLDER_M418",
+	"gemini-4-carbon-disabled": "MODEL_PLACEHOLDER_M670",
+	"gemini-3.8-flash-high": "MODEL_PLACEHOLDER_M318",
+	"gemini-3.8-flash-medium": "MODEL_PLACEHOLDER_M319",
+	"gemini-3.8-flash-low": "MODEL_PLACEHOLDER_M320",
+	"gemini-3.8-flash-tiered": "MODEL_PLACEHOLDER_M322",
+	"gemini-3.5-flash-lite": "MODEL_PLACEHOLDER_M198",
+	"gemini-3.1-flash-image": "MODEL_PLACEHOLDER_M21",
+	"gemini-3.1-flash-lite": "MODEL_PLACEHOLDER_M50",
+	"gemini-3-flash": "MODEL_PLACEHOLDER_M18",
+	"gemini-2.5-flash": "MODEL_GOOGLE_GEMINI_2_5_FLASH",
+	"gemini-2.5-flash-lite": "MODEL_GOOGLE_GEMINI_2_5_FLASH_LITE",
+	"gemini-2.5-flash-thinking": "MODEL_GOOGLE_GEMINI_2_5_FLASH_THINKING",
+	"gemini-2.5-pro": "MODEL_GOOGLE_GEMINI_2_5_PRO",
+	"claude-opus-5-5-high": "MODEL_PLACEHOLDER_M402",
+	"claude-opus-5-5-medium": "MODEL_PLACEHOLDER_M401",
+	"claude-opus-5-5-low": "MODEL_PLACEHOLDER_M400",
+	"claude-sonnet-5-5-high": "MODEL_PLACEHOLDER_M405",
+	"claude-sonnet-5-5-medium": "MODEL_PLACEHOLDER_M404",
+	"claude-sonnet-5-5-low": "MODEL_PLACEHOLDER_M403",
+	"gpt-oss-120b-medium": "MODEL_OPENAI_GPT_OSS_120B_MEDIUM",
+	"chat_20706": "MODEL_CHAT_20706",
+	"chat_23310": "MODEL_CHAT_23310",
+	"tab_flash_lite_preview": "MODEL_PLACEHOLDER_M19",
+	"tab_jump_flash_lite_preview": "MODEL_PLACEHOLDER_M28"
 };
+/**
+* Suffixes agy appends to a family wire id to select a reasoning effort / tier.
+* Longest first so `-tiered-xhigh` peels off before a bare `-xhigh` could match it.
+*/
+const AGY_MODEL_VARIANT_SUFFIXES = [
+	"tiered-xhigh",
+	"tiered-high",
+	"tiered-medium",
+	"tiered-low",
+	"tiered",
+	"extra-low",
+	"extra-high",
+	"xhigh",
+	"high",
+	"low",
+	"medium",
+	"minimal",
+	"thinking",
+	"trial",
+	"sonar"
+];
+/**
+* Resolve the wire model enum (model_enum label) for a wire model id.
+*
+* Exact row first, family row second. `gemini-4-hydrogen-high` (own row, M525) and
+* `gemini-4-hydrogen-tiered-xhigh` (own row, M531) resolve directly and never fall back —
+* a measured suffixed id always keeps its own value. A family row takes over only for a
+* variant the table does not list, by peeling the effort / tier suffixes that belong to the
+* request's `model` string: `gemini-4-hydrogen-tiered-low` and `gemini-4-hydrogen-tiered-medium`
+* -> `MODEL_PLACEHOLDER_M526` (via the `gemini-4-hydrogen` row), `gemini-4-argon-xhigh`
+* -> `MODEL_PLACEHOLDER_M418` (via the `gemini-4-argon` row). Evidence for those family rows:
+* ops/relink/t2-model-enum-evidence.md.
+* Returns `undefined` for a family this repo has no measured pair for (never a guess).
+*/
+function lookupModelEnum(wireModelId) {
+	const trimmed = wireModelId.trim().toLowerCase();
+	if (trimmed === "") return void 0;
+	const queue = [trimmed];
+	const visited = /* @__PURE__ */ new Set();
+	for (let i = 0; i < queue.length; i += 1) {
+		const candidate = queue[i];
+		if (candidate === void 0 || candidate === "" || visited.has(candidate)) continue;
+		visited.add(candidate);
+		const hit = AGY_MODEL_ENUM_BY_WIRE_ID[candidate];
+		if (hit !== void 0) return hit;
+		for (const suffix of AGY_MODEL_VARIANT_SUFFIXES) {
+			const tail = `-${suffix}`;
+			if (!candidate.endsWith(tail)) continue;
+			const base = candidate.slice(0, -tail.length);
+			if (base !== "") queue.push(base);
+		}
+	}
+}
+({ ...AGY_MODEL_ENUM_BY_WIRE_ID });
 const ANTIGRAVITY_ROUTING = {
 	"claude-opus-4-6": {
 		routing: {
@@ -1556,6 +1836,50 @@ const ANTIGRAVITY_ROUTING = {
 			xhigh: "claude-sonnet-4-6"
 		},
 		defaultRequestId: "claude-sonnet-4-6"
+	},
+	"claude-haiku-4-5": {
+		off: "claude-haiku-4-5",
+		routing: {
+			minimal: "claude-haiku-4-5",
+			low: "claude-haiku-4-5",
+			medium: "claude-haiku-4-5",
+			high: "claude-haiku-4-5",
+			xhigh: "claude-haiku-4-5"
+		},
+		defaultRequestId: "claude-haiku-4-5"
+	},
+	"claude-opus-4-8": {
+		off: "claude-opus-4-6-thinking",
+		routing: {
+			minimal: "claude-opus-4-6-thinking",
+			low: "claude-opus-4-6-thinking",
+			medium: "claude-opus-4-6-thinking",
+			high: "claude-opus-4-6-thinking",
+			xhigh: "claude-opus-4-6-thinking"
+		},
+		defaultRequestId: "claude-opus-4-6-thinking"
+	},
+	"gemini-4-hydrogen": {
+		off: "gemini-4-hydrogen-medium",
+		routing: {
+			minimal: "gemini-4-hydrogen-low",
+			low: "gemini-4-hydrogen-low",
+			medium: "gemini-4-hydrogen-medium",
+			high: "gemini-4-hydrogen-high",
+			xhigh: "gemini-4-hydrogen-xhigh"
+		},
+		defaultRequestId: "gemini-4-hydrogen-medium"
+	},
+	"gemini-4-argon": {
+		off: "gemini-4-argon-medium",
+		routing: {
+			minimal: "gemini-4-argon-low",
+			low: "gemini-4-argon-low",
+			medium: "gemini-4-argon-medium",
+			high: "gemini-4-argon-high",
+			xhigh: "gemini-4-argon-high"
+		},
+		defaultRequestId: "gemini-4-argon-medium"
 	},
 	"gemini-3.1-pro": {
 		off: "gemini-3.1-pro-low",
@@ -25533,13 +25857,120 @@ function resolveClientCredentials() {
 		clientSecret: process.env.AGY_CLIENT_SECRET || AGY_PUBLIC_CLIENT_SECRET
 	};
 }
+/**
+* Consent-time scope set, aligned with what the real `agy` 1.3.5 CLI requests.
+*
+* Evidence (`strings -a /usr/bin/agy`, read-only inspection, 2026-11-18): the binary
+* carries exactly 16 distinct `https://www.googleapis.com/auth/*` strings, split into
+* two families:
+*   - CLI auth family (6): cloud-platform, userinfo.email, userinfo.profile, cclog,
+*     experimentsandconfigs, aicode  -> this constant
+*   - Drive integration family (10): drive, drive.appdata, drive.apps.readonly,
+*     drive.file, drive.meet.readonly, drive.metadata, drive.metadata.readonly,
+*     drive.photos.readonly, drive.readonly, drive.scripts
+* The Drive family backs agy's Drive/workspace project features and is deliberately
+* NOT requested here: it widens the consent screen for our shared client, a scope the
+* client is not registered for makes Google reject the whole authorize request, and the
+* AICode path needs none of it. `aicode` is what closes the observed gap — a token
+* minted from the previous set gets `403 PERMISSION_DENIED /
+* Request had insufficient authentication scopes / ACCESS_TOKEN_SCOPE_INSUFFICIENT`
+* from the AICode backend that `use-aicode-mendel=true` routes agy through.
+*
+* Only scopes were added, none removed: dropping a scope changes the behaviour of
+* refresh_tokens that were issued with it.
+*/
 const AGY_SCOPES = [
+	"https://www.googleapis.com/auth/cloud-platform",
+	"https://www.googleapis.com/auth/aicode",
+	"https://www.googleapis.com/auth/userinfo.email",
+	"https://www.googleapis.com/auth/userinfo.profile",
+	"https://www.googleapis.com/auth/cclog",
+	"https://www.googleapis.com/auth/experimentsandconfigs"
+];
+/**
+* The set AGY_SCOPES held before `aicode` was added. Tokens written before a scope
+* record existed were authorized with exactly this set, so it is the assumption used
+* for an unrecorded grant (see {@link needsReauth}). Kept as an explicit constant so
+* the fallback is auditable instead of implicit.
+*/
+const LEGACY_AGY_SCOPES = [
 	"https://www.googleapis.com/auth/cloud-platform",
 	"https://www.googleapis.com/auth/userinfo.email",
 	"https://www.googleapis.com/auth/userinfo.profile",
 	"https://www.googleapis.com/auth/cclog",
 	"https://www.googleapis.com/auth/experimentsandconfigs"
 ];
+/**
+* Key that records the authorized scope set inside the on-disk agy token document.
+* `granted_scopes` is a repeated string field in agy's own credential protos
+* (`strings -a /usr/bin/agy` shows `protobuf:"...,rep,name=granted_scopes..."`), so a
+* string array under this name matches agy's field name and its type: agy's JSON/protobuf
+* reader ignores unknown keys, and this one is not a type clash with a key it already uses.
+*/
+const AGY_TOKEN_SCOPE_KEY = "granted_scopes";
+/**
+* Canonicalize a scope collection: trim, drop empties, de-duplicate, and order it
+* deterministically (scopes required by agy in AGY_SCOPES declaration order, any extra
+* scope after them in ascending byte order). Same input set -> same output regardless
+* of the input order, so a stored grant can be compared to the required set reliably.
+*/
+function normalizeScopes(input) {
+	const raw = typeof input === "string" ? input.split(/[\s,]+/) : input ?? [];
+	const unique = /* @__PURE__ */ new Set();
+	for (const entry of raw) {
+		const trimmed = typeof entry === "string" ? entry.trim() : "";
+		if (trimmed) unique.add(trimmed);
+	}
+	const rank = new Map(AGY_SCOPES.map((scope, index) => [scope, index]));
+	return [...unique].sort((a, b) => {
+		const rankA = rank.get(a) ?? Number.MAX_SAFE_INTEGER;
+		const rankB = rank.get(b) ?? Number.MAX_SAFE_INTEGER;
+		if (rankA !== rankB) return rankA - rankB;
+		return a < b ? -1 : a > b ? 1 : 0;
+	});
+}
+/** Required scopes missing from `granted`. */
+function missingScopes(granted, required = AGY_SCOPES) {
+	const have = new Set(normalizeScopes(granted));
+	return required.filter((scope) => !have.has(scope));
+}
+/**
+* True when the stored grant cannot satisfy the current AGY_SCOPES.
+*
+* Refreshing a refresh_token never widens the grant — Google re-issues an access token
+* for the scopes the consent already covered, and the refresh response carries no scope
+* field. So a token authorized with an older set stays short until the user reconsents;
+* callers use this to decide whether to surface a re-auth (`/ccl auth`) prompt.
+* A grant with no recorded scope is treated as {@link LEGACY_AGY_SCOPES}: that is what
+* the consent asked for when the token was issued, and it is the safe reading (a stale
+* prompt costs one re-auth; a false "no re-auth needed" keeps a 403 token in the pool).
+*/
+function needsReauth(grantedScopes) {
+	return missingScopes(grantedScopes === void 0 || grantedScopes === null || Array.isArray(grantedScopes) && grantedScopes.length === 0 ? LEGACY_AGY_SCOPES : grantedScopes).length > 0;
+}
+/**
+* Read the authorized scope set back out of a parsed agy token document.
+* Tolerates both shapes seen in the wild — a top-level record and one nested inside
+* `token` — and both encodings (string array, space-separated string).
+* Returns undefined when the document records no scopes (a pre-scope-record token).
+*/
+function readGrantedScopes(raw) {
+	if (!raw || typeof raw !== "object") return void 0;
+	const nested = raw.token;
+	const documents = [raw];
+	if (nested && typeof nested === "object" && !Array.isArray(nested)) documents.push(nested);
+	for (const document of documents) for (const key of [
+		AGY_TOKEN_SCOPE_KEY,
+		"scopes",
+		"scope"
+	]) {
+		const value = document[key];
+		if (typeof value === "string" || Array.isArray(value)) {
+			const normalized = normalizeScopes(value);
+			if (normalized.length > 0) return normalized;
+		}
+	}
+}
 const OAUTH_AUTHORIZE_URL = "https://accounts.google.com/o/oauth2/v2/auth";
 const OAUTH_TOKEN_URL = "https://oauth2.googleapis.com/token";
 const OAUTH_USERINFO_URL = "https://www.googleapis.com/oauth2/v1/userinfo";
@@ -25598,12 +26029,20 @@ async function postTokenForm(fields, proxyUrl) {
 	if (!payload.access_token) throw new Error("token endpoint returned no access_token");
 	return payload;
 }
+/**
+* Translate one token-endpoint response into a TokenSet. `scope` is the only place a grant is
+* learned from, so it is the only thing recorded; exported because the meaning of a response
+* without it is a contract worth testing directly (see test/agy-oauth-scope.test.ts) and the
+* exchange path itself needs the network.
+*/
 function toTokenSet(payload, refreshTokenFallback) {
+	const grantedScopes = payload.scope === void 0 ? void 0 : normalizeScopes(payload.scope);
 	return {
 		access_token: payload.access_token,
 		token_type: payload.token_type ?? "Bearer",
 		refresh_token: payload.refresh_token ?? refreshTokenFallback,
-		expiryMs: typeof payload.expires_in === "number" ? Date.now() + payload.expires_in * 1e3 : void 0
+		expiryMs: typeof payload.expires_in === "number" ? Date.now() + payload.expires_in * 1e3 : void 0,
+		...grantedScopes && grantedScopes.length > 0 ? { grantedScopes } : {}
 	};
 }
 /** Exchange an authorization code for tokens (PKCE-verified). */
@@ -25615,7 +26054,13 @@ async function exchangeCode(code, verifier, proxyUrl, redirectUri = OAUTH_REDIRE
 		code_verifier: verifier
 	}, proxyUrl));
 }
-/** Refresh an access token; throws on invalid_grant (credential revoked). */
+/** Refresh an access token; throws on invalid_grant (credential revoked).
+*
+* A refresh response carries no `scope` field, so `grantedScopes` stays unset: a refresh
+* re-issues an access token for the scopes the original consent covered, it never widens
+* them. Callers keep the recorded grant (or use `needsReauth`) instead of assuming a
+* refreshed token gained anything.
+*/
 async function refreshTokens(refreshToken, proxyUrl) {
 	return toTokenSet(await postTokenForm({
 		grant_type: "refresh_token",
@@ -25633,9 +26078,21 @@ async function fetchUserEmail(accessToken, proxyUrl) {
 		return;
 	}
 }
+/** Parse an existing on-disk token document; undefined when it is absent or unreadable. */
+function readTokenDocument(file) {
+	try {
+		const raw = JSON.parse(readFileSync(file, "utf8"));
+		return raw && typeof raw === "object" && !Array.isArray(raw) ? raw : void 0;
+	} catch {
+		return;
+	}
+}
 /**
 * Persist tokens in on-disk format:
-*   {"token": {access_token, token_type, refresh_token, expiry}, "auth_method": "consumer"}
+*   {"token": {access_token, token_type, refresh_token, expiry}, "auth_method": "consumer",
+*    "granted_scopes": [ ... ] }
+* The `granted_scopes` entry is only present once the grant is known; a token file written
+* before scope recording existed stays exactly as it was, so existing accounts keep working.
 */
 function writeAgyTokenFile(homeDir, tokens) {
 	const geminiDir = join(homeDir, ".gemini");
@@ -25651,6 +26108,7 @@ function writeAgyTokenFile(homeDir, tokens) {
 	} catch {}
 	const file = join(dir, "antigravity-oauth-token");
 	const expiryIso = tokens.expiryMs ? formatLocalIso(tokens.expiryMs) : formatLocalIso(Date.now() + 36e5);
+	const grantedScopes = normalizeScopes(tokens.grantedScopes ?? readGrantedScopes(readTokenDocument(file)));
 	const doc = {
 		token: {
 			access_token: tokens.access_token,
@@ -25658,7 +26116,8 @@ function writeAgyTokenFile(homeDir, tokens) {
 			...tokens.refresh_token ? { refresh_token: tokens.refresh_token } : {},
 			expiry: expiryIso
 		},
-		auth_method: "consumer"
+		auth_method: "consumer",
+		...grantedScopes.length > 0 ? { [AGY_TOKEN_SCOPE_KEY]: grantedScopes } : {}
 	};
 	writeFileSync(file, JSON.stringify(doc), {
 		encoding: "utf8",
@@ -25813,17 +26272,106 @@ function resolveClientPlatform() {
 		arch: process.arch === "x64" ? "amd64" : process.arch === "arm64" ? "arm64" : process.arch
 	};
 }
-function buildAgyCliUserAgent(version = "1.3.5") {
-	const { osType, arch } = resolveClientPlatform();
-	return `antigravity/cli/${version} (aidev_client; os_type=${osType}; arch=${arch}; cl=998863838; auth_method=consumer)`;
+/**
+* `cl=` changelist carried by agy 1.3.5 on the wire. The CLI converts a config string with
+* strconv.Atoi before formatting it (ops/relink/t2-binary-findings.md #10), so the number is
+* not a literal in the binary; the value below is the one observed byte-for-byte in the
+* official traffic dump (ops/relink/t2-traffic-findings.md #2.2: `…081540Z-2.req.txt:5`,
+* `…081812Z-35.req.txt:15`). `ANTIGRAVITY_CLI_CL` overrides it when a different agy build
+* reports a different changelist.
+*/
+const AGY_CLI_CHANGELIST = 998863838;
+/** CLI version segment of the User-Agent: the shared AGY_CLI_VERSION from client.ts, with the
+*  same `ANTIGRAVITY_CLI_VERSION` knob client.ts already honours, so quota and generation
+*  cannot drift to two different identities. */
+function agyCliVersion() {
+	return process.env.ANTIGRAVITY_CLI_VERSION?.trim() || "1.3.5";
 }
-buildAgyCliUserAgent("1.3.5");
-const AGY_QUOTA_USER_AGENT = "antigravity/1.1.15 linux/amd64";
-function agyUserAgent(version = "1.3.5") {
+function agyCliChangelist() {
+	const raw = process.env.ANTIGRAVITY_CLI_CL?.trim();
+	if (!raw) return AGY_CLI_CHANGELIST;
+	const parsed = Number.parseInt(raw, 10);
+	return Number.isFinite(parsed) && parsed > 0 ? parsed : AGY_CLI_CHANGELIST;
+}
+function buildAgyCliUserAgent(version = AGY_CLI_VERSION) {
+	const { osType, arch } = resolveClientPlatform();
+	return `antigravity/cli/${version} (aidev_client; os_type=${osType}; arch=${arch}; cl=${agyCliChangelist()}; auth_method=consumer)`;
+}
+/**
+* User-Agent for every codeassist RPC this service makes, including the two query RPCs
+* (`v1internal:fetchAvailableModels`, `v1internal:retrieveUserQuotaSummary`).
+*
+* The traffic dump proves agy 1.3.5 uses one single identity for all of them: the quota
+* summary request sends the same full CLI string as generation
+* (ops/relink/t2-contract-diff.md #29: "UA 与生成同一个全串";
+* ops/relink/t2-traffic-findings.md #2.2). The previously separate
+* `antigravity/1.1.15 linux/amd64` quota identity has no evidence anywhere in the
+* reverse-engineering artifacts and is gone.
+* `ANTIGRAVITY_USER_AGENT` overrides the whole string for a different agy build.
+*/
+function agyUserAgent(version = agyCliVersion()) {
+	const override = process.env.ANTIGRAVITY_USER_AGENT?.trim();
+	if (override) return override;
 	return buildAgyCliUserAgent(version);
 }
-function agyQuotaUserAgent() {
-	return AGY_QUOTA_USER_AGENT;
+function agyProjectScopedRequest(project) {
+	const trimmed = project.trim();
+	if (!trimmed) throw new Error("agy project-scoped request requires a non-empty project id");
+	return { project: trimmed };
+}
+/**
+* The operator-set project: the same variable `defaultProjectId` consults (client.ts:254).
+* It is the only non-loadCodeAssist id with an explicit source, so it stays honoured.
+*/
+function explicitProjectOverride() {
+	return process.env.ANTIGRAVITY_PROJECT_ID?.trim() || void 0;
+}
+/**
+* Decide whether the id `ensureProject` handed back is a project the backend actually offered
+* or this repo's own deterministic invention.
+*
+* `ensureProject` never throws and never returns empty: when loadCodeAssist and onboardUser both
+* fail to name a project it returns `defaultProjectId(seedOrEmail)`, whose non-env branch is
+* `stableProjectId(seed)`. So the unresolved case is not detectable by emptiness. Two independent
+* layers detect it:
+*   - `lookup.synthesized` — the flag client.ts recorded during the lookup itself
+*     (`getProjectResolution(token, seed)`). Authoritative even when the cached id's shape does
+*     not match this call's seed, which is what an id cached under a different seed, or an
+*     override set after the lookup, looks like.
+*   - the exact derivation `stableProjectId(seed)` — the backstop that still holds when the
+*     cache entry is gone (expired or evicted), so a derived id can never reach the wire just
+*     because the flag was unreadable.
+*
+* Precedence matches client.ts: a project the backend named wins over the env override; the
+* override only stands in when nothing was named.
+*/
+function classifyProjectResolution(resolved, seed, lookup) {
+	const project = resolved.trim();
+	const explicit = explicitProjectOverride();
+	if (!project) return {
+		projectUnresolved: true,
+		project: void 0,
+		source: "unresolved",
+		reason: `project lookup for seed "${seed}" returned no project id`
+	};
+	if (explicit && project === explicit) return {
+		projectUnresolved: false,
+		project,
+		source: "explicit-override",
+		reason: `ANTIGRAVITY_PROJECT_ID override set by the operator (${project})`
+	};
+	if (lookup?.synthesized || project === stableProjectId(seed)) return {
+		projectUnresolved: true,
+		project: void 0,
+		source: "unresolved",
+		reason: `loadCodeAssist/onboardUser named no project for seed "${seed}" ` + (lookup?.synthesized ? `and client.ts cached ${project} as a synthesized fallback` : `and ${project} is this repo's own sha1-derived id`) + " — no captured upstream request ever carried one"
+	};
+	return {
+		projectUnresolved: false,
+		project,
+		source: "loadCodeAssist",
+		reason: `project ${project} was named by loadCodeAssist/onboardUser`
+	};
 }
 function parseExpiryMs(value) {
 	if (typeof value === "number" && Number.isFinite(value)) return value < 1e11 ? value * 1e3 : value;
@@ -25974,11 +26522,34 @@ function readMacKeychainToken() {
 	}
 }
 var QuotaService = class {
-	preferredEndpointIndex = 0;
+	/**
+	* Endpoint memory per account (account id -> the endpoint that last answered 200).
+	*
+	* This used to be a single `preferredEndpointIndex` on the service: one account succeeding
+	* on `daily-cloudcode-pa` pinned that endpoint for *every* account, even accounts behind a
+	* different proxy or a different tier that only get answered elsewhere. Endpoint choice is
+	* a property of the account's path to Google, not of the service, so it is keyed by account
+	* now. Calls with no account identity neither read nor write it.
+	*/
+	preferredEndpointByAccount = /* @__PURE__ */ new Map();
+	/** In-flight project resolutions keyed by token+seed, so a quota+models pair fired in the
+	*  same refresh does not issue two loadCodeAssist calls for one account. client.ts's project
+	*  cache uses the same identity (`getProjectResolution`), so a fallback synthesized for one
+	*  seed is never served to a different seed that shares the access token. */
+	projectResolutions = /* @__PURE__ */ new Map();
+	/** Last resolution per account, so an account whose call was skipped names the reason in its
+	*  own result (discoverAvailableModels account failures) instead of being filed as an
+	*  endpoint failure. */
+	projectResolutionByAccount = /* @__PURE__ */ new Map();
 	pool;
 	refreshLocks = /* @__PURE__ */ new Map();
 	lastEndpointErrors = [];
 	lastQuotaEndpointErrors = [];
+	/** Project resolution behind the last fetchQuotaSummary / fetchAvailableModels call.
+	*  `projectUnresolved: true` means the lookup named no upstream-accepted project and the RPC
+	*  was skipped: no request was sent, and the reason is in the matching endpoint-error list. */
+	lastQuotaProjectResolution;
+	lastModelsProjectResolution;
 	lastDiscoveryDiagnostics;
 	constructor(pool) {
 		this.pool = pool;
@@ -26092,29 +26663,125 @@ var QuotaService = class {
 		} catch {}
 		return null;
 	}
-	getOrderedEndpoints() {
-		const total = AGY_ENDPOINTS.length;
-		const ordered = [];
-		for (let i = 0; i < total; i++) ordered.push(AGY_ENDPOINTS[(this.preferredEndpointIndex + i) % total]);
-		return ordered;
+	getOrderedEndpoints(accountKey, overrides) {
+		const base = overrides && overrides.length > 0 ? [...overrides] : [...AGY_ENDPOINTS];
+		const remembered = accountKey ? this.preferredEndpointByAccount.get(accountKey) : void 0;
+		if (!remembered) return base;
+		const at = base.indexOf(remembered);
+		if (at <= 0) return base;
+		return [
+			remembered,
+			...base.slice(0, at),
+			...base.slice(at + 1)
+		];
 	}
-	async fetchQuotaSummary(accessToken, proxyUrl) {
-		const endpoints = this.getOrderedEndpoints();
+	/** Remember which endpoint answered this account, so the next call starts there. */
+	rememberEndpoint(accountKey, endpoint) {
+		if (accountKey) this.preferredEndpointByAccount.set(accountKey, endpoint);
+	}
+	/**
+	* Query context for one pooled account: the id scopes its endpoint memory and its recorded
+	* project resolution, and the seed is exactly what adapter.ts / oneshot.ts hand to
+	* `ensureProject` for generation, so quota and generation look the project up under one
+	* identity and one loadCodeAssist answer serves both.
+	*/
+	requestContextFor(account) {
+		return {
+			accountKey: account.id,
+			projectSeed: account.alias || account.id
+		};
+	}
+	/**
+	* Resolve the `project` the two query RPCs must carry.
+	*
+	* `ensureProject` is the loadCodeAssist -> onboardUser -> fallback chain client.ts already
+	* uses for generation, and loadCodeAssist is exactly how agy itself learns the id it puts in
+	* these bodies (the captured response carries `cloudaicompanionProject:"aicode-consumers"`,
+	* ops/relink/t2-traffic-findings.md #2.4, and that value reappears verbatim as `project` on
+	* every captured request). The endpoints handed to it are the same ordered list the RPC loop
+	* will walk, so a quota refresh never reaches a host the caller did not already approve.
+	*
+	* The chain's last resort is `defaultProjectId(seed)`, a sha1-shaped id this repo invented.
+	* It is classified here instead of being sent: nothing in the capture or in the binary's
+	* strings shows such an id being accepted, so an unresolved lookup is reported as unresolved
+	* and the caller skips the RPC.
+	*/
+	async resolveRequestProject(accessToken, proxyUrl, context) {
+		const seed = context.projectSeed?.trim() || "antigravity-default";
+		const key = `${accessToken}\u0000${seed}`;
+		const running = this.projectResolutions.get(key);
+		if (running) return running;
+		const resolution = ensureProject(accessToken, seed, proxyUrl, this.getOrderedEndpoints(context.accountKey, context.endpoints)).then((project) => classifyProjectResolution(project, seed, getProjectResolution(accessToken, seed))).finally(() => {
+			this.projectResolutions.delete(key);
+		});
+		this.projectResolutions.set(key, resolution);
+		return resolution;
+	}
+	/**
+	* Headers for the two project-scoped query RPCs.
+	* The captured agy header union over all 67 codeassist flows is 10 entries wide and contains
+	* none of `x-goog-api-client`, `x-goog-user-project`, `client-metadata`, `Accept` or
+	* `x-goog-api-key` (ops/relink/t2-traffic-findings.md #2.2: those are listed as "不存在的头"),
+	* so these requests deliberately send nothing beyond bearer + content type + CLI identity.
+	* `Accept-Encoding`/`Content-Length` are added by the transport, not here.
+	*/
+	queryRequestHeaders(accessToken) {
+		return {
+			Authorization: `Bearer ${accessToken}`,
+			"Content-Type": "application/json",
+			"User-Agent": agyUserAgent()
+		};
+	}
+	/**
+	* Resolve the project for one query RPC and record what the resolution produced.
+	*
+	* An unresolved outcome is pushed into `errors` — the same array each RPC loop publishes as
+	* `lastQuotaEndpointErrors` / `lastEndpointErrors` — so the caller can skip the upstream call
+	* with the reason already on the observability surface. A resolution that throws is filed the
+	* same way; nothing is swallowed and no derived id reaches the wire.
+	*/
+	async resolveProjectForQuery(accessToken, proxyUrl, context, errors) {
+		let resolution;
+		try {
+			resolution = await this.resolveRequestProject(accessToken, proxyUrl, context);
+		} catch (err) {
+			resolution = {
+				projectUnresolved: true,
+				project: void 0,
+				source: "unresolved",
+				reason: `project resolution threw: ${err instanceof Error ? err.message : String(err)}`
+			};
+		}
+		if (context.accountKey) this.projectResolutionByAccount.set(context.accountKey, resolution);
+		if (resolution.projectUnresolved) errors.push(`project unresolved: ${resolution.reason}`);
+		return resolution;
+	}
+	/**
+	* `null` means "no summary", and the two ways that happens stay distinguishable: a project
+	* this installation cannot name sends nothing and is recorded in `lastQuotaProjectResolution`
+	* plus `lastQuotaEndpointErrors`; an endpoint that refused an accepted project is recorded in
+	* `lastQuotaEndpointErrors` alone.
+	*/
+	async fetchQuotaSummary(accessToken, proxyUrl, context = {}) {
+		const endpoints = this.getOrderedEndpoints(context.accountKey, context.endpoints);
 		const endpointErrors = [];
+		const resolution = await this.resolveProjectForQuery(accessToken, proxyUrl, context, endpointErrors);
+		this.lastQuotaProjectResolution = resolution;
+		if (resolution.projectUnresolved) {
+			this.lastQuotaEndpointErrors = endpointErrors;
+			return null;
+		}
+		const body = JSON.stringify(agyProjectScopedRequest(resolution.project));
 		for (let i = 0; i < endpoints.length; i++) {
 			const endpoint = endpoints[i];
 			try {
 				const res = await agyFetch(`${endpoint}/v1internal:retrieveUserQuotaSummary`, {
 					method: "POST",
-					headers: {
-						Authorization: `Bearer ${accessToken}`,
-						"Content-Type": "application/json",
-						"User-Agent": agyQuotaUserAgent()
-					},
-					body: JSON.stringify({})
+					headers: this.queryRequestHeaders(accessToken),
+					body
 				}, proxyUrl);
 				if (res.ok) {
-					this.preferredEndpointIndex = AGY_ENDPOINTS.indexOf(endpoint);
+					this.rememberEndpoint(context.accountKey, endpoint);
 					this.lastQuotaEndpointErrors = endpointErrors;
 					return await res.json();
 				}
@@ -26127,23 +26794,31 @@ var QuotaService = class {
 		this.lastQuotaEndpointErrors = endpointErrors;
 		return null;
 	}
-	async fetchAvailableModels(accessToken, proxyUrl) {
-		const endpoints = this.getOrderedEndpoints();
+	/**
+	* `null` means "no model payload", with the cause recorded: `lastModelsProjectResolution`
+	* says whether an upstream-accepted project existed at all (skipped, zero requests sent) and
+	* `lastEndpointErrors` says which hosts refused one that did.
+	*/
+	async fetchAvailableModels(accessToken, proxyUrl, context = {}) {
+		const endpoints = this.getOrderedEndpoints(context.accountKey, context.endpoints);
 		const endpointErrors = [];
+		const resolution = await this.resolveProjectForQuery(accessToken, proxyUrl, context, endpointErrors);
+		this.lastModelsProjectResolution = resolution;
+		if (resolution.projectUnresolved) {
+			this.lastEndpointErrors = endpointErrors;
+			return null;
+		}
+		const body = JSON.stringify(agyProjectScopedRequest(resolution.project));
 		for (let i = 0; i < endpoints.length; i++) {
 			const endpoint = endpoints[i];
 			try {
 				const res = await agyFetch(`${endpoint}/v1internal:fetchAvailableModels`, {
 					method: "POST",
-					headers: {
-						Authorization: `Bearer ${accessToken}`,
-						"Content-Type": "application/json",
-						"User-Agent": agyUserAgent()
-					},
-					body: JSON.stringify({})
+					headers: this.queryRequestHeaders(accessToken),
+					body
 				}, proxyUrl);
 				if (res.ok) {
-					this.preferredEndpointIndex = AGY_ENDPOINTS.indexOf(endpoint);
+					this.rememberEndpoint(context.accountKey, endpoint);
 					this.lastEndpointErrors = endpointErrors;
 					return await res.json();
 				}
@@ -26197,11 +26872,18 @@ var QuotaService = class {
 				error: "Failed to acquire valid access token"
 			};
 			try {
-				const res = await this.fetchAvailableModels(accessToken, acc.proxyUrl);
-				if (!res) return {
-					res: null,
-					error: "fetchAvailableModels returned null from all endpoints"
-				};
+				const res = await this.fetchAvailableModels(accessToken, acc.proxyUrl, this.requestContextFor(acc));
+				if (!res) {
+					const resolution = this.projectResolutionByAccount.get(acc.id);
+					if (resolution?.projectUnresolved) return {
+						res: null,
+						error: `project unresolved: ${resolution.reason}`
+					};
+					return {
+						res: null,
+						error: "fetchAvailableModels returned null from all endpoints"
+					};
+				}
 				return { res };
 			} catch (err) {
 				return {
@@ -26300,17 +26982,18 @@ var QuotaService = class {
 			if (info?.email) email = info.email;
 		}
 		if (email && email !== account.email) this.pool.resetAccountIdentity(account.id, email);
+		const queryContext = this.requestContextFor(account);
 		let summary = null;
 		let discovered = null;
 		if (options?.summaryOnly) {
-			summary = await this.fetchQuotaSummary(accessToken, account.proxyUrl);
+			summary = await this.fetchQuotaSummary(accessToken, account.proxyUrl, queryContext);
 			if (!summary?.groups?.some((g) => {
 				const dName = (g.displayName || "").toLowerCase();
 				const desc = (g.description || "").toLowerCase();
 				return dName.includes("gemini") || desc.includes("gemini");
-			})) discovered = await this.fetchAvailableModels(accessToken, account.proxyUrl);
+			})) discovered = await this.fetchAvailableModels(accessToken, account.proxyUrl, queryContext);
 		} else {
-			const [sum, disc] = await Promise.all([this.fetchQuotaSummary(accessToken, account.proxyUrl), this.fetchAvailableModels(accessToken, account.proxyUrl)]);
+			const [sum, disc] = await Promise.all([this.fetchQuotaSummary(accessToken, account.proxyUrl, queryContext), this.fetchAvailableModels(accessToken, account.proxyUrl, queryContext)]);
 			summary = sum;
 			discovered = disc;
 		}
@@ -26602,30 +27285,115 @@ const ENDPOINT_FALLBACKS = [
 	"https://cloudcode-pa.googleapis.com",
 	"https://daily-cloudcode-pa.sandbox.googleapis.com"
 ];
+/** LoadCodeAssistRequest.mode — 0 MODE_UNSPECIFIED / 1 FULL_ELIGIBILITY_CHECK / 2 HEALTH_CHECK. */
+const AGY_LOAD_MODE = {
+	/** What agy itself sends: protojson drops default-valued enums, and the captured
+	*  loadCodeAssist body (`{"metadata":{"ideType":"ANTIGRAVITY"}}`) carries no mode field. */
+	unspecified: "MODE_UNSPECIFIED",
+	/** Ask for the full entitlement view (allowedTiers / ineligibleTiers). */
+	eligibilityCheck: "FULL_ELIGIBILITY_CHECK",
+	/** Liveness probe variant used by keepalive style callers. */
+	healthCheck: "HEALTH_CHECK"
+};
+/** ClientMetadata.ideType — IdeType enum member (JSON uses the bare member name). This is the
+*  only ClientMetadata member agy sets: every captured request body is exactly
+*  `{"metadata":{"ideType":"ANTIGRAVITY"}}` (38 bytes, t2-traffic-findings.md). */
+const AGY_IDE_TYPE = "ANTIGRAVITY";
+/** The other ClientMetadata members stay unset, exactly as agy leaves them — proto3 drops unset
+*  fields from JSON. Recorded so nobody re-invents them: `PLATFORM_LINUX`, the value this client
+*  used to put in the now-deleted `Client-Metadata` header, is not a member of
+*  ClientMetadata.Platform, whose full member list (read out of the FileDescriptorProto embedded in
+*  the binary) is PLATFORM_UNSPECIFIED, DARWIN_AMD64, DARWIN_ARM64, LINUX_AMD64, LINUX_ARM64,
+*  WINDOWS_AMD64. IdeType's members are IDE_UNSPECIFIED, VSCODE, INTELLIJ,
+*  VSCODE_CLOUD_WORKSTATION, INTELLIJ_CLOUD_WORKSTATION, CLOUD_SHELL, CIDER, CLOUD_RUN,
+*  ANDROID_STUDIO, ANTIGRAVITY, JETSKI, COLAB, FIREBASE, CHROME_DEVTOOLS, GEMINI_CLI; PluginType's
+*  are PLUGIN_UNSPECIFIED, CLOUD_CODE, GEMINI, AIPLUGIN_INTELLIJ, AIPLUGIN_STUDIO, PANTHEON.
+*  updateChannel (field 5) and duetProject (field 6) are plain strings with no proto default, and
+*  agy sends neither. */
+/** CLI version the HTTP User-Agent advertises when ANTIGRAVITY_CLI_VERSION is not pinned. */
+const AGY_CLI_VERSION = "1.3.5";
+/** Body fields of the generation request, exactly as captured: `requestType` is the lowercase
+*  `agent` for the main conversation and `checkpoint` for session-title requests, and
+*  `userAgent` is the short name `antigravity` (not the full HTTP User-Agent). */
+const AGY_REQUEST_TYPE = {
+	agent: "agent",
+	checkpoint: "checkpoint"
+};
+const AGY_WIRE_USER_AGENT = "antigravity";
+/** Tier ids are data, not constants: the only ones seen in live loadCodeAssist payloads are
+*  `free-tier`, `standard-tier` and `g1-pro-tier` (ops/relink/t3-evidence/b1-lca-antigravity),
+*  and the binary contains no `TIER_FREE` literal. These markers only classify what the
+*  response returned; the tierId sent to onboardUser always comes from the response itself. */
+const AGY_TIER_FREE_MARKER = "free";
+const AGY_TIER_TRIAL_MARKER = "trial";
+/** Known paid tiers, best first. Ids not listed here still qualify, they just rank lower. */
+const AGY_TIER_PREFERENCE = ["g1-pro-tier", "standard-tier"];
+/** Wire-model prefix that marks a Gemini model for the `used_non_gemini_model` label. */
+const GEMINI_WIRE_MODEL_PREFIX = "gemini";
+/** onboardUser is a long-running operation; polling stays bounded so a slow LRO can never
+*  block a generation request (ops/tests can retune via the ANTIGRAVITY_ONBOARD_POLL_* envs). */
+const ONBOARD_POLL_INTERVAL_MS = 2e3;
+const ONBOARD_POLL_MAX_ATTEMPTS = 12;
+const ONBOARD_POLL_DEADLINE_MS = 6e4;
+/** The descriptor does not pin down the request message behind onboardUserBackgroundTasks,
+*  so both protojson shapes are attempted with a hard attempt cap. */
+const BACKGROUND_TASK_MAX_ATTEMPTS = 3;
 const PROJECT_CACHE_TTL_MS = 18e5;
+const PROJECT_CACHE_MAX_ENTRIES = 32;
+/** Seed used when a caller gives no alias: the same value quota.ts calls AGY_PROJECT_FALLBACK_SEED. */
+const DEFAULT_PROJECT_SEED = "antigravity-default";
+/**
+* `ensureProject` results, keyed by token AND seed — the same `${token}\u0000${seed}` identity
+* quota.ts already uses for its own in-flight lookup map (quota.ts:679).
+*
+* Keying by token alone was the defect reviewer2 reproduced: `ensureProject(t, 'alias-A')`
+* synthesized sha1("antigravity:alias-A"), cached it under `t`, and `ensureProject(t, 'alias-B')`
+* returned that same id with zero loadCodeAssist calls — which quota.ts then credited to the
+* backend and sent as `{"project": "<A's derived id>"}` for account B.
+*/
 const projectCache = /* @__PURE__ */ new Map();
+/**
+* Projects an upstream response really named, keyed by token only (the plain `loadCodeAssist`
+* lookup has no seed to key on). A backend-named project belongs to the account, so sharing it
+* across seeds is legitimate and avoids a second round-trip; a synthesized id is *never* stored
+* here, which is structurally what stops `loadCodeAssist` from handing an invented id back as if
+* it had been discovered.
+*/
+const discoveredProjectCache = /* @__PURE__ */ new Map();
+/** Cache identity for one project lookup. Mirrors quota.ts's `${accessToken}\u0000${seed}` key. */
+function projectCacheKey(token, seed) {
+	return `${token}\u0000${seed}`;
+}
 const DISCOVERY_TIMEOUT_MS = 1e4;
 function endpointCandidates(customBaseUrl) {
 	const explicit = customBaseUrl?.trim() || process.env.ANTIGRAVITY_BASE_URL?.trim();
 	if (explicit) return [explicit.replace(/\/+$/, "")];
 	return [...ENDPOINT_FALLBACKS];
 }
+const LOG_PREFIX = "[agy-client]";
+function envNumber(name, fallback) {
+	const raw = process.env[name]?.trim();
+	if (!raw) return fallback;
+	const parsed = Number(raw);
+	return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
+}
+/**
+* HTTP User-Agent, byte-for-byte the one agy sends (t2-traffic-findings.md:41):
+* `antigravity/cli/<version> (aidev_client; os_type=…; arch=…; cl=998863838; auth_method=consumer)`.
+* ANTIGRAVITY_CLI_VERSION stays the knob for pinning another CLI version.
+*/
 function defaultUserAgent() {
-	return buildAgyCliUserAgent(process.env.ANTIGRAVITY_CLI_VERSION || "1.3.5");
+	const pinned = process.env.ANTIGRAVITY_CLI_VERSION?.trim();
+	return buildAgyCliUserAgent(pinned || "1.3.5");
+}
+function agyClientMetadata() {
+	return { ideType: AGY_IDE_TYPE };
 }
 function antigravityHeaders(token) {
-	const platform = process.platform === "darwin" ? "PLATFORM_DARWIN" : process.platform === "win32" ? "PLATFORM_WINDOWS" : "PLATFORM_LINUX";
 	return {
 		Authorization: `Bearer ${token}`,
 		"Content-Type": "application/json",
-		Accept: "text/event-stream",
-		"User-Agent": defaultUserAgent(),
-		"X-Goog-Api-Client": "google-cloud-sdk vscode_cloudshelleditor/0.1",
-		"Client-Metadata": JSON.stringify({
-			ideType: "ANTIGRAVITY",
-			platform,
-			pluginType: "GEMINI"
-		})
+		"User-Agent": defaultUserAgent()
 	};
 }
 function stableProjectId(seed) {
@@ -26685,24 +27453,164 @@ async function listCloudAICompanionProjects(token, proxyUrl, customEndpoints) {
 		if (proj) return proj;
 	} catch {}
 }
-/**
-* Discover project ID via loadCodeAssist (with 30-min in-memory LRU cache keyed by token).
-*/
-async function loadCodeAssist(token, proxyUrl, customEndpoints, bypassCache = false) {
-	if (!bypassCache) {
-		const cached = projectCache.get(token);
-		if (cached && cached.expiresAt > Date.now()) {
-			projectCache.delete(token);
-			projectCache.set(token, cached);
-			return cached.projectId;
-		}
+function parseTier(value) {
+	if (!isRecord$1(value)) return void 0;
+	const tier = {};
+	const id = asString(value.id);
+	if (id) tier.id = id;
+	const name = asString(value.name);
+	if (name) tier.name = name;
+	const description = asString(value.description);
+	if (description) tier.description = description;
+	if (typeof value.isDefault === "boolean") tier.isDefault = value.isDefault;
+	if (typeof value.userDefinedCloudaicompanionProject === "boolean") tier.userDefinedCloudaicompanionProject = value.userDefinedCloudaicompanionProject;
+	if (typeof value.usesGcpTos === "boolean") tier.usesGcpTos = value.usesGcpTos;
+	return tier.id ? tier : void 0;
+}
+function parseTierList(value) {
+	if (!Array.isArray(value)) return [];
+	const tiers = [];
+	for (const entry of value) {
+		const tier = parseTier(entry);
+		if (tier) tiers.push(tier);
 	}
-	const body = JSON.stringify({ metadata: {
-		ideType: "ANTIGRAVITY",
-		platform: "PLATFORM_UNSPECIFIED",
-		pluginType: "GEMINI"
-	} });
-	const endpoints = customEndpoints && customEndpoints.length ? customEndpoints : endpointCandidates();
+	return tiers;
+}
+function parseIneligibleTier(value) {
+	if (!isRecord$1(value)) return void 0;
+	const entry = {};
+	const tierId = asString(value.tierId);
+	if (tierId) entry.tierId = tierId;
+	const tierName = asString(value.tierName);
+	if (tierName) entry.tierName = tierName;
+	const reasonCode = asString(value.reasonCode);
+	if (reasonCode) entry.reasonCode = reasonCode;
+	const reasonMessage = asString(value.reasonMessage);
+	if (reasonMessage) entry.reasonMessage = reasonMessage;
+	return Object.keys(entry).length > 0 ? entry : void 0;
+}
+/** Pure (network-free) parser for LoadCodeAssistResponse, kept separate so the tier/eligibility
+*  decisions can be tested against recorded payloads. */
+function parseLoadCodeAssistResponse(data) {
+	const info = {
+		allowedTiers: [],
+		ineligibleTiers: []
+	};
+	if (!isRecord$1(data)) return info;
+	const projectId = extractProjectId(data);
+	if (projectId) info.projectId = projectId;
+	const currentTier = parseTier(data.currentTier);
+	if (currentTier) info.currentTier = currentTier;
+	info.allowedTiers = parseTierList(data.allowedTiers);
+	for (const entry of Array.isArray(data.ineligibleTiers) ? data.ineligibleTiers : []) {
+		const parsed = parseIneligibleTier(entry);
+		if (parsed) info.ineligibleTiers.push(parsed);
+	}
+	const paidTier = parseTier(data.paidTier);
+	if (paidTier?.id) {
+		info.paidTier = paidTier;
+		info.paidTierId = paidTier.id;
+	}
+	if (typeof data.gcpManaged === "boolean") info.gcpManaged = data.gcpManaged;
+	const subscriptionUri = asString(data.manageSubscriptionUri) ?? asString(data.upgradeSubscriptionUri) ?? (isRecord$1(data.paidTier) ? asString(data.paidTier.upgradeSubscriptionUri) : void 0);
+	if (subscriptionUri) info.subscriptionUri = subscriptionUri;
+	const firstBlocker = info.ineligibleTiers[0];
+	if (firstBlocker?.reasonCode) info.ineligibleReason = firstBlocker.reasonCode;
+	return info;
+}
+/** Free / trial tiers, classified from the tier id itself (`free-tier`, `…-trial`). */
+function isFreeTierId(tierId) {
+	const id = tierId.trim().toLowerCase();
+	return id.includes(AGY_TIER_FREE_MARKER) || id.includes(AGY_TIER_TRIAL_MARKER);
+}
+function tierScore(tier, paidTierId, currentTierId) {
+	const id = tier.id?.trim().toLowerCase() ?? "";
+	let score = 0;
+	if (paidTierId && id === paidTierId) score += 4;
+	if (currentTierId && id === currentTierId) score += 3;
+	const preferred = AGY_TIER_PREFERENCE.indexOf(id);
+	if (preferred >= 0) score += AGY_TIER_PREFERENCE.length - preferred;
+	if (tier.userDefinedCloudaicompanionProject === true || tier.usesGcpTos === true) score += 1;
+	if (tier.isDefault === true) score += 1;
+	return score;
+}
+/**
+* Pick the tierId to send to onboardUser: the highest-ranked tier that is not a free/trial tier
+* and is not listed in `ineligibleTiers[]`. Only when every allowed tier is free does a free tier
+* get used — and even then the id is the server's own id, never an invented literal.
+*/
+function selectTierId(info) {
+	const blocked = /* @__PURE__ */ new Set();
+	for (const entry of info.ineligibleTiers) {
+		const tierId = entry.tierId?.trim().toLowerCase();
+		if (tierId) blocked.add(tierId);
+	}
+	const allowed = info.allowedTiers.filter((tier) => typeof tier.id === "string" && tier.id.trim() !== "" && !blocked.has(tier.id.trim().toLowerCase()));
+	if (allowed.length === 0) return void 0;
+	const nonFree = allowed.filter((tier) => !isFreeTierId(tier.id));
+	const pool = nonFree.length > 0 ? nonFree : allowed;
+	const paidTierId = info.paidTierId?.trim().toLowerCase();
+	const currentTierId = info.currentTier?.id?.trim().toLowerCase();
+	return pool.map((tier, order) => ({
+		tier,
+		order,
+		score: tierScore(tier, paidTierId, currentTierId)
+	})).sort((a, b) => b.score - a.score || a.order - b.order)[0]?.tier.id.trim();
+}
+/** LoadCodeAssistRequest body: 1 cloudaicompanionProject, 2 metadata (ClientMetadata), 3 mode.
+*  `mode` is only emitted when a check is actually requested — protojson drops default-valued
+*  enums, which is why agy's captured body has no mode field at all. */
+function loadCodeAssistBody(options = {}) {
+	const body = { metadata: agyClientMetadata() };
+	if (options.projectId) body.cloudaicompanionProject = options.projectId;
+	if (options.mode && options.mode !== AGY_LOAD_MODE.unspecified) body.mode = options.mode;
+	return body;
+}
+/**
+* Record a resolved project id.
+*
+* `seed === undefined` marks the seedless lookup (plain `loadCodeAssist`): such a result may
+* only go into the token-keyed cache. A project an upstream response named is also recorded
+* under its own (token, seed) key so a later lookup for that seed reuses it without another
+* round-trip. A synthesized id is recorded under its (token, seed) key and never anywhere else —
+* that is the boundary that keeps one seed's derivation from being served to another seed.
+*/
+function cacheProject(token, seed, projectId, options) {
+	const entry = {
+		projectId,
+		expiresAt: Date.now() + PROJECT_CACHE_TTL_MS,
+		...options.info ? { info: options.info } : {},
+		synthesized: options.synthesized
+	};
+	if (seed !== void 0) rememberProject(projectCache, projectCacheKey(token, seed), entry);
+	if (seed === void 0 || !options.synthesized) rememberProject(discoveredProjectCache, token, entry);
+}
+/** Insert or refresh an entry as the most recently used, capped at PROJECT_CACHE_MAX_ENTRIES. */
+function rememberProject(cache, key, entry) {
+	cache.delete(key);
+	cache.set(key, entry);
+	if (cache.size > PROJECT_CACHE_MAX_ENTRIES) {
+		const oldest = cache.keys().next().value;
+		if (oldest !== void 0) cache.delete(oldest);
+	}
+}
+/** Live entry for a key (touched so the LRU window slides); undefined when absent or expired. */
+function liveProject(cache, key) {
+	const entry = cache.get(key);
+	if (entry === void 0) return void 0;
+	if (entry.expiresAt <= Date.now()) {
+		cache.delete(key);
+		return;
+	}
+	cache.delete(key);
+	cache.set(key, entry);
+	return entry;
+}
+/** One loadCodeAssist round over the endpoint list; returns undefined if none produced a body. */
+async function requestLoadCodeAssist(token, proxyUrl, endpoints, options) {
+	const body = JSON.stringify(loadCodeAssistBody(options));
+	let lastStatus;
+	let lastError;
 	for (const endpoint of endpoints) try {
 		const res = await agyFetch(`${endpoint}/v1internal:loadCodeAssist`, {
 			method: "POST",
@@ -26710,116 +27618,314 @@ async function loadCodeAssist(token, proxyUrl, customEndpoints, bypassCache = fa
 			body,
 			signal: AbortSignal.timeout(DISCOVERY_TIMEOUT_MS)
 		}, proxyUrl);
-		if (!res.ok) continue;
-		let proj = extractProjectId(await res.json().catch(() => ({})));
-		if (!proj) proj = await listCloudAICompanionProjects(token, proxyUrl, endpoints);
-		if (proj) {
-			projectCache.set(token, {
-				projectId: proj,
-				expiresAt: Date.now() + PROJECT_CACHE_TTL_MS
-			});
-			if (projectCache.size > 32) {
-				const oldest = projectCache.keys().next().value;
-				if (oldest !== void 0) projectCache.delete(oldest);
-			}
-			return proj;
+		if (!res.ok) {
+			lastStatus = res.status;
+			continue;
 		}
-	} catch {}
+		const data = await res.json().catch(() => void 0);
+		if (!isRecord$1(data)) {
+			lastError = /* @__PURE__ */ new Error(`loadCodeAssist on ${endpoint} returned a non-object body`);
+			continue;
+		}
+		return parseLoadCodeAssistResponse(data);
+	} catch (err) {
+		lastError = err instanceof Error ? err : new Error(String(err));
+	}
+	console.warn(`${LOG_PREFIX} loadCodeAssist produced no usable response on ${endpoints.length} endpoint(s) (mode=${options.mode ?? AGY_LOAD_MODE.unspecified}, lastStatus=${lastStatus ?? "n/a"}, lastError=${lastError?.message ?? "no body parsed"})`);
 }
-async function onboardUser(token, tierId = "TIER_FREE", proxyUrl, customEndpoints) {
-	const body = JSON.stringify({
-		tierId,
-		metadata: {
-			ideType: "ANTIGRAVITY",
-			platform: "PLATFORM_UNSPECIFIED",
-			pluginType: "GEMINI"
-		}
-	});
+/**
+* Discover project ID via loadCodeAssist (30-min in-memory LRU cache keyed by token; that cache
+* only ever holds a project an upstream response named — see {@link discoveredProjectCache}).
+* `mode` defaults to MODE_UNSPECIFIED; pass AGY_LOAD_MODE.healthCheck for a liveness probe and
+* AGY_LOAD_MODE.eligibilityCheck for the full entitlement view.
+*/
+async function loadCodeAssist(token, proxyUrl, customEndpoints, bypassCache = false, mode = AGY_LOAD_MODE.unspecified) {
+	if (!bypassCache) {
+		const cached = liveProject(discoveredProjectCache, token);
+		if (cached) return cached.projectId;
+	}
+	const endpoints = customEndpoints && customEndpoints.length ? customEndpoints : endpointCandidates();
+	const info = await requestLoadCodeAssist(token, proxyUrl, endpoints, { mode });
+	const proj = info?.projectId ?? await listCloudAICompanionProjects(token, proxyUrl, endpoints);
+	if (proj) {
+		cacheProject(token, void 0, proj, {
+			info,
+			synthesized: false
+		});
+		return proj;
+	}
+}
+/**
+* loadCodeAssist variant that keeps the tier / eligibility payload (allowedTiers,
+* ineligibleTiers, currentTier, paidTier, gcpManaged, subscription uri) instead of only the
+* project id. It asks for FULL_ELIGIBILITY_CHECK and degrades to the mode agy itself sends if
+* the deployment rejects that field, so an unknown build never costs us the tier data.
+*/
+async function loadCodeAssistTiers(token, proxyUrl, customEndpoints, mode = AGY_LOAD_MODE.eligibilityCheck) {
+	const endpoints = customEndpoints && customEndpoints.length ? customEndpoints : endpointCandidates();
+	const info = await requestLoadCodeAssist(token, proxyUrl, endpoints, { mode });
+	if (info) return info;
+	if (mode === AGY_LOAD_MODE.unspecified) return void 0;
+	console.warn(`${LOG_PREFIX} loadCodeAssist(${mode}) failed; retrying with ${AGY_LOAD_MODE.unspecified} so tier selection still has data to work from`);
+	return requestLoadCodeAssist(token, proxyUrl, endpoints, { mode: AGY_LOAD_MODE.unspecified });
+}
+/** OnboardUserRequest: 1 tier_id, 2 cloudaicompanion_project, 3 metadata (ClientMetadata).
+*  `tierId` is required and must be an id taken from the loadCodeAssist payload
+*  (allowedTiers[].id / currentTier.id): the agy binary has no `TIER_FREE` literal, so inventing a
+*  tier id here would send a request the real CLI can never make. */
+async function onboardUser(token, tierId, proxyUrl, customEndpoints, options) {
+	const tier = tierId.trim();
+	if (!tier) throw new Error(`${LOG_PREFIX} onboardUser needs a tierId from loadCodeAssist (allowedTiers[].id / currentTier.id); the Antigravity API has no TIER_FREE tier id.`);
+	const body = {
+		tierId: tier,
+		metadata: agyClientMetadata()
+	};
+	const knownProject = options?.projectId?.trim();
+	if (knownProject) body.cloudaicompanionProject = knownProject;
+	let lastStatus;
+	let lastError;
 	const endpoints = customEndpoints && customEndpoints.length ? customEndpoints : endpointCandidates();
 	for (const endpoint of endpoints) try {
 		const res = await agyFetch(`${endpoint}/v1internal:onboardUser`, {
 			method: "POST",
 			headers: antigravityHeaders(token),
-			body,
+			body: JSON.stringify(body),
 			signal: AbortSignal.timeout(DISCOVERY_TIMEOUT_MS)
 		}, proxyUrl);
-		if (res.ok) return await res.json().catch(() => null);
-	} catch {}
+		if (res.ok) {
+			const parsed = parseOnboardResponse(await res.json().catch(() => void 0));
+			if (parsed) return parsed;
+			lastError = /* @__PURE__ */ new Error(`${endpoint} returned a body that is not an Operation`);
+			continue;
+		}
+		lastStatus = res.status;
+	} catch (err) {
+		lastError = err instanceof Error ? err : new Error(String(err));
+	}
+	console.warn(`${LOG_PREFIX} onboardUser(tier=${tier}) produced no Operation on ${endpoints.length} endpoint(s) (lastStatus=${lastStatus ?? "n/a"}, lastError=${lastError?.message ?? "no body parsed"})`);
 	return null;
 }
-async function getOperation(token, operationName, proxyUrl, customEndpoints) {
-	const body = JSON.stringify({ name: operationName });
+function parseOnboardResponse(data) {
+	if (!isRecord$1(data)) return void 0;
+	const out = {};
+	if (typeof data.done === "boolean") out.done = data.done;
+	const name = asString(data.name);
+	if (name) out.name = name;
+	if (isRecord$1(data.response)) {
+		const response = {};
+		if (isRecord$1(data.response.cloudaicompanionProject)) {
+			const projectId = asString(data.response.cloudaicompanionProject.id);
+			if (projectId) response.cloudaicompanionProject = { id: projectId };
+		}
+		const project = asString(data.response.project);
+		if (project) response.project = project;
+		if (Object.keys(response).length > 0) out.response = response;
+	}
+	if (isRecord$1(data.error)) {
+		const error = {};
+		if (typeof data.error.code === "number") error.code = data.error.code;
+		const message = asString(data.error.message);
+		if (message) error.message = message;
+		if (Object.keys(error).length > 0) out.error = error;
+	}
+	return out;
+}
+/**
+* Continue an onboardUser long-running operation. The agy method table has
+* `/v1internal:onboardUser` and `/v1internal:onboardUserBackgroundTasks` but no
+* `/v1internal:getOperation` — that one only exists in the vendored genai library, which is why
+* this is the only polling entry point this client uses.
+*
+* cloudcode.proto spells the request message out as OnboardUserBackgroundTasksRequest:
+*   1 projectNumber (int64) · 2 operation (.google.longrunning.GetOperationRequest) ·
+*   3 tierId (string) · 4 isAntigravityUser (bool)
+* so the operation name goes inside `operation` (GetOperationRequest.name), which is the first
+* shape tried. No capture or log on this machine ever shows the live body — onboarding completed
+* long ago here (~/.gemini/antigravity-cli/cache/onboarding.json) — so the two older shapes are
+* kept as fallbacks under a hard attempt cap, and a dead end is reported rather than swallowed.
+*/
+async function onboardUserBackgroundTasks(token, operationName, proxyUrl, customEndpoints) {
+	const name = operationName.trim();
+	if (!name) throw new Error(`${LOG_PREFIX} onboardUserBackgroundTasks needs the operation name from onboardUser`);
 	const endpoints = customEndpoints && customEndpoints.length ? customEndpoints : endpointCandidates();
-	for (const endpoint of endpoints) try {
-		const res = await agyFetch(`${endpoint}/v1internal:getOperation`, {
-			method: "POST",
-			headers: antigravityHeaders(token),
-			body,
-			signal: AbortSignal.timeout(DISCOVERY_TIMEOUT_MS)
-		}, proxyUrl);
-		if (res.ok) return await res.json().catch(() => null);
-	} catch {}
+	const shapes = [
+		{ operation: { name } },
+		{ name },
+		{}
+	];
+	let attempts = 0;
+	let lastStatus;
+	let lastError;
+	for (const endpoint of endpoints) {
+		for (const shape of shapes) {
+			if (attempts >= BACKGROUND_TASK_MAX_ATTEMPTS) break;
+			attempts += 1;
+			try {
+				const res = await agyFetch(`${endpoint}/v1internal:onboardUserBackgroundTasks`, {
+					method: "POST",
+					headers: antigravityHeaders(token),
+					body: JSON.stringify(shape),
+					signal: AbortSignal.timeout(DISCOVERY_TIMEOUT_MS)
+				}, proxyUrl);
+				if (res.ok) {
+					const parsed = parseOnboardResponse(await res.json().catch(() => void 0));
+					if (parsed) return parsed;
+					lastError = /* @__PURE__ */ new Error(`${endpoint} returned a body that is not an Operation`);
+					continue;
+				}
+				lastStatus = res.status;
+			} catch (err) {
+				lastError = err instanceof Error ? err : new Error(String(err));
+			}
+		}
+		if (attempts >= BACKGROUND_TASK_MAX_ATTEMPTS) break;
+	}
+	console.warn(`${LOG_PREFIX} onboardUserBackgroundTasks(${name}) produced no Operation in ${attempts} attempt(s) (lastStatus=${lastStatus ?? "n/a"}, lastError=${lastError?.message ?? "no body parsed"})`);
 	return null;
 }
 /**
-* Ensure project ID is available:
-* 1. Check LRU cache
-* 2. loadCodeAssist
-* 3. If none, onboardUser + LRO polling
-* 4. Fallback to defaultProjectId(seed)
+* Bounded polling of an onboardUser operation: at most `maxAttempts` polls spaced by `intervalMs`,
+* never past `deadlineMs`, and an operation-level error stops polling instead of burning the whole
+* budget. A stalled onboarding is reported and left to the caller's fallback - it never blocks a
+* generation request.
 */
-async function ensureProject(token, seedOrEmail = "antigravity-default", proxyUrl, customEndpoints) {
-	const cached = projectCache.get(token);
-	if (cached && cached.expiresAt > Date.now()) return cached.projectId;
-	const loaded = await loadCodeAssist(token, proxyUrl, customEndpoints);
-	if (loaded) return loaded;
-	try {
-		let onboard = await onboardUser(token, "TIER_FREE", proxyUrl, customEndpoints);
-		if (onboard) {
-			if (!onboard.done && onboard.name) {
-				const opName = onboard.name;
-				for (let i = 0; i < 6; i++) {
-					await new Promise((resolve) => setTimeout(resolve, 2e3));
-					const op = await getOperation(token, opName, proxyUrl, customEndpoints);
-					if (op) {
-						onboard = op;
-						if (op.done) break;
-					}
-				}
-			}
-			const proj = onboard.response?.cloudaicompanionProject?.id || onboard.response?.project;
-			if (proj) {
-				projectCache.set(token, {
-					projectId: proj,
-					expiresAt: Date.now() + PROJECT_CACHE_TTL_MS
-				});
-				return proj;
-			}
+async function pollOnboardOperation(token, operationName, proxyUrl, endpoints) {
+	const intervalMs = envNumber("ANTIGRAVITY_ONBOARD_POLL_INTERVAL_MS", ONBOARD_POLL_INTERVAL_MS);
+	const maxAttempts = envNumber("ANTIGRAVITY_ONBOARD_POLL_MAX_ATTEMPTS", ONBOARD_POLL_MAX_ATTEMPTS);
+	const deadlineMs = envNumber("ANTIGRAVITY_ONBOARD_POLL_DEADLINE_MS", ONBOARD_POLL_DEADLINE_MS);
+	const deadline = Date.now() + deadlineMs;
+	let latest;
+	for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+		const remaining = deadline - Date.now();
+		if (remaining <= 0) break;
+		await new Promise((resolve) => setTimeout(resolve, Math.min(intervalMs, remaining)));
+		const operation = await onboardUserBackgroundTasks(token, operationName, proxyUrl, endpoints);
+		if (!operation) continue;
+		latest = operation;
+		if (operation.done) return operation;
+		if (operation.error) {
+			console.warn(`${LOG_PREFIX} onboardUser operation ${operationName} reported ${operation.error.code ?? "n/a"}: ${operation.error.message ?? "no message"}`);
+			return operation;
 		}
-	} catch {}
-	const fallback = defaultProjectId(seedOrEmail);
-	projectCache.set(token, {
-		projectId: fallback,
-		expiresAt: Date.now() + PROJECT_CACHE_TTL_MS
-	});
+	}
+	if (!latest) console.warn(`${LOG_PREFIX} onboardUser operation ${operationName} said nothing in ${maxAttempts} poll(s) within ${deadlineMs}ms; using the fallback instead of blocking the request`);
+	return latest;
+}
+/**
+* Make sure a project id exists for this (token, seed). Order: the id loadCodeAssist already
+* hands out, then the FULL_ELIGIBILITY_CHECK view whose allowedTiers decide the onboardUser
+* tierId, then bounded operation polling, and only as a last resort the deterministic seed id.
+* Nothing in here throws into the request path.
+*
+* The cache is read and written under `token + '\u0000' + seed`, so a fallback synthesized for
+* one seed is never served to another seed that happens to share the access token. The last
+* resort is marked `synthesized: true`; read it back with {@link getProjectResolution} so a
+* caller can tell the two apart instead of guessing from the id's shape. The signature stays
+* `Promise<string>` for every existing caller.
+*/
+async function ensureProject(token, seedOrEmail = DEFAULT_PROJECT_SEED, proxyUrl, customEndpoints) {
+	const seed = seedOrEmail.trim() || DEFAULT_PROJECT_SEED;
+	const cached = liveProject(projectCache, projectCacheKey(token, seed));
+	if (cached) return cached.projectId;
+	const discovered = await loadCodeAssist(token, proxyUrl, customEndpoints);
+	if (discovered) {
+		cacheProject(token, seed, discovered, { synthesized: false });
+		return discovered;
+	}
+	const eligibility = await loadCodeAssistTiers(token, proxyUrl, customEndpoints);
+	if (eligibility?.projectId) {
+		cacheProject(token, seed, eligibility.projectId, {
+			info: eligibility,
+			synthesized: false
+		});
+		return eligibility.projectId;
+	}
+	const tierId = eligibility ? selectTierId(eligibility) : void 0;
+	if (!tierId) {
+		const blocker = eligibility?.ineligibleTiers[0];
+		console.warn(`${LOG_PREFIX} skipping onboardUser - loadCodeAssist offered no eligible tier id (allowedTiers=${eligibility?.allowedTiers.map((tier) => tier.id ?? "?").join(",") || "none"}${blocker ? `, blocked ${blocker.tierId ?? "?"} by ${blocker.reasonCode ?? "unknown reason"}` : ""})`);
+	} else try {
+		let onboard = await onboardUser(token, tierId, proxyUrl, customEndpoints);
+		if (onboard && !onboard.done && onboard.name) {
+			const endpoints = customEndpoints && customEndpoints.length ? customEndpoints : endpointCandidates();
+			const polled = await pollOnboardOperation(token, onboard.name, proxyUrl, endpoints);
+			if (polled) onboard = polled;
+		}
+		const onboardedProject = onboard?.response?.cloudaicompanionProject?.id || onboard?.response?.project;
+		if (onboardedProject) {
+			cacheProject(token, seed, onboardedProject, { synthesized: false });
+			return onboardedProject;
+		}
+		if (onboard?.error) console.warn(`${LOG_PREFIX} onboardUser(tier=${tierId}) reported ${onboard.error.code ?? "n/a"}: ${onboard.error.message ?? "no message"}`);
+	} catch (err) {
+		console.warn(`${LOG_PREFIX} onboardUser(tier=${tierId}) failed: ${err instanceof Error ? err.message : String(err)}`);
+	}
+	const fallback = defaultProjectId(seed);
+	cacheProject(token, seed, fallback, { synthesized: true });
 	return fallback;
 }
+/**
+* Read back what the project cache holds for one (token, seed) lookup, including whether the id
+* was synthesized here or named by the backend. Returns `undefined` when no live entry exists —
+* it reports the outcome of a lookup, it does not perform one, so call it after `ensureProject`.
+*
+* Added alongside `ensureProject` instead of changing its `Promise<string>` return type, so every
+* existing caller is untouched while quota.ts stops inferring the difference from the id's shape.
+*/
+function getProjectResolution(token, seed) {
+	const entry = liveProject(projectCache, projectCacheKey(token, seed.trim() || DEFAULT_PROJECT_SEED));
+	if (entry === void 0) return void 0;
+	return {
+		projectId: entry.projectId,
+		synthesized: entry.synthesized
+	};
+}
+/** `used_non_gemini_model`: the capture marks a Gemini wire id (`gemini-4-hydrogen-medium`) as
+*  false, so anything whose wire id is not a Gemini slug counts as a non-Gemini model. */
+function isNonGeminiWireModel(wireModelId) {
+	return !wireModelId.trim().toLowerCase().startsWith(GEMINI_WIRE_MODEL_PREFIX);
+}
+/**
+* Build the identity fields of a generation request: the top-level `requestId` plus the
+* `sessionId` and `labels` fields of the `request` object. Shapes taken from the captured flows
+* (20261116T081812Z-35.req.txt / …Z-33.req.txt):
+*   requestId  agent/<cascade_id>/<epoch_ms>/<trajectory_id>/<step>  (…/1 for the first step)
+*              checkpoint/<uuid>
+*   labels     cascade_id, root_cascade_id, trajectory_id, request_id (`<trajectory_id>-<n>`),
+*              last_step_index, model_enum, used_claude, used_claude_conservative,
+*              used_non_gemini_model
+* `step` stays the 1-based step number this client has always used for `last_step_index`; agy
+* writes the 0-based index there while its requestId carries the 1-based count, so the two
+* segments differ by one in the capture. Offsetting ours would silently break every existing
+* caller and test that reads last_step_index, so the label keeps its 1-based meaning.
+*/
 function antigravityRequestEnvelope(wireModelId, isClaude, options) {
 	const trajectoryId = options?.trajectoryId ?? randomUUID();
 	const step = options?.step ?? 1;
+	const requestType = options?.requestType ?? AGY_REQUEST_TYPE.agent;
+	const cascadeId = options?.cascadeId?.trim() || trajectoryId;
+	const rootCascadeId = options?.rootCascadeId?.trim() || cascadeId;
 	const wireSessionId = options?.sessionId ? fnv1a64Signed(options.sessionId) : fnv1a64Signed(trajectoryId);
-	const usageLabel = isClaude ? "true" : "false";
+	const epochMs = (options?.now ?? Date.now)();
+	const requestId = requestType === AGY_REQUEST_TYPE.checkpoint ? `${AGY_REQUEST_TYPE.checkpoint}/${cascadeId}` : `${requestType}/${cascadeId}/${epochMs}/${trajectoryId}/${step}`;
+	const usedClaudeConservative = options?.usedClaudeConservative ?? isClaude;
 	const labels = {
-		last_step_index: String(step),
+		cascade_id: cascadeId,
+		root_cascade_id: rootCascadeId,
 		trajectory_id: trajectoryId,
-		used_claude: usageLabel,
-		used_claude_conservative: usageLabel
+		request_id: `${trajectoryId}-${step}`,
+		last_step_index: String(step),
+		used_claude: isClaude ? "true" : "false",
+		used_claude_conservative: usedClaudeConservative ? "true" : "false",
+		used_non_gemini_model: isNonGeminiWireModel(wireModelId) ? "true" : "false"
 	};
-	const modelEnum = ANTIGRAVITY_MODEL_ENUM[wireModelId];
+	const modelEnum = lookupModelEnum(wireModelId);
 	if (modelEnum) labels.model_enum = modelEnum;
 	return {
-		requestId: `agent/${trajectoryId}/${step}`,
+		requestId,
 		sessionId: wireSessionId,
+		requestType,
+		userAgent: AGY_WIRE_USER_AGENT,
 		labels
 	};
 }
@@ -27821,7 +28927,291 @@ async function* mapSseStreamToChunks$1(response, signal, onFirstEmit) {
 //#region src/host/sse-mapper.ts
 const mapSseStreamToChunks = mapSseStreamToChunks$1;
 //#endregion
+//#region packages/core/src/account-health.ts
+/**
+* account-health.ts — the runtime wiring for the scope-aware auth helpers in oauth.ts.
+*
+* `oauth.ts` knows how to record a grant (`granted_scopes` on the credential document)
+* and how to judge it (`needsReauth` / `missingScopes`), but nothing outside `oauth.ts`
+* consulted that knowledge. An account whose token predates the `aicode` scope therefore
+* stayed invisible in `/ccl accounts` and in the GUI, and the only symptom was a bare
+* 401/403 from the upstream.
+*
+* This module is the wiring layer: it turns a `ManagedAccount` plus its credential
+* document into a verdict a caller can show, and it formats the one sentence the user
+* has to act on. It is deliberately read-only:
+*
+*   - it never disables an account and never drops it from the pool — a missing scope
+*     narrows what the account can serve, the existing grant is still valid for
+*     everything it was actually authorized to do;
+*   - it never invents a grant. An account whose document records no scope set is
+*     reported through `needsReauth`'s own rule (unrecorded grant => re-auth prompt),
+*     which is `oauth.ts`'s documented semantics, not this module's guess.
+*/
+/**
+* Where agy keeps the credential document inside an account home. Mirrors
+* `QuotaService.getTokenFilePath` (quota.ts) and `writeAgyTokenFile` (oauth.ts) —
+* the three must agree or the verdict is read off the wrong file.
+*/
+const AGY_TOKEN_FILE_SEGMENTS = [
+	".gemini",
+	"antigravity-cli",
+	"antigravity-oauth-token"
+];
+/** The command the user has to run to widen a grant. Single source for every message. */
+const REAUTH_COMMAND = "/ccl auth";
+/** Home directory whose `.gemini` tree holds this account's credential. */
+function accountHomeDir(account, systemHome = homedir()) {
+	return account.systemHome || !account.dir ? systemHome : account.dir;
+}
+/** Absolute path of the agy credential document for this account. */
+function agyTokenFilePath(account, systemHome) {
+	return join(accountHomeDir(account, systemHome), ...AGY_TOKEN_FILE_SEGMENTS);
+}
+/** Parse the account's credential document; undefined when absent or unreadable. */
+function readAccountTokenDocument(account, systemHome) {
+	const file = agyTokenFilePath(account, systemHome);
+	try {
+		if (!existsSync(file)) return void 0;
+		const raw = JSON.parse(readFileSync(file, "utf8"));
+		return raw && typeof raw === "object" && !Array.isArray(raw) ? raw : void 0;
+	} catch {
+		return;
+	}
+}
+/**
+* Scope set this account was actually authorized with, as recorded on its credential
+* document. `undefined` means "not recorded" — the same distinction `readGrantedScopes`
+* makes, and the trigger for `needsReauth`.
+*/
+function readAccountGrantedScopes(account, systemHome) {
+	return readGrantedScopes(readAccountTokenDocument(account, systemHome));
+}
+/**
+* Judge an explicit grant snapshot. No I/O: the pure entry point for callers and tests.
+*
+* The missing set is computed against the grant `needsReauth` actually judges. A snapshot
+* that normalizes to nothing — an absent key, `null`, `[]`, `''` — is "no scope recorded",
+* and `oauth.ts` judges that case against `LEGACY_AGY_SCOPES` (the set AGY_SCOPES held
+* before `aicode` was added), so the reported gap is `aicode`. Listing all six scopes as
+* missing would claim evidence the credential document never recorded.
+*/
+function authHealthFromScopes(granted) {
+	const recorded = normalizeScopes(granted);
+	return {
+		reauthRequired: needsReauth(granted),
+		missingScopes: missingScopes(recorded.length === 0 ? LEGACY_AGY_SCOPES : recorded)
+	};
+}
+/**
+* The verdict for one account. Pass `grantedScopes` to judge a snapshot you already hold;
+* omit it to read the account's own credential document (`systemHome` overrides the home a
+* system-home account resolves to, which is what makes this callable in a sandbox).
+*/
+function describeAccountAuth(account, grantedScopes, systemHome) {
+	return authHealthFromScopes(grantedScopes === void 0 ? readAccountGrantedScopes(account, systemHome) : grantedScopes);
+}
+/** `https://www.googleapis.com/auth/aicode` -> `auth/aicode`, for a readable one-liner. */
+function scopeLabel(scope) {
+	return scope.replace(/^https?:\/\/[^/]+\//, "");
+}
+/**
+* The sentence the user must end up reading: which account, which scopes are missing,
+* and the command that fixes it. Built from `health.missingScopes`, never from a
+* fixed string, so a different gap produces a different sentence.
+*/
+function reauthGuidance(health, accountLabel) {
+	const who = accountLabel ? `account ${accountLabel}` : "this account";
+	const missing = health.missingScopes.length > 0 ? health.missingScopes.map(scopeLabel).join(", ") : "the scopes Antigravity requires";
+	return `Google authorization for ${who} is missing scope${health.missingScopes.length > 1 ? "s" : ""} ${missing} — re-authorize ${who} with \`${REAUTH_COMMAND}\`. The account stays in the pool for the scopes it does have.`;
+}
+/**
+* HTTP statuses for which a narrow Google grant is a credible cause, so the re-auth
+* sentence is worth attaching: 401 says the credential was rejected, 403 says the
+* credential is valid but not entitled — which is exactly what a missing scope looks
+* like from the client side. Anything else (429, 5xx, timeout) is not an authorization
+* verdict and must not be dressed up as one.
+*/
+const REAUTH_CANDIDATE_STATUSES = [401, 403];
+/**
+* The re-auth sentence for one failed attempt, or `undefined` when this failure is not
+* an authorization gap. Callers (the adapter's 401/403 branches) attach the result to the
+* failure they already record, so the user reads "re-run /ccl auth for this account"
+* instead of a bare "authentication failed".
+*/
+function reauthGuidanceFor(account, failure) {
+	if (!REAUTH_CANDIDATE_STATUSES.includes(failure.status)) return void 0;
+	const health = describeAccountAuth(account, failure.grantedScopes, failure.systemHome);
+	if (!health.reauthRequired) return void 0;
+	return reauthGuidance(health, account.alias || account.id);
+}
+/**
+* Build the per-attempt resolver the failover loop asks for: `accountId` -> the sentence, or
+* `undefined`. The adapter cannot decide this itself — a 403 is either "this account does not
+* serve this model" or "this grant is missing a scope", and only the recorded credential grant
+* can tell them apart. Registration hands the adapter the resolver built here.
+*/
+function reauthGuidanceResolver(lookup, systemHome) {
+	return (accountId, failure) => {
+		if (failure.httpStatus === null) return void 0;
+		const account = lookup(accountId);
+		if (!account) return void 0;
+		return reauthGuidanceFor(account, {
+			status: failure.httpStatus,
+			systemHome
+		});
+	};
+}
+/** Annotate one account with the fields the account list publishes. */
+function withAccountAuthHealth(account, grantedScopes, systemHome) {
+	return {
+		...account,
+		...describeAccountAuth(account, grantedScopes, systemHome)
+	};
+}
+/**
+* Annotate a whole pool payload for the account-list API. The account objects keep every
+* field they had; `reauthRequired` / `missingScopes` are added on top, and the count is
+* published so a list header can warn without walking the rows.
+*/
+function describePoolAuthHealth(data, grantedOf, systemHome) {
+	const accounts = data.accounts.map((account) => withAccountAuthHealth(account, grantedOf ? grantedOf(account) : void 0, systemHome));
+	return {
+		...data,
+		accounts,
+		accountsNeedingReauth: accounts.filter((account) => account.reauthRequired).length
+	};
+}
+//#endregion
 //#region src/host/adapter.ts
+/**
+* Connect-phase budget for ONE upstream attempt.
+* `net.ts` deliberately disables the timeout for `streamGenerateContent` (a healthy generation can
+* run for minutes), which leaves the connect/handshake phase untimed: measured stalls of 603s and
+* 211s while the account was already dead. Every attempt gets this deadline explicitly.
+*/
+const UPSTREAM_CONNECT_TIMEOUT_MS = 6e4;
+/**
+* Body-phase budget for ONE upstream attempt: the maximum allowed gap between two ADJACENT SSE
+* chunks (the gap from the response headers to the first chunk counts as one too).
+* This is the budget that catches the failure mode actually observed in production: `net.ts`
+* deliberately leaves `streamGenerateContent` untimed (a healthy generation runs for minutes), so
+* an upstream that sends headers and then goes silent used to stall the turn for 603s. A stream
+* that keeps producing chunks is never cut by this budget, however long it runs.
+*/
+const UPSTREAM_IDLE_TIMEOUT_MS = 12e4;
+/**
+* Backstop only — deliberately NOT a normal-path limit, and deliberately far above a real long
+* session. It exists for two pathological cases: an upstream that trickles keep-alive bytes often
+* enough to never trip {@link UPSTREAM_IDLE_TIMEOUT_MS}, and a failover loop in which every
+* account burns its own connect budget. A legitimately long generation finishes long before it.
+*/
+const UPSTREAM_STREAM_CEILING_MS = 18e5;
+/** Human-readable name of each phase, used to build the terminal timeout message. */
+const TIMEOUT_PHASE_LABEL = {
+	connect: "connect deadline (response headers never arrived)",
+	idle: "idle deadline (no chunk in the gap between adjacent chunks)",
+	ceiling: "hard ceiling backstop (safety net, not a normal-path limit)"
+};
+/** Cap the echoed upstream text so a huge HTML error page never lands in a chat error. */
+const UPSTREAM_ECHO_MAX_CHARS = 240;
+/** The most specific re-auth sentence recorded for an attempt, '' when no attempt recorded one. */
+function lastGuidance(failures) {
+	for (let i = failures.length - 1; i >= 0; i--) {
+		const guidance = failures[i].guidance?.trim();
+		if (guidance) return ` ${guidance}`;
+	}
+	return "";
+}
+function summarizeUpstream(failures) {
+	for (let i = failures.length - 1; i >= 0; i--) {
+		const failure = failures[i];
+		if (failure.httpStatus === null && !failure.upstreamError) continue;
+		const detail = (failure.upstreamError ?? "").replace(/\s+/g, " ").trim();
+		const clipped = detail.length > UPSTREAM_ECHO_MAX_CHARS ? `${detail.slice(0, UPSTREAM_ECHO_MAX_CHARS)}…` : detail;
+		return ` Last upstream error: account ${failure.accountId}${failure.httpStatus !== null ? ` HTTP ${failure.httpStatus}` : ""}${clipped ? `: ${clipped}` : ""}.`;
+	}
+	return "";
+}
+/**
+* Map the observed failures to the one error the user should see.
+*
+* The old behaviour reported `AUTH_REQUIRED: No authenticated Antigravity account available.
+* Please sign in via /ccl auth.` whenever the pool ran out of candidates — including the common
+* case where every account is signed in fine but simply does not serve the requested model. Each
+* code now has exactly one trigger:
+*   - AUTH_REQUIRED      every failure was a credential failure (401 / refresh failure).
+*   - MODEL_NOT_AVAILABLE entitlement says no account serves this model, or every attempt was 403.
+*   - RATE_LIMIT         every failure was a 429 / cooldown, with the reset countdown attached.
+*   - UPSTREAM_TIMEOUT   a staged upstream budget fired: connect (no headers), idle (no chunk in
+*                        the gap between adjacent chunks) or the hard ceiling backstop.
+*   - API_ERROR / ACCOUNTS_EXHAUSTED otherwise, carrying the last real upstream error.
+*/
+function classifyPoolFailure(report) {
+	const { failures, family, wireModel, familyStatus } = report;
+	const upstream = summarizeUpstream(failures);
+	const allOf = (cause) => failures.length > 0 && failures.every((f) => f.cause === cause);
+	if (allOf("auth") || failures.length === 0 && familyStatus.reason === "auth_required") return {
+		message: `No authenticated Antigravity account available. Please sign in via /ccl auth.${lastGuidance(failures)}`,
+		code: "AUTH_REQUIRED"
+	};
+	if (familyStatus.reason === "model_not_available" || allOf("model_unsupported") || failures.some((f) => f.cause === "model_unsupported") && !failures.some((f) => f.cause === "auth") && !failures.some((f) => f.cause === "rate_limit")) return {
+		message: `No Antigravity account in this pool serves model '${wireModel}' (model family '${family}'). Check /ccl accounts for an account entitled to it, or pick another model.${lastGuidance(failures)}${upstream}`,
+		code: "MODEL_NOT_AVAILABLE",
+		status: lastHttpStatus(failures, 403) ?? void 0
+	};
+	if (allOf("rate_limit") || familyStatus.reason === "rate_limited" || familyStatus.suppressed && familyStatus.reason === "quota_exhausted") {
+		const resetMs = familyStatus.resetInMs;
+		return {
+			message: `Antigravity quota exhausted for model family '${family}'.${resetMs && resetMs > 0 ? ` Resets in ${formatDuration(resetMs)}.` : ""}${upstream}`,
+			code: "RATE_LIMIT",
+			status: 429
+		};
+	}
+	if (allOf("timeout")) {
+		const timedOut = failures.filter((failure) => failure.cause === "timeout");
+		const stageText = [...new Set(timedOut.map((failure) => failure.phase))].map((phase) => phase ? TIMEOUT_PHASE_LABEL[phase] : "upstream stall").join(" + ");
+		const detail = (timedOut[timedOut.length - 1]?.upstreamError ?? "").replace(/\s+/g, " ").trim();
+		return {
+			message: `Antigravity upstream hit its ${stageText} for model '${wireModel}'${detail ? `: ${detail}` : "."}${upstream}`,
+			code: "UPSTREAM_TIMEOUT"
+		};
+	}
+	if (allOf("connect")) return {
+		message: `Google CloudCode connection error: ${failures[failures.length - 1].upstreamError ?? "unknown"}${upstream}`,
+		code: "CONNECT_ERROR"
+	};
+	if (failures.length === 0) return {
+		message: "All available Antigravity accounts are exhausted or in cooldown.",
+		code: "ACCOUNTS_EXHAUSTED"
+	};
+	return {
+		message: `All Antigravity accounts failed for model '${wireModel}'.${upstream}`,
+		code: "API_ERROR",
+		status: lastHttpStatus(failures) ?? void 0
+	};
+}
+function lastHttpStatus(failures, fallback) {
+	for (let i = failures.length - 1; i >= 0; i--) {
+		const status = failures[i].httpStatus;
+		if (status !== null) return status;
+	}
+	return fallback ?? null;
+}
+/** Positive finite override or the named default. Guards against 0 / NaN config values. */
+function positiveOrDefault(value, fallback) {
+	return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : fallback;
+}
+/** Union of the caller's abort, the ceiling backstop and the per-attempt connect/idle aborts. */
+function combineSignals(signals) {
+	const live = signals.filter((signal) => signal !== void 0);
+	if (live.length === 1) return live[0];
+	return AbortSignal.any(live);
+}
+/** One-line rendering of a thrown error for logs and telemetry. */
+function describeError(err) {
+	return err instanceof Error ? err.message : String(err);
+}
 var AgyAdapter = class extends LlmAdapter {
 	deps;
 	/** Last forced quota refresh timestamp (per process, for session-start refresh). */
@@ -27926,8 +29316,38 @@ var AgyAdapter = class extends LlmAdapter {
 	* Main streaming entry point: maps GenerateOptions into CloudCode direct API stream.
 	* Supports pre-emission silent account failover on 429 / auth errors.
 	*/
+	/**
+	* The re-auth sentence to show for one failed attempt, '' when there is nothing honest to say.
+	* Deciding this per failure is the account-health module's job (`reauthGuidanceFor`), because a
+	* 403 can be either "this account cannot serve this model" or "this grant is missing the aicode
+	* scope", and guessing from the adapter would be a fabricated verdict. What the adapter may
+	* decide on its own is the 401: that answer is always a credential verdict, so the account's own
+	* recorded grant ({@link describeAccountAuth}) supplies the sentence.
+	*/
+	reauthGuidanceForAttempt(account, failure) {
+		const supplied = this.deps.reauthGuidanceFor?.(failure.accountId, failure);
+		if (supplied?.trim()) return supplied.trim();
+		if (failure.httpStatus === 401 && account) {
+			const health = describeAccountAuth(account);
+			if (health.reauthRequired) return reauthGuidance(health, account.alias || account.id);
+		}
+		return "";
+	}
 	async *stream(options) {
+		const startTime = Date.now();
 		const releaseGlobal = this.deps.acquire ? await this.deps.acquire() : null;
+		const connectBudgetMs = positiveOrDefault(this.deps.connectTimeoutMs, UPSTREAM_CONNECT_TIMEOUT_MS);
+		const idleBudgetMs = positiveOrDefault(this.deps.idleTimeoutMs, UPSTREAM_IDLE_TIMEOUT_MS);
+		const streamCeilingMs = positiveOrDefault(this.deps.streamCeilingMs, UPSTREAM_STREAM_CEILING_MS);
+		const ceilingAt = startTime + streamCeilingMs;
+		/**
+		* Backstop abort for the whole turn (see {@link UPSTREAM_STREAM_CEILING_MS}). It is NOT the
+		* budget a stalled upstream runs into — connect and idle fire long before it — so a normal
+		* long generation is never cut by it.
+		*/
+		const ceilingSignal = AbortSignal.timeout(Math.max(1, streamCeilingMs));
+		/** Every attempt failure recorded here; it is what the final error is classified from. */
+		const failures = [];
 		try {
 			const wireModel = getAntigravityRequestModelId(options.model, options.reasoningEffort);
 			const isClaude = wireModel.startsWith("claude-");
@@ -27951,52 +29371,53 @@ var AgyAdapter = class extends LlmAdapter {
 			const maxAttempts = Math.max(1, this.deps.pool ? this.deps.pool.getAccounts().length : 1);
 			let attempt = 0;
 			const triedAccountIds = /* @__PURE__ */ new Set();
+			/** Account used by the most recent attempt; used to attribute deadline failures. */
+			let lastAttemptAccountId;
 			while (attempt < maxAttempts) {
 				attempt++;
+				if (ceilingAt - Date.now() <= 0) {
+					failures.push({
+						cause: "timeout",
+						accountId: lastAttemptAccountId ?? "acc_default",
+						httpStatus: null,
+						upstreamError: `ceiling backstop of ${Math.round(streamCeilingMs / 1e3)}s reached before attempt ${attempt}`,
+						phase: "ceiling"
+					});
+					break;
+				}
 				let account = null;
 				if (this.deps.pool) {
 					const pinned = this.deps.pool.getPinnedAccount();
-					if (pinned && !triedAccountIds.has(pinned.id) && this.deps.pool.isAccountHealthy(pinned, family)) account = pinned;
+					if (pinned && !triedAccountIds.has(pinned.id) && this.deps.pool.isAccountHealthy(pinned, family, wireModel)) account = pinned;
 					if (!account && boundAccountId && !triedAccountIds.has(boundAccountId)) {
 						const boundAcc = this.deps.pool.getAccount(boundAccountId);
-						if (boundAcc && this.deps.pool.isAccountHealthy(boundAcc, family)) account = boundAcc;
+						if (boundAcc && this.deps.pool.isAccountHealthy(boundAcc, family, wireModel)) account = boundAcc;
 					}
 					if (!account) {
 						await this.refreshQuotasForSelection(family);
-						account = this.deps.pool.selectAccount(family);
+						account = this.deps.pool.selectAccount(family, wireModel);
 					}
-					if (account && triedAccountIds.has(account.id)) account = this.deps.pool.getAccounts().find((a) => !triedAccountIds.has(a.id) && this.deps.pool.isAccountHealthy(a, family)) ?? null;
+					if (account && triedAccountIds.has(account.id)) account = this.deps.pool.getAccounts().find((a) => !triedAccountIds.has(a.id) && this.deps.pool.isAccountHealthy(a, family, wireModel)) ?? null;
 				}
 				if (rawSessionId && this.deps.sessionStore && account) this.deps.sessionStore.bindAccount(rawSessionId, account.id);
 				if (!account && this.deps.pool && !process.env.ANTIGRAVITY_TOKEN?.trim()) {
-					const status = this.deps.pool.getFamilyStatus(family);
-					if (status.suppressed) {
-						yield {
-							type: "finish",
-							reason: {
-								kind: "error",
-								failure: {
-									message: `Antigravity quota exhausted for model family '${family}'.${status.resetInMs && status.resetInMs > 0 ? ` Resets in ${formatDuration(status.resetInMs)}.` : ""}`,
-									code: "RATE_LIMIT"
-								}
-							}
-						};
-						return;
-					}
 					yield {
 						type: "finish",
 						reason: {
 							kind: "error",
-							failure: {
-								message: "No authenticated Antigravity account available. Please sign in via /ccl auth.",
-								code: "AUTH_REQUIRED"
-							}
+							failure: classifyPoolFailure({
+								family,
+								wireModel,
+								failures,
+								familyStatus: this.deps.pool.getFamilyStatus(family, wireModel)
+							})
 						}
 					};
 					return;
 				}
 				const accountId = account ? account.id : "acc_default";
 				triedAccountIds.add(accountId);
+				lastAttemptAccountId = accountId;
 				let releaseAccount = null;
 				if (this.deps.pool && account) {
 					const cfg = this.deps.getConfig();
@@ -28038,36 +29459,55 @@ var AgyAdapter = class extends LlmAdapter {
 					}
 				};
 				try {
+					const env = antigravityRequestEnvelope(wireModel, isClaude, {
+						sessionId: rawSessionId,
+						trajectoryId,
+						step,
+						cascadeId: trajectoryId,
+						...this.deps.now ? { now: this.deps.now } : {}
+					});
+					envelope = env;
 					let token = null;
 					if (process.env.ANTIGRAVITY_TOKEN?.trim()) token = process.env.ANTIGRAVITY_TOKEN.trim();
 					else if (this.deps.quota && account) token = await this.deps.quota.getValidAccessToken(account);
 					else if (this.deps.pool) token = this.deps.pool.getMemoryToken(accountId);
 					if (!token) {
 						if (this.deps.pool && account) this.deps.pool.markAuthRequired(account.id, "No valid access token or refresh failed");
-						if (!hasEmitted && attempt < maxAttempts) continue;
+						failures.push({
+							cause: "auth",
+							accountId,
+							httpStatus: null,
+							upstreamError: "no usable access token (refresh failed or credential revoked)"
+						});
+						recordTelemetry("error");
+						if (!hasEmitted && attempt < maxAttempts && Date.now() < ceilingAt) {
+							this.deps.log?.(`No access token for ${accountId}, switching accounts...`);
+							continue;
+						}
 						yield {
 							type: "finish",
 							reason: {
 								kind: "error",
-								failure: {
-									message: "No authenticated Antigravity account available. Please sign in via /ccl auth.",
-									code: "AUTH_REQUIRED"
-								}
+								failure: classifyPoolFailure({
+									family,
+									wireModel,
+									failures,
+									familyStatus: this.deps.pool ? this.deps.pool.getFamilyStatus(family, wireModel) : {
+										hasAccount: false,
+										suppressed: false,
+										reason: "no_accounts",
+										resetInMs: null
+									}
+								})
 							}
 						};
 						return;
 					}
 					const proxyUrl = account?.proxyUrl;
 					const customEndpoints = this.deps.endpointCandidates;
-					const env = antigravityRequestEnvelope(wireModel, isClaude, {
-						sessionId: rawSessionId,
-						trajectoryId,
-						step
-					});
-					envelope = env;
 					const requestBody = {
 						project: await ensureProject(token, account?.alias || account?.id || "antigravity-default", proxyUrl, customEndpoints),
-						model: wireModel,
+						requestId: env.requestId,
 						request: {
 							contents,
 							...options.system ? { systemInstruction: { parts: [{ text: options.system }] } } : {},
@@ -28081,52 +29521,157 @@ var AgyAdapter = class extends LlmAdapter {
 							sessionId: env.sessionId,
 							labels: env.labels
 						},
-						requestType: "AGENT",
-						userAgent: "ANTIGRAVITY",
-						requestId: env.requestId
+						model: wireModel,
+						userAgent: env.userAgent,
+						requestType: env.requestType
 					};
+					const connectController = new AbortController();
+					/** Aborted by the idle budget the moment the body phase goes silent. */
+					const idleController = new AbortController();
+					let connectTimedOut = false;
+					let idleTimedOut = false;
+					let connectTimer;
+					let idleTimer;
+					/**
+					* (Re)arm the adjacent-chunk budget. Re-armed on every chunk, so an upstream that keeps
+					* producing chunks never trips it, no matter how long the generation runs.
+					*/
+					const armIdleTimer = () => {
+						if (idleTimer) clearTimeout(idleTimer);
+						idleTimer = setTimeout(() => {
+							idleTimedOut = true;
+							idleController.abort();
+						}, idleBudgetMs);
+					};
+					/** Which of OUR staged budgets killed this attempt; null means the provider (or caller) did. */
+					const ourStallPhase = () => {
+						if (options.signal?.aborted) return null;
+						if (idleTimedOut) return "idle";
+						if (ceilingSignal.aborted) return "ceiling";
+						return null;
+					};
+					const connectDeadline = new Promise((_, reject) => {
+						connectTimer = setTimeout(() => {
+							connectTimedOut = true;
+							connectController.abort();
+							reject(/* @__PURE__ */ new Error(`upstream connect deadline of ${connectBudgetMs}ms exceeded before any response header`));
+						}, connectBudgetMs);
+					});
 					let res;
 					try {
-						res = (await streamGenerateContent(token, requestBody, options.signal, proxyUrl, customEndpoints)).response;
+						res = (await Promise.race([streamGenerateContent(token, requestBody, combineSignals([
+							options.signal,
+							ceilingSignal,
+							connectController.signal,
+							idleController.signal
+						]), proxyUrl, customEndpoints), connectDeadline])).response;
 					} catch (err) {
-						if (!hasEmitted && attempt < maxAttempts) {
-							this.deps.log?.(`CloudCode connection error on account ${accountId}: ${String(err)}, trying next`);
+						recordTelemetry(options.signal?.aborted ? "abort" : "error");
+						failures.push({
+							cause: connectTimedOut ? "timeout" : "connect",
+							accountId,
+							httpStatus: null,
+							upstreamError: describeError(err),
+							phase: connectTimedOut ? "connect" : void 0
+						});
+						if (!hasEmitted && attempt < maxAttempts && Date.now() < ceilingAt) {
+							this.deps.log?.(`CloudCode ${connectTimedOut ? "connect timeout" : "connection error"} on account ${accountId}: ${describeError(err)}, trying next`);
 							continue;
 						}
-						recordTelemetry(options.signal?.aborted ? "abort" : "error");
 						yield {
 							type: "finish",
 							reason: {
 								kind: "error",
-								failure: {
-									message: `Google CloudCode connection error: ${err instanceof Error ? err.message : String(err)}`,
-									code: "CONNECT_ERROR"
-								}
+								failure: classifyPoolFailure({
+									family,
+									wireModel,
+									failures,
+									familyStatus: this.deps.pool ? this.deps.pool.getFamilyStatus(family, wireModel) : {
+										hasAccount: false,
+										suppressed: false,
+										reason: "no_accounts",
+										resetInMs: null
+									}
+								})
 							}
 						};
 						return;
+					} finally {
+						if (connectTimer) clearTimeout(connectTimer);
 					}
 					if (!res.ok) {
 						const errText = await res.text().catch(() => "");
+						const canFailover = !hasEmitted && attempt < maxAttempts && Date.now() < ceilingAt;
 						if (res.status === 429) {
 							const resetHeader = res.headers.get("retry-after") || void 0;
 							if (this.deps.pool && account) this.deps.pool.recordFailure(account.id, family, errText || "Rate limit 429", resetHeader);
-							if (!hasEmitted && attempt < maxAttempts) {
+							failures.push({
+								cause: "rate_limit",
+								accountId,
+								httpStatus: 429,
+								upstreamError: errText || "429 Too Many Requests"
+							});
+							if (canFailover) {
+								recordTelemetry("error");
 								this.deps.log?.(`Rate limited (429) on ${accountId}, switching accounts...`);
 								continue;
 							}
-						} else if (res.status === 401 || res.status === 403) {
-							if (this.deps.pool && account) this.deps.pool.markAuthRequired(account.id, `Auth failed (${res.status}): ${errText}`);
-							if (!hasEmitted && attempt < maxAttempts) continue;
-						}
+						} else if (res.status === 401) {
+							if (this.deps.pool && account) this.deps.pool.markAuthRequired(account.id, `Auth failed (401): ${errText}`);
+							const failure = {
+								cause: "auth",
+								accountId,
+								httpStatus: 401,
+								upstreamError: errText || "401 Unauthorized"
+							};
+							const guidance = this.reauthGuidanceForAttempt(account, failure);
+							failures.push(guidance ? {
+								...failure,
+								guidance
+							} : failure);
+							if (canFailover) {
+								recordTelemetry("error");
+								this.deps.log?.(`Auth failed (401) on ${accountId}, switching accounts...${guidance ? ` ${guidance}` : ""}`);
+								continue;
+							}
+						} else if (res.status === 403) {
+							if (this.deps.pool && account) this.deps.pool.recordModelUnsupported(account.id, family, wireModel, `HTTP 403: ${errText || "forbidden"}`);
+							const failure = {
+								cause: "model_unsupported",
+								accountId,
+								httpStatus: 403,
+								upstreamError: errText || "403 Forbidden"
+							};
+							const guidance = this.reauthGuidanceForAttempt(account, failure);
+							failures.push(guidance ? {
+								...failure,
+								guidance
+							} : failure);
+							if (canFailover) {
+								recordTelemetry("error");
+								this.deps.log?.(`Account ${accountId} cannot serve '${wireModel}' (403), switching accounts...${guidance ? ` ${guidance}` : ""}`);
+								continue;
+							}
+						} else failures.push({
+							cause: "api",
+							accountId,
+							httpStatus: res.status,
+							upstreamError: errText || `HTTP ${res.status}`
+						});
 						recordTelemetry(options.signal?.aborted ? "abort" : "error");
 						yield {
 							type: "finish",
 							reason: {
 								kind: "error",
-								failure: {
+								failure: this.deps.pool ? classifyPoolFailure({
+									family,
+									wireModel,
+									failures,
+									familyStatus: this.deps.pool.getFamilyStatus(family, wireModel)
+								}) : {
 									message: `Google CloudCode API error HTTP ${res.status}: ${errText}`,
-									code: res.status === 429 ? "RATE_LIMIT" : "API_ERROR"
+									code: "API_ERROR",
+									status: res.status
 								}
 							}
 						};
@@ -28134,12 +29679,39 @@ var AgyAdapter = class extends LlmAdapter {
 					}
 					streamStarted = true;
 					runOk = true;
+					/**
+					* Whether a real chunk has been handed to the caller. The mapper also calls its
+					* `onFirstEmit` hook when it closes a stream with a synthetic finish/abort/error chunk, so
+					* `hasEmitted` alone cannot tell "the caller saw content" from "the stream was cut before
+					* any content" — and only the latter is safe to replay on the next account.
+					*/
+					let contentReachedCaller = false;
+					armIdleTimer();
+					/** Set when one of OUR budgets aborted this attempt's fetch mid-body. */
+					let stallPhase = null;
+					let stallDetail = "";
 					try {
-						for await (const chunk of mapSseStreamToChunks(res, options.signal, () => {
+						for await (const chunk of mapSseStreamToChunks(res, combineSignals([
+							options.signal,
+							ceilingSignal,
+							connectController.signal,
+							idleController.signal
+						]), () => {
 							hasEmitted = true;
 							if (firstChunkTime === null) firstChunkTime = Date.now();
 						})) {
+							armIdleTimer();
 							if (firstChunkTime === null) firstChunkTime = Date.now();
+							if (chunk.type === "finish") {
+								const finish = chunk;
+								const phase = ourStallPhase();
+								if (phase !== null && (finish.reason?.kind === "error" || finish.reason?.kind === "aborted")) {
+									stallPhase = phase;
+									stallDetail = finish.reason.failure?.message ?? "stream aborted by an upstream budget";
+									break;
+								}
+							}
+							if (chunk.type !== "finish") contentReachedCaller = true;
 							yield chunk;
 							if (chunk.type === "usage" && chunk.usage) {
 								const u = chunk.usage;
@@ -28155,9 +29727,40 @@ var AgyAdapter = class extends LlmAdapter {
 						}
 					} catch (streamErr) {
 						runOk = false;
-						throw streamErr;
+						const phase = ourStallPhase();
+						if (phase === null) throw streamErr;
+						stallPhase = phase;
+						stallDetail = describeError(streamErr);
 					} finally {
+						if (idleTimer) clearTimeout(idleTimer);
 						recordTelemetry();
+					}
+					if (stallPhase !== null) {
+						runOk = false;
+						const stallText = stallPhase === "idle" ? `no SSE chunk for ${idleBudgetMs}ms of silence after the response headers` : `ceiling backstop of ${Math.round(streamCeilingMs / 1e3)}s reached`;
+						failures.push({
+							cause: "timeout",
+							accountId,
+							httpStatus: null,
+							upstreamError: `${stallText}: ${stallDetail}`,
+							phase: stallPhase
+						});
+						recordTelemetry("error");
+						if (stallPhase === "idle" && !contentReachedCaller && attempt < maxAttempts && Date.now() < ceilingAt) {
+							this.deps.log?.(`CloudCode idle timeout (${idleBudgetMs}ms with no chunk) on account ${accountId}, switching accounts...`);
+							continue;
+						}
+						yield {
+							type: "finish",
+							reason: {
+								kind: "error",
+								failure: {
+									message: `Antigravity stream for model '${wireModel}' hit the ${TIMEOUT_PHASE_LABEL[stallPhase]}: ${stallDetail}`,
+									code: "UPSTREAM_TIMEOUT"
+								}
+							}
+						};
+						return;
 					}
 					const requestDuration = Date.now() - requestStartTime;
 					if (runOk) {
@@ -28180,34 +29783,23 @@ var AgyAdapter = class extends LlmAdapter {
 					if (releaseAccount) releaseAccount();
 				}
 			}
-			if (!hasEmitted) {
-				if (this.deps.pool) {
-					const status = this.deps.pool.getFamilyStatus(family);
-					if (status.suppressed) {
-						yield {
-							type: "finish",
-							reason: {
-								kind: "error",
-								failure: {
-									message: `Antigravity quota exhausted for model family '${family}'.${status.resetInMs && status.resetInMs > 0 ? ` Resets in ${formatDuration(status.resetInMs)}.` : ""}`,
-									code: "RATE_LIMIT"
-								}
-							}
-						};
-						return;
-					}
-				}
-				yield {
-					type: "finish",
-					reason: {
-						kind: "error",
-						failure: {
-							message: "All available Antigravity accounts are exhausted or in cooldown.",
-							code: "ACCOUNTS_EXHAUSTED"
+			if (!hasEmitted) yield {
+				type: "finish",
+				reason: {
+					kind: "error",
+					failure: classifyPoolFailure({
+						family,
+						wireModel,
+						failures,
+						familyStatus: this.deps.pool ? this.deps.pool.getFamilyStatus(family, wireModel) : {
+							hasAccount: false,
+							suppressed: false,
+							reason: "no_accounts",
+							resetInMs: null
 						}
-					}
-				};
-			}
+					})
+				}
+			};
 		} finally {
 			if (releaseGlobal) releaseGlobal();
 		}
@@ -28263,25 +29855,35 @@ async function runAgyOnce(deps, req) {
 		let prompt = req.prompt;
 		if (req.readPaths && req.readPaths.length > 0) prompt = await inlineFiles(prompt, req.readPaths, process.cwd());
 		const family = modelFamilyOf(wireModel);
-		const account = deps.pool?.selectAccount(family);
+		const account = deps.pool?.selectAccount(family, wireModel);
 		const accountId = account?.id || "acc_default";
 		let token = null;
 		if (process.env.ANTIGRAVITY_TOKEN?.trim()) token = process.env.ANTIGRAVITY_TOKEN.trim();
 		else if (deps.quota && account) token = await deps.quota.getValidAccessToken(account);
 		else if (deps.pool) token = deps.pool.getMemoryToken(accountId);
-		if (!token) return {
-			ok: false,
-			text: "",
-			conversationId: null,
-			error: "No authenticated Antigravity account available.",
-			durationMs: Date.now() - startTime
-		};
+		if (!token) {
+			const status = deps.pool?.getFamilyStatus(family, wireModel);
+			if (status?.suppressed && status.reason === "model_not_available") return {
+				ok: false,
+				text: "",
+				conversationId: null,
+				error: `No signed-in Antigravity account serves ${wireModel}: every account's model list excludes it, and no request was sent. Choose a model your accounts actually serve.`,
+				durationMs: Date.now() - startTime
+			};
+			return {
+				ok: false,
+				text: "",
+				conversationId: null,
+				error: "No authenticated Antigravity account available.",
+				durationMs: Date.now() - startTime
+			};
+		}
 		const proxyUrl = account?.proxyUrl;
 		const endpoints = deps.endpointCandidates || (cfg.endpointCandidates ? [...cfg.endpointCandidates] : void 0);
 		const envelope = antigravityRequestEnvelope(wireModel, isClaude);
 		const requestBody = {
 			project: await ensureProject(token, account?.alias || account?.id || "antigravity-default", proxyUrl, endpoints),
-			model: wireModel,
+			requestId: envelope.requestId,
 			request: {
 				contents: [{
 					role: "user",
@@ -28294,9 +29896,9 @@ async function runAgyOnce(deps, req) {
 				sessionId: envelope.sessionId,
 				labels: envelope.labels
 			},
-			requestType: "AGENT",
-			userAgent: "ANTIGRAVITY",
-			requestId: envelope.requestId
+			model: wireModel,
+			userAgent: envelope.userAgent,
+			requestType: envelope.requestType
 		};
 		const streamResult = await streamGenerateContent(token, requestBody, abortController.signal, proxyUrl, endpoints);
 		if (!streamResult.response.ok) {
@@ -28548,28 +30150,7 @@ async function handle(deps, raw) {
 	const arg = parts[1] ?? "";
 	try {
 		if (sub === "status") return ok(await renderStatus(deps));
-		if (sub === "pool" || sub === "accounts") {
-			const pool = deps.pool?.();
-			if (!pool) return ok("Account pool not enabled.");
-			const accounts = pool.getAccounts();
-			const data = pool.getPoolData();
-			const lines = [`**Antigravity Account Pool (${accounts.length} accounts, mode: ${data.mode})**`];
-			for (let i = 0; i < accounts.length; i++) {
-				const a = accounts[i];
-				if (!a) continue;
-				const isPrimary = a.id === data.primaryAccountId;
-				const qG = a.quotas.google?.remainingFraction !== void 0 ? `${Math.round(a.quotas.google.remainingFraction * 100)}%` : "unknown";
-				const qC = a.quotas.anthropic?.remainingFraction !== void 0 ? `${Math.round(a.quotas.anthropic.remainingFraction * 100)}%` : "unknown";
-				const qO = a.quotas.openai?.remainingFraction !== void 0 ? `${Math.round(a.quotas.openai.remainingFraction * 100)}%` : "unknown";
-				const cds = [];
-				for (const [fam, cd] of Object.entries(a.cooldowns)) if (cd && cd.cooldownUntil > Date.now()) {
-					const sec = Math.ceil((cd.cooldownUntil - Date.now()) / 1e3);
-					cds.push(`${fam} cooldown: ${sec}s left (${cd.reason})`);
-				}
-				lines.push(`${i + 1}. **${a.alias}** (${a.email || a.id})${isPrimary ? " ⭐ primary" : ""}`, `   - Proxy: ${a.proxyUrl || "system default"}`, `   - Quota: Gemini ${qG} | Claude ${qC} | GPT-OSS ${qO}`, cds.length > 0 ? `   - ⚠️ ${cds.join("; ")}` : "   - Status: 🟢 Ready");
-			}
-			return ok(lines.join("\n"));
-		}
+		if (sub === "pool" || sub === "accounts") return ok(renderAccountPool(deps) ?? "Account pool not enabled.");
 		if (sub === "add-account") {
 			const flow = deps.poolAuth?.();
 			if (!flow) return err("Auth flow not available");
@@ -28648,6 +30229,41 @@ async function handle(deps, raw) {
 		return err(e instanceof Error ? e.message : String(e));
 	}
 }
+/**
+* The `/ccl accounts` (`/ccl pool`) listing. Exported as its own renderer so the account
+* rows — including the re-auth verdict each row carries — can be asserted directly; the
+* command handler above is a one-line dispatch into it.
+*/
+function renderAccountPool(deps) {
+	const pool = deps.pool?.();
+	if (!pool) return null;
+	const accounts = pool.getAccounts();
+	const data = pool.getPoolData();
+	const lines = [`**Antigravity Account Pool (${accounts.length} accounts, mode: ${data.mode})**`];
+	for (let i = 0; i < accounts.length; i++) {
+		const a = accounts[i];
+		if (!a) continue;
+		const isPrimary = a.id === data.primaryAccountId;
+		const qG = a.quotas.google?.remainingFraction !== void 0 ? `${Math.round(a.quotas.google.remainingFraction * 100)}%` : "unknown";
+		const qC = a.quotas.anthropic?.remainingFraction !== void 0 ? `${Math.round(a.quotas.anthropic.remainingFraction * 100)}%` : "unknown";
+		const qO = a.quotas.openai?.remainingFraction !== void 0 ? `${Math.round(a.quotas.openai.remainingFraction * 100)}%` : "unknown";
+		const cds = [];
+		for (const [fam, cd] of Object.entries(a.cooldowns)) if (cd && cd.cooldownUntil > Date.now()) {
+			const sec = Math.ceil((cd.cooldownUntil - Date.now()) / 1e3);
+			cds.push(`${fam} cooldown: ${sec}s left (${cd.reason})`);
+		}
+		const row = [
+			`${i + 1}. **${a.alias}** (${a.email || a.id})${isPrimary ? " ⭐ primary" : ""}`,
+			`   - Proxy: ${a.proxyUrl || "system default"}`,
+			`   - Quota: Gemini ${qG} | Claude ${qC} | GPT-OSS ${qO}`,
+			cds.length > 0 ? `   - ⚠️ ${cds.join("; ")}` : "   - Status: 🟢 Ready"
+		];
+		const authHealth = describeAccountAuth(a);
+		if (authHealth.reauthRequired) row.push(`   - 🔁 该账号授权缺少 ${authHealth.missingScopes.map(scopeLabel).join(", ")}，请对该账号重新 \`${REAUTH_COMMAND}\`（账号仍在池中，可继续用于已授予的能力）`);
+		lines.push(...row);
+	}
+	return lines.join("\n");
+}
 async function renderStatus(deps) {
 	const cfg = deps.cfg();
 	const authHelper = deps.auth();
@@ -28655,6 +30271,7 @@ async function renderStatus(deps) {
 	const cat = deps.catalog().get();
 	const pool = deps.pool?.();
 	const accounts = pool ? pool.getAccounts() : [];
+	const reauthNeeded = accounts.filter((a) => describeAccountAuth(a).reauthRequired).length;
 	const last = deps.lastRun();
 	return [
 		"**dsh-agy-link status (Direct CloudCode)**",
@@ -28664,6 +30281,7 @@ async function renderStatus(deps) {
 		"- default effort: " + (cfg.defaultEffort !== "" ? cfg.defaultEffort : "model default"),
 		"- catalog: " + cat.source + " (" + cat.models.length + " models)",
 		"- pool accounts: " + accounts.length + " accounts configured",
+		...reauthNeeded > 0 ? [`- 需要重新授权: ${reauthNeeded} 个账号的 Google 授权 scope 不足，请对这些账号执行 \`${REAUTH_COMMAND}\``] : [],
 		"- last call: " + (last ? (last.ok ? "OK" : "FAIL: " + last.code) + " (" + last.durationMs + "ms, " + last.model + ")" : "(none yet)")
 	].join("\n");
 }
@@ -28695,7 +30313,10 @@ function writeDoctorReport(deps) {
 	lines.push("- catalog: " + cat.source + " — " + cat.models.length + " models" + (cat.lastError === void 0 ? "" : " — error: " + cat.lastError));
 	for (const m of cat.models) lines.push("  - " + m.id + (m.efforts ? " [" + m.efforts.join("/") + "]" : ""));
 	lines.push("- pool accounts: " + accounts.length);
-	for (const a of accounts) lines.push("  - " + a.id + " (" + a.alias + "): " + (a.authRequired ? "AUTH_REQUIRED" : "READY"));
+	for (const a of accounts) {
+		const authHealth = describeAccountAuth(a);
+		lines.push("  - " + a.id + " (" + a.alias + "): " + (a.authRequired ? "AUTH_REQUIRED" : "READY") + (authHealth.reauthRequired ? ` — 授权缺少 ${authHealth.missingScopes.map(scopeLabel).join(", ")}，请对该账号重新 ${REAUTH_COMMAND}` : ""));
+	}
 	lines.push("- node: " + process.version + " — " + process.platform + " " + process.arch);
 	lines.push("");
 	const dir = join(stateDir(), "diagnostics");
@@ -30448,6 +32069,7 @@ function apply(ctx, entryConfig = {}) {
 		acquire: () => semaphore.acquire(),
 		log,
 		readImage,
+		reauthGuidanceFor: reauthGuidanceResolver((accountId) => pool.getAccounts().find((account) => account.id === accountId)),
 		onRun: (info) => {
 			lastRun = info;
 		}
@@ -30605,7 +32227,7 @@ function apply(ctx, entryConfig = {}) {
 			});
 		});
 		regBoth("pool", (_req, res) => {
-			sendJson(res, 200, pool.getPoolData());
+			sendJson(res, 200, describePoolAuthHealth(pool.getPoolData()));
 		});
 		regBoth("pool/begin-add", (req, res) => {
 			(async () => {

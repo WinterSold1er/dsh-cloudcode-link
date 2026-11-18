@@ -37,12 +37,13 @@ describe('M1: Core Client & Auth', () => {
     const headers = antigravityHeaders('fake-token')
     assert.equal(headers.Authorization, 'Bearer fake-token')
     assert.equal(headers['Content-Type'], 'application/json')
-    assert.equal(headers.Accept, 'text/event-stream')
-    assert.match(headers['User-Agent'] || '', /^antigravity\//)
-    assert.ok(headers['Client-Metadata'])
-    const meta = JSON.parse(String(headers['Client-Metadata']))
-    assert.equal(meta.ideType, 'ANTIGRAVITY')
-    assert.equal(meta.pluginType, 'GEMINI')
+    assert.match(headers['User-Agent'] || '', /^antigravity\/cli\/[0-9.]+ \(aidev_client; os_type=/)
+    // agy sends neither Client-Metadata nor X-Goog-Api-Client, and no Accept header at all
+    // (ops/relink/t2-traffic-findings.md: the SSE flavour comes from the ?alt=sse query).
+    assert.equal(headers['Client-Metadata'], undefined)
+    assert.equal(headers['X-Goog-Api-Client'], undefined)
+    assert.equal(headers.Accept, undefined)
+    assert.deepEqual(Object.keys(headers).sort(), ['Authorization', 'Content-Type', 'User-Agent'])
   })
 
   it('AccountPoolManager memory token priority and semaphore', async () => {
@@ -88,16 +89,22 @@ describe('M1: Core Client & Auth', () => {
   })
 
   it('ensureProject resolves project id via onboarding LRO polling mock', async () => {
-    let getOpCalls = 0
+    let backgroundCalls = 0
+    let onboardTierId: string | undefined
     const server = createServer((req, res) => {
       if (req.url?.includes('loadCodeAssist')) {
+        // No project offered; the tier list is what decides the onboardUser tierId.
         res.writeHead(200, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({}))
-      } else if (req.url?.includes('onboardUser')) {
-        res.writeHead(200, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ done: false, name: 'operations/op-test-123' }))
-      } else if (req.url?.includes('getOperation')) {
-        getOpCalls++
+        res.end(
+          JSON.stringify({
+            allowedTiers: [{ id: 'standard-tier', name: 'Antigravity', isDefault: true, usesGcpTos: true }],
+            ineligibleTiers: [{ tierId: 'free-tier', reasonCode: 'UNSUPPORTED_LOCATION' }],
+            gcpManaged: false,
+          }),
+        )
+      } else if (req.url?.includes('onboardUserBackgroundTasks')) {
+        // Must be matched before `onboardUser`: the verb name contains it.
+        backgroundCalls++
         res.writeHead(200, { 'Content-Type': 'application/json' })
         res.end(
           JSON.stringify({
@@ -106,6 +113,14 @@ describe('M1: Core Client & Auth', () => {
             response: { cloudaicompanionProject: { id: 'lro-project-success' } },
           }),
         )
+      } else if (req.url?.includes('onboardUser')) {
+        let body = ''
+        req.on('data', (chunk) => (body += chunk))
+        req.on('end', () => {
+          onboardTierId = (JSON.parse(body) as { tierId?: string }).tierId
+          res.writeHead(200, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ done: false, name: 'operations/op-test-123' }))
+        })
       } else {
         res.writeHead(404)
         res.end()
@@ -119,15 +134,19 @@ describe('M1: Core Client & Auth', () => {
     const endpoint = `http://127.0.0.1:${port}`
 
     try {
+      // Poll cadence is a knob of the client; shrink it so the test does not sleep for seconds.
+      process.env.ANTIGRAVITY_ONBOARD_POLL_INTERVAL_MS = '10'
       const proj = await ensureProject('token-lro', 'user-seed', undefined, [endpoint])
       assert.equal(proj, 'lro-project-success')
-      assert.equal(getOpCalls, 1)
+      assert.equal(onboardTierId, 'standard-tier')
+      assert.equal(backgroundCalls, 1)
 
       // Second call hits in-memory LRU cache without hitting server
       const cached = await ensureProject('token-lro', 'user-seed', undefined, [endpoint])
       assert.equal(cached, 'lro-project-success')
-      assert.equal(getOpCalls, 1)
+      assert.equal(backgroundCalls, 1)
     } finally {
+      delete process.env.ANTIGRAVITY_ONBOARD_POLL_INTERVAL_MS
       server.close()
     }
   })

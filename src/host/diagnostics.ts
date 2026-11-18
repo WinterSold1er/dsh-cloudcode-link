@@ -6,6 +6,7 @@ import { stateDir } from '../common/config.ts'
 import type { PluginConfig } from '../common/types.ts'
 import type { ModelCatalog } from './models.ts'
 import type { AccountPoolManager } from './pool.ts'
+import { describeAccountAuth, REAUTH_COMMAND, scopeLabel } from './account-health.ts'
 
 export interface DoctorDeps {
   cfg: () => PluginConfig
@@ -40,7 +41,13 @@ export function writeDoctorReport(deps: DoctorDeps): string {
   }
   lines.push('- pool accounts: ' + accounts.length)
   for (const a of accounts) {
-    lines.push('  - ' + a.id + ' (' + a.alias + '): ' + (a.authRequired ? 'AUTH_REQUIRED' : 'READY'))
+    const authHealth = describeAccountAuth(a)
+    lines.push(
+      '  - ' + a.id + ' (' + a.alias + '): ' + (a.authRequired ? 'AUTH_REQUIRED' : 'READY') +
+        (authHealth.reauthRequired
+          ? ` — 授权缺少 ${authHealth.missingScopes.map(scopeLabel).join(', ')}，请对该账号重新 ${REAUTH_COMMAND}`
+          : ''),
+    )
   }
   lines.push('- node: ' + process.version + ' — ' + process.platform + ' ' + process.arch)
   lines.push('')

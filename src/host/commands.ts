@@ -5,6 +5,7 @@ import type { AuthHelper } from './auth.ts'
 import type { ModelCatalog } from './models.ts'
 import type { SessionStore } from './sessions.ts'
 import type { AccountPoolManager } from './pool.ts'
+import { describeAccountAuth, REAUTH_COMMAND, scopeLabel } from './account-health.ts'
 import type { PoolAuthFlow } from './pool-auth.ts'
 import type { QuotaService } from './quota.ts'
 
@@ -55,35 +56,8 @@ async function handle(deps: CommandDeps, raw: string): Promise<CommandResult> {
   try {
     if (sub === 'status') return ok(await renderStatus(deps))
     if (sub === 'pool' || sub === 'accounts') {
-      const pool = deps.pool?.()
-      if (!pool) return ok('Account pool not enabled.')
-      const accounts = pool.getAccounts()
-      const data = pool.getPoolData()
-      const lines = [
-        `**Antigravity Account Pool (${accounts.length} accounts, mode: ${data.mode})**`,
-      ]
-      for (let i = 0; i < accounts.length; i++) {
-        const a = accounts[i]
-        if (!a) continue
-        const isPrimary = a.id === data.primaryAccountId
-        const qG = a.quotas.google?.remainingFraction !== undefined ? `${Math.round(a.quotas.google.remainingFraction * 100)}%` : 'unknown'
-        const qC = a.quotas.anthropic?.remainingFraction !== undefined ? `${Math.round(a.quotas.anthropic.remainingFraction * 100)}%` : 'unknown'
-        const qO = a.quotas.openai?.remainingFraction !== undefined ? `${Math.round(a.quotas.openai.remainingFraction * 100)}%` : 'unknown'
-        const cds: string[] = []
-        for (const [fam, cd] of Object.entries(a.cooldowns)) {
-          if (cd && cd.cooldownUntil > Date.now()) {
-            const sec = Math.ceil((cd.cooldownUntil - Date.now()) / 1000)
-            cds.push(`${fam} cooldown: ${sec}s left (${cd.reason})`)
-          }
-        }
-        lines.push(
-          `${i + 1}. **${a.alias}** (${a.email || a.id})${isPrimary ? ' ⭐ primary' : ''}`,
-          `   - Proxy: ${a.proxyUrl || 'system default'}`,
-          `   - Quota: Gemini ${qG} | Claude ${qC} | GPT-OSS ${qO}`,
-          cds.length > 0 ? `   - ⚠️ ${cds.join('; ')}` : '   - Status: 🟢 Ready'
-        )
-      }
-      return ok(lines.join('\n'))
+      const rendered = renderAccountPool(deps)
+      return ok(rendered ?? 'Account pool not enabled.')
     }
     if (sub === 'add-account') {
       const flow = deps.poolAuth?.()
@@ -178,13 +152,61 @@ async function handle(deps: CommandDeps, raw: string): Promise<CommandResult> {
   }
 }
 
-async function renderStatus(deps: CommandDeps): Promise<string> {
+/**
+ * The `/ccl accounts` (`/ccl pool`) listing. Exported as its own renderer so the account
+ * rows — including the re-auth verdict each row carries — can be asserted directly; the
+ * command handler above is a one-line dispatch into it.
+ */
+export function renderAccountPool(deps: CommandDeps): string | null {
+  const pool = deps.pool?.()
+  if (!pool) return null
+  const accounts = pool.getAccounts()
+  const data = pool.getPoolData()
+  const lines = [
+    `**Antigravity Account Pool (${accounts.length} accounts, mode: ${data.mode})**`,
+  ]
+  for (let i = 0; i < accounts.length; i++) {
+    const a = accounts[i]
+    if (!a) continue
+    const isPrimary = a.id === data.primaryAccountId
+    const qG = a.quotas.google?.remainingFraction !== undefined ? `${Math.round(a.quotas.google.remainingFraction * 100)}%` : 'unknown'
+    const qC = a.quotas.anthropic?.remainingFraction !== undefined ? `${Math.round(a.quotas.anthropic.remainingFraction * 100)}%` : 'unknown'
+    const qO = a.quotas.openai?.remainingFraction !== undefined ? `${Math.round(a.quotas.openai.remainingFraction * 100)}%` : 'unknown'
+    const cds: string[] = []
+    for (const [fam, cd] of Object.entries(a.cooldowns)) {
+      if (cd && cd.cooldownUntil > Date.now()) {
+        const sec = Math.ceil((cd.cooldownUntil - Date.now()) / 1000)
+        cds.push(`${fam} cooldown: ${sec}s left (${cd.reason})`)
+      }
+    }
+    const row: string[] = [
+      `${i + 1}. **${a.alias}** (${a.email || a.id})${isPrimary ? ' ⭐ primary' : ''}`,
+      `   - Proxy: ${a.proxyUrl || 'system default'}`,
+      `   - Quota: Gemini ${qG} | Claude ${qC} | GPT-OSS ${qO}`,
+      cds.length > 0 ? `   - ⚠️ ${cds.join('; ')}` : '   - Status: 🟢 Ready',
+    ]
+    // Read-only verdict from the account's recorded grant: the account stays listed and
+    // usable, the row only says the grant is too narrow and how to widen it.
+    const authHealth = describeAccountAuth(a)
+    if (authHealth.reauthRequired) {
+      row.push(
+        `   - 🔁 该账号授权缺少 ${authHealth.missingScopes.map(scopeLabel).join(', ')}，` +
+          `请对该账号重新 \`${REAUTH_COMMAND}\`（账号仍在池中，可继续用于已授予的能力）`,
+      )
+    }
+    lines.push(...row)
+  }
+  return lines.join('\n')
+}
+
+export async function renderStatus(deps: CommandDeps): Promise<string> {
   const cfg = deps.cfg()
   const authHelper = deps.auth()
   const auth = authHelper ? await authHelper.resolvedStatus() : undefined
   const cat = deps.catalog().get()
   const pool = deps.pool?.()
   const accounts = pool ? pool.getAccounts() : []
+  const reauthNeeded = accounts.filter((a) => describeAccountAuth(a).reauthRequired).length
   const last = deps.lastRun()
   const lines = [
     '**dsh-agy-link status (Direct CloudCode)**',
@@ -194,6 +216,11 @@ async function renderStatus(deps: CommandDeps): Promise<string> {
     '- default effort: ' + (cfg.defaultEffort !== '' ? cfg.defaultEffort : 'model default'),
     '- catalog: ' + cat.source + ' (' + cat.models.length + ' models)',
     '- pool accounts: ' + accounts.length + ' accounts configured',
+    ...(reauthNeeded > 0
+      ? [
+          `- 需要重新授权: ${reauthNeeded} 个账号的 Google 授权 scope 不足，请对这些账号执行 \`${REAUTH_COMMAND}\``,
+        ]
+      : []),
     '- last call: ' + (last ? (last.ok ? 'OK' : 'FAIL: ' + last.code) + ' (' + last.durationMs + 'ms, ' + last.model + ')' : '(none yet)'),
   ]
   return lines.join('\n')

@@ -26,7 +26,14 @@ test('1. agyUserAgent outputs verbatim upstream CLI identity and fetchAvailableM
   const server = createServer((req, res) => {
     capturedUA = req.headers['user-agent']
     res.writeHead(200, { 'Content-Type': 'application/json' })
-    res.end(JSON.stringify({ models: {} }))
+    // Fixture-only: QuotaService resolves the project through loadCodeAssist before it will
+    // send either query RPC, so the host has to name one the way the real backend does
+    // (cloudaicompanionProject, ops/relink/t2-traffic-findings.md #2.4). Without it no query
+    // request is sent at all and the User-Agent assertion below would test nothing.
+    const payload = (req.url ?? '').includes('loadCodeAssist')
+      ? { cloudaicompanionProject: 'aicode-consumers' }
+      : { models: {} }
+    res.end(JSON.stringify(payload))
   })
 
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()))
@@ -75,6 +82,15 @@ test('3. fetchAvailableModels fallback: 403 on first endpoint continues to secon
       return
     }
     if (url.includes('endpoint2')) {
+      // Fixture-only: the project lookup runs over the same endpoint list, so the host has to
+      // name a project (as the real backend does) for the query RPCs to be sent at all.
+      // `secondCalled` stays reserved for the query RPC, so the 403-fallback assertion below
+      // can still only be satisfied by an actual fallback.
+      if (url.includes('loadCodeAssist')) {
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ cloudaicompanionProject: 'aicode-consumers' }))
+        return
+      }
       secondCalled = true
       res.writeHead(200, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify({ models: { 'gemini-3.8-flash': { displayName: 'Gemini 3.8 Flash' } } }))
@@ -408,26 +424,37 @@ test('8. Quota parsing: 3 groups from cli UA do not overwrite or destroy primary
   }
 })
 
+// 9 and 10 are the root-side mirror of the endpoint-error coverage core keeps in
+// test/agy-quota-alignment.test.ts (root has no copy of that file). They were rewritten to
+// the current contract: a project lookup now runs over the same endpoint list as the query
+// RPCs (quota.ts resolveRequestProject -> ensureProject), so a host that names no project is
+// skipped before any RPC is sent. Both tests therefore let the host name a project so the
+// 500 / 401 / 403 refusals they assert on are real refusals of an accepted project.
 test('9. QuotaService records endpointErrors in instance and exposes it via discoverAvailableModels', async () => {
   let endpoint1Called = false
   let endpoint2Called = false
 
   const server = createServer((req, res) => {
     const url = req.url ?? ''
+    const send = (status: number, payload: unknown): void => {
+      res.writeHead(status, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify(payload))
+    }
+    if (url.includes('loadCodeAssist')) {
+      send(200, { cloudaicompanionProject: 'aicode-consumers' })
+      return
+    }
     if (url.includes('bad1')) {
       endpoint1Called = true
-      res.writeHead(500, { 'Content-Type': 'application/json' })
-      res.end(JSON.stringify({ error: { code: 500, message: 'Internal Server Error' } }))
+      send(500, { error: { code: 500, message: 'Internal Server Error' } })
       return
     }
     if (url.includes('bad2')) {
       endpoint2Called = true
-      res.writeHead(403, { 'Content-Type': 'application/json' })
-      res.end(JSON.stringify({ error: { code: 403, message: 'Forbidden' } }))
+      send(403, { error: { code: 403, message: 'Forbidden' } })
       return
     }
-    res.writeHead(404)
-    res.end()
+    send(404, { error: { code: 404, message: 'not part of the contract under test' } })
   })
 
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()))
@@ -437,19 +464,34 @@ test('9. QuotaService records endpointErrors in instance and exposes it via disc
   try {
     const pool = new AccountPoolManager(tmpPoolDir)
     const quota = new QuotaService(pool)
-    ;(quota as unknown as { getOrderedEndpoints: () => string[] }).getOrderedEndpoints = () => [
+    const endpoints = [
       `http://127.0.0.1:${port}/bad1`,
       `http://127.0.0.1:${port}/bad2`,
     ]
 
-    const res = await quota.fetchAvailableModels('fake-token-secret-xyz')
+    const res = await quota.fetchAvailableModels('fake-token-secret-xyz', undefined, {
+      accountKey: 'acct-errors',
+      projectSeed: 'seed-errors',
+      endpoints,
+    })
     assert.equal(res, null, 'Must return null when all endpoints fail')
     assert.ok(endpoint1Called && endpoint2Called, 'All endpoints must be attempted')
     assert.ok(Array.isArray(quota.lastEndpointErrors), 'lastEndpointErrors must be an array')
     assert.equal(quota.lastEndpointErrors.length, 2, 'Should have 2 endpoint errors')
     assert.ok(quota.lastEndpointErrors[0]?.includes('500'), 'First error must mention 500')
     assert.ok(quota.lastEndpointErrors[1]?.includes('403'), 'Second error must mention 403')
-    assert.ok(!quota.lastEndpointErrors.some(e => e.includes('secret-xyz')), 'Endpoint errors must never contain token secret')
+    assert.ok(
+      quota.lastEndpointErrors.every((entry) => entry.includes('127.0.0.1')),
+      'each recorded error must name the endpoint that refused it',
+    )
+    assert.ok(
+      !quota.lastEndpointErrors.some((entry) => entry.includes('secret-xyz')),
+      'Endpoint errors must never contain token secret',
+    )
+    // The failures below are refusals of a project the backend named, not a skipped lookup.
+    assert.equal(quota.lastModelsProjectResolution?.projectUnresolved, false, 'the lookup must have named a project')
+    assert.equal(quota.lastModelsProjectResolution?.project, 'aicode-consumers', 'the named project is the one carried by the RPCs')
+    assert.equal(quota.lastModelsProjectResolution?.source, 'loadCodeAssist', 'the project came from the lookup, not from a fallback')
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()))
     rmSync(tmpPoolDir, { recursive: true, force: true })
@@ -462,40 +504,56 @@ test('10. fetchQuotaSummary continues on 401/403 and records lastQuotaEndpointEr
 
   const server = createServer((req, res) => {
     const url = req.url ?? ''
-    if (url.includes('q1')) {
+    const send = (status: number, payload: unknown): void => {
+      res.writeHead(status, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify(payload))
+    }
+    if (url.includes('loadCodeAssist')) {
+      send(200, { cloudaicompanionProject: 'aicode-consumers' })
+      return
+    }
+    if (url.includes('quota1')) {
       firstCalled = true
-      res.writeHead(403, { 'Content-Type': 'application/json' })
-      res.end(JSON.stringify({ error: { code: 403, message: 'Quota Forbidden' } }))
+      send(401, { error: { code: 401, message: 'Quota Unauthorized' } })
       return
     }
-    if (url.includes('q2')) {
+    if (url.includes('quota2')) {
       secondCalled = true
-      res.writeHead(200, { 'Content-Type': 'application/json' })
-      res.end(JSON.stringify({ groups: [] }))
+      send(403, { error: { code: 403, message: 'Quota Forbidden' } })
       return
     }
-    res.writeHead(404)
-    res.end()
+    send(404, { error: { code: 404, message: 'not part of the contract under test' } })
   })
 
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()))
   const port = (server.address() as { port: number }).port
 
-  const tmpPoolDir = mkdtempSync(join(tmpdir(), 'agy-test-pool-qsummary-'))
+  const tmpPoolDir = mkdtempSync(join(tmpdir(), 'agy-test-pool-quota-errors-'))
   try {
     const pool = new AccountPoolManager(tmpPoolDir)
     const quota = new QuotaService(pool)
-    ;(quota as unknown as { getOrderedEndpoints: () => string[] }).getOrderedEndpoints = () => [
-      `http://127.0.0.1:${port}/q1`,
-      `http://127.0.0.1:${port}/q2`,
+    const endpoints = [
+      `http://127.0.0.1:${port}/quota1`,
+      `http://127.0.0.1:${port}/quota2`,
     ]
 
-    const res = await quota.fetchQuotaSummary('fake-token')
-    assert.ok(firstCalled, 'First endpoint must be attempted')
-    assert.ok(secondCalled, 'Second endpoint must be attempted on 403 (not aborted)')
-    assert.ok(res, 'Must return response from second endpoint')
+    const summary = await quota.fetchQuotaSummary('fake-token-secret-xyz', undefined, {
+      accountKey: 'acct-quota-errors',
+      projectSeed: 'seed-quota-errors',
+      endpoints,
+    })
+    assert.equal(summary, null, 'Must return null when every endpoint refuses')
+    assert.ok(firstCalled && secondCalled, 'A 401 on the first endpoint must not abort the fallback to the second')
     assert.ok(Array.isArray(quota.lastQuotaEndpointErrors), 'lastQuotaEndpointErrors must be an array')
-    assert.ok(quota.lastQuotaEndpointErrors[0]?.includes('403'), 'Recorded error must reflect 403')
+    assert.equal(quota.lastQuotaEndpointErrors.length, 2, 'Both refusals must be recorded')
+    assert.ok(quota.lastQuotaEndpointErrors[0]?.includes('401'), 'First recorded error must reflect 401')
+    assert.ok(quota.lastQuotaEndpointErrors[1]?.includes('403'), 'Second recorded error must reflect 403')
+    assert.ok(
+      !quota.lastQuotaEndpointErrors.some((entry) => entry.includes('secret-xyz')),
+      'Recorded errors must never contain the token',
+    )
+    assert.equal(quota.lastQuotaProjectResolution?.projectUnresolved, false, 'the lookup must have named a project before the refusals')
+    assert.equal(quota.lastQuotaProjectResolution?.project, 'aicode-consumers', 'the named project is the one carried by the RPCs')
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()))
     rmSync(tmpPoolDir, { recursive: true, force: true })

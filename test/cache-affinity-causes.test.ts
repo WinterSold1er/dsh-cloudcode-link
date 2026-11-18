@@ -157,10 +157,10 @@ describe('6 Root Causes of Cache Misses Fixes (FR-01 to FR-06, AC-01 to AC-06)',
   describe('FR-04 / AC-04: requestId Determinism without Timestamp Jitter', () => {
     it('antigravityRequestEnvelope creates deterministic requestId without Date.now() timestamp', () => {
       const traj = 'stable-traj-uuid'
-      const env1 = antigravityRequestEnvelope('gemini-3.7-flash', false, { trajectoryId: traj, step: 1 })
-      const env2 = antigravityRequestEnvelope('gemini-3.7-flash', false, { trajectoryId: traj, step: 1 })
+      const env1 = antigravityRequestEnvelope('gemini-3.7-flash', false, { trajectoryId: traj, step: 1, now: () => 1794817091999 })
+      const env2 = antigravityRequestEnvelope('gemini-3.7-flash', false, { trajectoryId: traj, step: 1, now: () => 1794817091999 })
 
-      assert.equal(env1.requestId, `agent/${traj}/1`)
+      assert.equal(env1.requestId, `agent/${traj}/1794817091999/${traj}/1`)
       assert.equal(env1.requestId, env2.requestId, 'requestId must be identical for same trajectory and step')
       assert.ok(!env1.requestId.includes(String(Date.now())), 'requestId must not contain dynamic timestamp')
     })
@@ -251,8 +251,15 @@ describe('6 Root Causes of Cache Misses Fixes (FR-01 to FR-06, AC-01 to AC-06)',
         assert.ok(reqObj.labels.trajectory_id)
         assert.equal(reqObj.labels.last_step_index, '1')
 
-        // AC-04 Verification: requestId is deterministic agent/${traj}/1 without Date.now()
-        assert.equal(interceptedBody.requestId, `agent/${reqObj.labels.trajectory_id}/1`)
+        // AC-04 Verification: requestId matches agent/<cascade_id>/<epoch_ms>/<trajectory_id>/<step>.
+        // This path goes through AgyAdapter, which owns its own clock, so the 13-digit epoch
+        // segment is asserted by shape instead of a pinned value.
+        assert.match(
+          interceptedBody.requestId,
+          new RegExp('^agent/' + reqObj.labels.trajectory_id + '/[0-9]{13}/' + reqObj.labels.trajectory_id + '/1$'),
+        )
+        assert.equal(interceptedBody.requestType, 'agent')
+        assert.equal(interceptedBody.userAgent, 'antigravity')
       } finally {
         server.close()
       }
