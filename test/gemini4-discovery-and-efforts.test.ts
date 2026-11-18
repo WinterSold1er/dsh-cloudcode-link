@@ -155,8 +155,15 @@ test('4. Real 34-model fixture parses gemini-4-argon and gemini-4-hydrogen corre
   for (const item of catalog) {
     assert.ok(!item.id.includes('-disabled'), `Item id must not contain -disabled: ${item.id}`)
     assert.ok(!item.id.includes('-tiered'), `Item id must not contain -tiered: ${item.id}`)
-    assert.ok(!item.id.includes('-sonar'), `Item id must not contain -sonar: ${item.id}`)
   }
+
+  // gemini-4-hydrogen-sonar is the opposite case: the capture publishes it with its own quotaInfo
+  // and no disabled flag, but lists it in no agentModelSorts group, so it reaches the catalog
+  // through the quota-published union step - as one entry of its own, with no effort ladder.
+  const sonar = catalog.find((c) => c.id === 'gemini-4-hydrogen-sonar')
+  assert.ok(sonar, 'gemini-4-hydrogen-sonar must be exposed by discovery')
+  assert.equal(sonar.name, 'Gemini 4 Hydrogen (Sonar)')
+  assert.equal(sonar.efforts, null, 'sonar exposes no effort ladder')
 
   // Duplicate id check
   const ids = catalog.map((c) => c.id)
@@ -166,8 +173,10 @@ test('4. Real 34-model fixture parses gemini-4-argon and gemini-4-hydrogen corre
   const names = catalog.map((c) => c.name)
   assert.equal(new Set(names).size, names.length, 'Every catalog entry must have a unique display name')
 
-  // Overall catalog count aligns with 17 recommended active models folded into 10 catalog entries
-  assert.equal(catalog.length, 10, 'Folded catalog from recommended models should have exactly 10 entries')
+  // Overall catalog count: the 17 models agentModelSorts recommends fold into 10 entries, and the
+  // quota-published union adds the 9 models the capture gives a quotaInfo but places in no group
+  // (gemini-4-hydrogen-sonar plus the older recommended gemini entries).
+  assert.equal(catalog.length, 19, 'sorts-folded entries (10) + quota-published models (9) must all be exposed')
 })
 
 test('5. Sorts race condition: merging restricted (9 models) and full (18 models) accounts in both arrival orders produces identical catalogs', async () => {
@@ -279,7 +288,7 @@ test('5. Sorts race condition: merging restricted (9 models) and full (18 models
   }
 })
 
-test('6. No-sorts scenario: fallback models dict parsing filters internal/tiered/sonar/disabled models', () => {
+test('6. No-sorts scenario: fallback models dict parsing filters internal/tiered/disabled models and still exposes sonar', () => {
   const fixturePath = join(__dirname, 'fixtures', 'fetch-available-models.json')
   const parsed = JSON.parse(readFileSync(fixturePath, 'utf-8'))
   // Delete agentModelSorts to force models-dict fallback path
@@ -297,17 +306,24 @@ test('6. No-sorts scenario: fallback models dict parsing filters internal/tiered
   assert.ok(hydrogen, 'gemini-4-hydrogen must exist even in no-sorts fallback')
   assert.deepEqual(hydrogen.efforts?.slice().sort(), ['high', 'low', 'medium', 'xhigh'])
 
-  // No -tiered, -sonar, -disabled models leaked
+  // No -tiered or -disabled models leaked
   for (const item of catalog) {
     assert.ok(!item.id.includes('-disabled'), `Item id must not contain -disabled: ${item.id}`)
     assert.ok(!item.id.includes('-tiered'), `Item id must not contain -tiered: ${item.id}`)
-    assert.ok(!item.id.includes('-sonar'), `Item id must not contain -sonar: ${item.id}`)
   }
+
+  // sonar is exposed here too: the dict lists it without a disabled flag, so the fallback cannot
+  // hide it just because no sort group names it.
+  assert.ok(
+    catalog.some((c) => c.id === 'gemini-4-hydrogen-sonar'),
+    'gemini-4-hydrogen-sonar must survive the no-sorts fallback',
+  )
 
   // Unique model IDs
   const ids = catalog.map((c) => c.id)
   assert.equal(new Set(ids).size, ids.length, 'No duplicate model IDs in no-sorts fallback')
-  assert.equal(catalog.length, 18, 'Fallback models catalog should have 18 distinct models')
+  // Same 19 entries as the sorts path (test 4): the fallback must not invent or drop models.
+  assert.equal(catalog.length, 19, 'Fallback models catalog should have 19 distinct models')
 })
 
 test('7. getAntigravityRequestModelId correctly maps xhigh without hardcoded model special-casing', () => {

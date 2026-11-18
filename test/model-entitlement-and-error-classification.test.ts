@@ -218,7 +218,7 @@ describe('Model-level entitlement selection (packages/core/src/pool.ts)', () => 
     }
   })
 
-  it('never counts *-disabled or *-sonar listings as serviceable', () => {
+  it('never counts a *-disabled or sonar-only listing as entitlement to the hydrogen ladder', () => {
     const dir = makePoolDir()
     try {
       const { pool, a, b } = makePool(
@@ -230,6 +230,10 @@ describe('Model-level entitlement selection (packages/core/src/pool.ts)', () => 
       assert.equal(modelEntitlementOf(pool.getAccount(b)!, FAMILY, WIRE_MODEL).supported, false)
       assert.equal(pool.selectAccount(FAMILY, WIRE_MODEL), null)
       assert.equal(pool.getFamilyStatus(FAMILY, WIRE_MODEL).reason, 'model_not_available')
+      // What the listing DOES say: sonar entitles sonar, because it is a model of its own and not a
+      // rung of the hydrogen ladder; a *-disabled entry entitles nothing.
+      assert.equal(modelEntitlementOf(pool.getAccount(a)!, FAMILY, 'gemini-4-hydrogen-sonar').supported, true)
+      assert.equal(modelEntitlementOf(pool.getAccount(b)!, FAMILY, 'gemini-4-hydrogen-sonar').supported, false)
       // Without a model in hand both accounts stay schedulable: the pool is not killed.
       assert.equal(pool.getFamilyStatus(FAMILY).reason, undefined)
       assert.ok(pool.selectAccount(FAMILY)?.id)

@@ -182,17 +182,30 @@ const MODEL_EFFORT_SUFFIXES = [
 	"tiered"
 ];
 /**
-* Suffixes the backend uses to publish a model id it refuses to serve
-* (`gemini-4-hydrogen-disabled`, `gemini-4-hydrogen-sonar`). These are entitlement
-* declarations, never effort variants: a list holding only such entries does not make the base
-* model available.
+* Suffixes the backend uses to publish a model id it explicitly refuses to serve
+* (`gemini-4-hydrogen-disabled`, carried with `disabled: true` and an "Unavailable" tag in the
+* captured FetchAvailableModels response). `disabled` is the server's own refusal marker.
+*
+* `sonar` is NOT such a marker, contrary to what this comment used to claim. In the same capture
+* `gemini-4-hydrogen-sonar` is published with a live `quotaInfo` (remainingFraction ~1 plus a
+* resetTime), no `disabled` / `beta` / `isInternal` flag and `recommended: true`, in no
+* `agentModelSorts` / `tieredModelIds` group only because agy's picker does not show it — and live
+* requests against it returned HTTP 200 with SSE text and `modelVersion: gemini-4-hydrogen-sonar`
+* on three accounts (free-tier included). So it is a servable model of its own, and a list holding
+* only `...-disabled` entries still says nothing about the base model.
 */
-const MODEL_UNSERVABLE_SUFFIXES = ["disabled", "sonar"];
+const MODEL_UNSERVABLE_SUFFIXES = ["disabled"];
 /** Quarantine window for one (account, family, model base) triple after an upstream 403. */
 const MODEL_UNSUPPORTED_COOLDOWN_MS = 3e5;
 /** Repeated 403s for the same model escalate the quarantine, but never past this bound. */
 const MODEL_UNSUPPORTED_MAX_COOLDOWN_MS = 18e5;
-/** `gemini-4-hydrogen-tiered-high` -> `gemini-4-hydrogen`; unservable markers are NOT stripped. */
+/**
+* `gemini-4-hydrogen-tiered-high` -> `gemini-4-hydrogen`; unservable markers are NOT stripped.
+* `gemini-4-hydrogen-sonar` keeps its full id on purpose: it has no effort ladder, so it is not a
+* variant of `gemini-4-hydrogen`, and folding it in would make a sonar-only account look entitled
+* to `gemini-4-hydrogen-medium` — a request the upstream answers with 403, which would quarantine
+* the whole hydrogen family for that account.
+*/
 function modelBaseOf(modelId) {
 	let base = modelId.trim().toLowerCase();
 	for (;;) {
@@ -201,7 +214,7 @@ function modelBaseOf(modelId) {
 		base = base.slice(0, -(modifier.length + 1));
 	}
 }
-/** False for ids the backend marks as not serviceable (`...-disabled`, `...-sonar`). */
+/** False for ids the backend marks as not serviceable (`...-disabled`). */
 function isServableModelId(modelId) {
 	const id = modelId.trim().toLowerCase();
 	if (!id) return false;
@@ -1274,20 +1287,39 @@ function resolveConfig(entry, env = process.env, overrides = readOverrides()) {
 }
 //#endregion
 //#region packages/core/src/models.ts
+/**
+* Names for ids the server ships without any `displayName`. Their shape follows the labels the
+* server itself uses for the siblings of the same family in the same capture — the capture labels
+* `gemini-4-hydrogen-high` as "Gemini 4 Hydrogen (High)" and `gemini-4-hydrogen-xhigh` as
+* "Gemini 4 Hydrogen (XHigh)" — so the sonar sibling reads alike. The name states nothing about
+* capabilities beyond what the capture reports (`supportsThinking: true`, `thinkingLevel: 1`).
+*/
+const UNLABELED_MODEL_NAMES = { "gemini-4-hydrogen-sonar": "Gemini 4 Hydrogen (Sonar)" };
+function prettifyToken(token) {
+	const lower = token.toLowerCase();
+	if (lower === "gpt") return "GPT";
+	if (lower === "oss") return "OSS";
+	if (/^\d+b$/i.test(lower)) return lower.toUpperCase();
+	if (/^\d+(?:\.\d+)?$/.test(token)) return token;
+	return token.charAt(0).toUpperCase() + token.slice(1).toLowerCase();
+}
 function prettifyModelSlug(slug) {
 	if (!slug) return "";
-	return slug.trim().replace(/(\d+)-(\d+)/g, "$1.$2").split(/[-_]+/).map((token) => {
-		const lower = token.toLowerCase();
-		if (lower === "gpt") return "GPT";
-		if (lower === "oss") return "OSS";
-		if (/^\d+b$/i.test(lower)) return lower.toUpperCase();
-		if (/^\d+(?:\.\d+)?$/.test(token)) return token;
-		return token.charAt(0).toUpperCase() + token.slice(1).toLowerCase();
-	}).join(" ");
+	const key = slug.trim().toLowerCase();
+	const serverName = UNLABELED_MODEL_NAMES[key];
+	if (serverName !== void 0) return serverName;
+	return slug.trim().replace(/(\d+)-(\d+)/g, "$1.$2").split(/[-_]+/).map(prettifyToken).join(" ");
 }
+/**
+* Slugs that are never a user-selectable model: server-internal families (`chat_*`, `tab_*`),
+* preview builds, ids the server marks `...-disabled`, and tiered-group ids (`-tiered-`), which
+* fold into their base model instead of appearing on their own.
+* `gemini-4-hydrogen-sonar` is deliberately NOT internal — the server publishes it with live quota
+* and it answers live requests; see the note on MODEL_UNSERVABLE_SUFFIXES in pool.ts.
+*/
 function isInternalModel(slug) {
 	const s = slug.trim().toLowerCase();
-	return /^chat_\d+$/i.test(s) || /^tab[_-]/i.test(s) || /_preview$/i.test(s) || /-preview$/i.test(s) || /-(?:disabled|sonar)(?:-|$)/i.test(s) || /-tiered-/i.test(s);
+	return /^chat_\d+$/i.test(s) || /^tab[_-]/i.test(s) || /_preview$/i.test(s) || /-preview$/i.test(s) || /-disabled(?:-|$)/i.test(s) || /-tiered-/i.test(s);
 }
 /** Parse `agy models` stdout: JSON shapes first, then two-column text. */
 function parseModelsOutput(stdout) {
@@ -1333,6 +1365,37 @@ function dedupeBySlug(raw) {
 	}
 	return out;
 }
+/**
+* A model the server published with a live quota but placed in no display group. The gate is
+* explicit server data - a numeric `quotaInfo.remainingFraction` on an entry the server did not
+* mark `disabled` / `enabled: false` / `isInternal` - never a match on the slug's spelling.
+* This is how an upstream-hidden but measurable model (`gemini-4-hydrogen-sonar`) reaches the
+* catalog without inventing a name-based allow list.
+*/
+function isQuotaPublishedModel(entry) {
+	if (!entry || typeof entry !== "object") return false;
+	if (entry.disabled === true || entry.enabled === false || entry.isInternal === true) return false;
+	const quota = entry.quotaInfo;
+	if (!quota || typeof quota !== "object") return false;
+	const fraction = quota.remainingFraction;
+	return typeof fraction === "number" && Number.isFinite(fraction);
+}
+/** The label the server itself supplies for a models-dict entry, if it supplies one at all. */
+function serverDisplayName(entry) {
+	if (!entry || typeof entry !== "object") return "";
+	return typeof entry.displayName === "string" && entry.displayName.trim() !== "" ? entry.displayName.trim() : typeof entry.display_name === "string" && entry.display_name.trim() !== "" ? entry.display_name.trim() : typeof entry.modelName === "string" && entry.modelName.trim() !== "" ? entry.modelName.trim() : typeof entry.name === "string" && entry.name.trim() !== "" ? entry.name.trim() : "";
+}
+/** Server labels claimed by more than one slug; such a label is not a usable name for any of them. */
+function sharedServerLabels(labels) {
+	const owners = /* @__PURE__ */ new Set();
+	const shared = /* @__PURE__ */ new Set();
+	for (const label of labels) {
+		if (label === "") continue;
+		if (owners.has(label)) shared.add(label);
+		else owners.add(label);
+	}
+	return shared;
+}
 function extractModelList(parsed) {
 	let arr = null;
 	if (Array.isArray(parsed)) arr = parsed;
@@ -1351,16 +1414,38 @@ function extractModelList(parsed) {
 			if (sortedIds.length > 0) {
 				const out = [];
 				const seen = /* @__PURE__ */ new Set();
+				const sortLabels = [];
 				for (const mid of sortedIds) {
 					if (seen.has(mid)) continue;
 					seen.add(mid);
 					if (isInternalModel(mid)) continue;
 					const entry = modelsMap?.[mid];
 					if (entry && (entry.disabled === true || entry.enabled === false)) continue;
-					const rawLabel = typeof entry?.displayName === "string" && entry.displayName.trim() !== "" ? entry.displayName.trim() : typeof entry?.display_name === "string" && entry.display_name.trim() !== "" ? entry.display_name.trim() : typeof entry?.modelName === "string" && entry.modelName.trim() !== "" ? entry.modelName.trim() : typeof entry?.name === "string" && entry.name.trim() !== "" ? entry.name.trim() : "";
+					const rawLabel = serverDisplayName(entry);
 					const label = rawLabel !== "" && rawLabel !== mid ? rawLabel : prettifyModelSlug(mid);
 					out.push({
 						slug: mid,
+						label
+					});
+					sortLabels.push(rawLabel);
+				}
+				const published = [];
+				for (const [key, entry] of Object.entries(modelsMap ?? {})) {
+					const slug = typeof key === "string" ? key.trim() : "";
+					if (slug === "" || seen.has(slug)) continue;
+					if (!entry || typeof entry !== "object" || !isQuotaPublishedModel(entry)) continue;
+					if (isInternalModel(slug)) continue;
+					seen.add(slug);
+					published.push({
+						slug,
+						rawLabel: serverDisplayName(entry)
+					});
+				}
+				const sharedLabels = sharedServerLabels([...sortLabels, ...published.map((p) => p.rawLabel)]);
+				for (const item of published) {
+					const label = item.rawLabel !== "" && item.rawLabel !== item.slug && !sharedLabels.has(item.rawLabel) ? item.rawLabel : prettifyModelSlug(item.slug);
+					out.push({
+						slug: item.slug,
 						label
 					});
 				}
@@ -1377,7 +1462,7 @@ function extractModelList(parsed) {
 				if (isInternalModel(trimmedKey)) continue;
 				const v = val && typeof val === "object" ? val : {};
 				if (v.disabled === true || v.enabled === false) continue;
-				const rawLabel = typeof v.displayName === "string" && v.displayName.trim() !== "" ? v.displayName.trim() : typeof v.display_name === "string" && v.display_name.trim() !== "" ? v.display_name.trim() : typeof v.modelName === "string" && v.modelName.trim() !== "" ? v.modelName.trim() : typeof v.name === "string" && v.name.trim() !== "" ? v.name.trim() : "";
+				const rawLabel = serverDisplayName(v);
 				if (rawLabel !== "") {
 					if (labelOwners.has(rawLabel)) duplicateLabels.add(rawLabel);
 					else labelOwners.set(rawLabel, trimmedKey);
@@ -1465,8 +1550,14 @@ function deriveEffortsForModel(modelId) {
 function stripTieredLabel(label) {
 	return label.replace(/\s*\((?:Tiered|tiered)\)\s*$/i, "").replace(/\s+(?:Tiered|tiered)\s*$/i, "").trim();
 }
+/**
+* Guard for Gemini folding. `-tiered` / `-disabled` variants are never a fold target. A
+* `...-sonar` id is NOT a variant of its prefix: it is a model with its own wire id and no effort
+* ladder, so it must survive as its own (verbatim) catalog entry rather than fold into
+* `gemini-4-hydrogen`, which would produce a second entry with the same catalog id.
+*/
 function isValidGeminiBase(base) {
-	return !base.includes("-tiered") && !base.includes("-sonar") && !base.includes("-disabled");
+	return !base.includes("-tiered") && !base.includes("-disabled");
 }
 /** Fold Gemini effort variants into base + effort set (spec ADR-10). */
 function foldEfforts(raw) {
@@ -1869,6 +1960,61 @@ const ANTIGRAVITY_ROUTING = {
 			xhigh: "gemini-4-hydrogen-xhigh"
 		},
 		defaultRequestId: "gemini-4-hydrogen-medium"
+	},
+	"gemini-4-hydrogen-sonar": {
+		off: "gemini-4-hydrogen-sonar",
+		routing: {
+			minimal: "gemini-4-hydrogen-sonar",
+			low: "gemini-4-hydrogen-sonar",
+			medium: "gemini-4-hydrogen-sonar",
+			high: "gemini-4-hydrogen-sonar",
+			xhigh: "gemini-4-hydrogen-sonar"
+		},
+		defaultRequestId: "gemini-4-hydrogen-sonar"
+	},
+	"gemini-3-flash": {
+		off: "gemini-3-flash",
+		routing: {
+			minimal: "gemini-3-flash",
+			low: "gemini-3-flash",
+			medium: "gemini-3-flash",
+			high: "gemini-3-flash",
+			xhigh: "gemini-3-flash"
+		},
+		defaultRequestId: "gemini-3-flash"
+	},
+	"gemini-3.5-flash-lite": {
+		off: "gemini-3.5-flash-lite",
+		routing: {
+			minimal: "gemini-3.5-flash-lite",
+			low: "gemini-3.5-flash-lite",
+			medium: "gemini-3.5-flash-lite",
+			high: "gemini-3.5-flash-lite",
+			xhigh: "gemini-3.5-flash-lite"
+		},
+		defaultRequestId: "gemini-3.5-flash-lite"
+	},
+	"gemini-3.1-flash-image": {
+		off: "gemini-3.1-flash-image",
+		routing: {
+			minimal: "gemini-3.1-flash-image",
+			low: "gemini-3.1-flash-image",
+			medium: "gemini-3.1-flash-image",
+			high: "gemini-3.1-flash-image",
+			xhigh: "gemini-3.1-flash-image"
+		},
+		defaultRequestId: "gemini-3.1-flash-image"
+	},
+	"gemini-3.1-flash-lite": {
+		off: "gemini-3.1-flash-lite",
+		routing: {
+			minimal: "gemini-3.1-flash-lite",
+			low: "gemini-3.1-flash-lite",
+			medium: "gemini-3.1-flash-lite",
+			high: "gemini-3.1-flash-lite",
+			xhigh: "gemini-3.1-flash-lite"
+		},
+		defaultRequestId: "gemini-3.1-flash-lite"
 	},
 	"gemini-4-argon": {
 		off: "gemini-4-argon-medium",
