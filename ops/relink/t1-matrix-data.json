@@ -1,0 +1,288 @@
+{
+  "generated_at": "2026-11-16T18:09:16.261832+08:00",
+  "experiment": "T1 egress x eligibility x direct-connect matrix",
+  "identity_arm": "A (plugin headers, cloudcode-pa) for ALL three egress arms",
+  "rows": [
+    {
+      "row": "R1",
+      "region": "US (current/ORIG)",
+      "node": "Main：🇺🇲 美国 | V2 | 02",
+      "egress_ip": "23.247.137.105",
+      "egress_country": "US",
+      "egress_city": "San Jose",
+      "egress_source": "ip-api.com",
+      "cli_probe": {
+        "verdict": "ineligible_zero_quota",
+        "verdict_genuine": true,
+        "effective_verdict": "ineligible_zero_quota",
+        "exit": 1,
+        "duration_s": 21.552,
+        "timed_out": false,
+        "zero_quota": true,
+        "hit_line": "W1116 18:03:48.655055     461 server_oauth.go:114] Account ineligible: Your current account is not eligible for Antigravity, because it is not currently available in your location.",
+        "hits": {
+          "server_oauth_114": 1,
+          "account_ineligible": 1,
+          "eligibility_failed": 3,
+          "not_logged_in": 54
+        }
+      },
+      "arm": {
+        "arm": "A",
+        "endpoint": "https://cloudcode-pa.googleapis.com",
+        "status": "429",
+        "latency_ms": 1638,
+        "body_sha256": "73cfb6949dc395773288a9a10695a70a6b45901d933cc7ed532bb95845406453",
+        "body_head": "{\n  \"error\": {\n    \"code\": 429,\n    \"message\": \"Resource has been exhausted (e.g. check quota).\",\n    \"status\": \"RESOURCE_EXHAUSTED\"\n  }\n}\n",
+        "response_body_bytes": 139,
+        "request_body_sha256": "8d9647890ce6f8b7b82ac466db3c324499225016fc3b527cd7964fb5967f40bb",
+        "attempts": 1
+      }
+    },
+    {
+      "row": "R2",
+      "region": "US (alt)",
+      "node": "Main：🇺🇲 美国 | V1 | 03",
+      "egress_ip": "96.126.100.194",
+      "egress_country": "US",
+      "egress_city": "Fremont",
+      "egress_source": "ip-api.com",
+      "cli_probe": {
+        "verdict": "ineligible_zero_quota",
+        "verdict_genuine": true,
+        "effective_verdict": "ineligible_zero_quota",
+        "exit": 1,
+        "duration_s": 9.398,
+        "timed_out": false,
+        "zero_quota": true,
+        "hit_line": "W1116 18:04:16.981197     399 server_oauth.go:133] Account ineligible: Your current account is not eligible for Antigravity, because it is not currently available in your location.",
+        "hits": {
+          "server_oauth_133": 1,
+          "account_ineligible": 1,
+          "eligibility_failed": 3,
+          "not_logged_in": 13
+        }
+      },
+      "arm": {
+        "arm": "B",
+        "endpoint": "https://cloudcode-pa.googleapis.com",
+        "status": "429",
+        "latency_ms": 1374,
+        "body_sha256": "73cfb6949dc395773288a9a10695a70a6b45901d933cc7ed532bb95845406453",
+        "body_head": "{\n  \"error\": {\n    \"code\": 429,\n    \"message\": \"Resource has been exhausted (e.g. check quota).\",\n    \"status\": \"RESOURCE_EXHAUSTED\"\n  }\n}\n",
+        "response_body_bytes": 139,
+        "request_body_sha256": "8d9647890ce6f8b7b82ac466db3c324499225016fc3b527cd7964fb5967f40bb",
+        "attempts": 1
+      }
+    },
+    {
+      "row": "R3",
+      "region": "JP",
+      "node": "Main：🇯🇵 日本 | V2 | 01",
+      "egress_ip": "139.162.81.14",
+      "egress_country": "JP",
+      "egress_city": "Tokyo",
+      "egress_source": "ip-api.com",
+      "cli_probe": {
+        "verdict": "ineligible_zero_quota",
+        "verdict_genuine": true,
+        "effective_verdict": "ineligible_zero_quota",
+        "exit": 1,
+        "duration_s": 9.546,
+        "timed_out": false,
+        "zero_quota": true,
+        "hit_line": "W1116 18:04:33.888910     426 server_oauth.go:133] Account ineligible: Your current account is not eligible for Antigravity, because it is not currently available in your location.",
+        "hits": {
+          "server_oauth_133": 1,
+          "account_ineligible": 1,
+          "eligibility_failed": 3,
+          "not_logged_in": 11
+        }
+      },
+      "arm": {
+        "arm": "C",
+        "endpoint": "https://cloudcode-pa.googleapis.com",
+        "status": "429",
+        "latency_ms": 1368,
+        "body_sha256": "73cfb6949dc395773288a9a10695a70a6b45901d933cc7ed532bb95845406453",
+        "body_head": "{\n  \"error\": {\n    \"code\": 429,\n    \"message\": \"Resource has been exhausted (e.g. check quota).\",\n    \"status\": \"RESOURCE_EXHAUSTED\"\n  }\n}\n",
+        "response_body_bytes": 139,
+        "request_body_sha256": "8d9647890ce6f8b7b82ac466db3c324499225016fc3b527cd7964fb5967f40bb",
+        "attempts": 1
+      }
+    },
+    {
+      "row": "R4",
+      "region": "SG",
+      "node": "Main：🇸🇬 新加坡 | V2 | 01",
+      "egress_ip": "64.118.136.254",
+      "egress_country": "SG",
+      "egress_city": "Singapore",
+      "egress_source": "ip-api.com",
+      "cli_probe": {
+        "verdict": "ineligible_zero_quota",
+        "verdict_genuine": true,
+        "effective_verdict": "ineligible_zero_quota",
+        "exit": 1,
+        "duration_s": 8.087,
+        "timed_out": false,
+        "zero_quota": true,
+        "hit_line": "W1116 18:04:49.361269     552 server_oauth.go:133] Account ineligible: Your current account is not eligible for Antigravity, because it is not currently available in your location.",
+        "hits": {
+          "server_oauth_133": 1,
+          "account_ineligible": 1,
+          "eligibility_failed": 3,
+          "not_logged_in": 11
+        }
+      },
+      "arm": null
+    },
+    {
+      "row": "R5",
+      "region": "DE",
+      "node": "Main：🇩🇪 德国 | V1 | 01",
+      "egress_ip": null,
+      "egress_country": null,
+      "egress_city": null,
+      "egress_source": null,
+      "cli_probe": {
+        "verdict": "ineligible_zero_quota",
+        "verdict_genuine": false,
+        "effective_verdict": "no_verdict_transport_error",
+        "exit": 1,
+        "duration_s": 13.037,
+        "timed_out": false,
+        "zero_quota": true,
+        "hit_line": "E1116 18:05:13.980274       1 printmode.go:297] Print mode: eligibility check failed: Eligibility check failed: Post \"https://daily-cloudcode-pa.googleapis.com/v1internal:loadCodeAssist\": EOF",
+        "hits": {
+          "eligibility_failed": 3,
+          "not_logged_in": 11
+        }
+      },
+      "arm": null,
+      "notes": [
+        "classifier label is ineligible_zero_quota but the failure was a TRANSPORT error (loadCodeAssist EOF), not a location/eligibility verdict; treated as no_verdict",
+        "no usable egress geo: ipinfo.io timeout (curl_rc=28), ipapi.co timeout, ip-api.com unreachable via this node"
+      ]
+    },
+    {
+      "row": "R6",
+      "region": "HK",
+      "node": "Main：🇭🇰 香港 | V2 | 01",
+      "egress_ip": "203.175.14.47",
+      "egress_country": "HK",
+      "egress_city": "Sham Shui Po",
+      "egress_source": "ip-api.com",
+      "cli_probe": {
+        "verdict": "ineligible_zero_quota",
+        "verdict_genuine": true,
+        "effective_verdict": "ineligible_zero_quota",
+        "exit": 1,
+        "duration_s": 9.453,
+        "timed_out": false,
+        "zero_quota": true,
+        "hit_line": "W1116 18:05:26.939453     332 server_oauth.go:133] Account ineligible: Your current account is not eligible for Antigravity, because it is not currently available in your location.",
+        "hits": {
+          "server_oauth_133": 1,
+          "account_ineligible": 1,
+          "eligibility_failed": 3,
+          "not_logged_in": 11
+        }
+      },
+      "arm": null
+    }
+  ],
+  "arms_summary": [
+    {
+      "arm": "A",
+      "egress_row": "R1",
+      "node": "Main：🇺🇲 美国 | V2 | 02",
+      "status": "429",
+      "latency_ms": 1638,
+      "body_sha256": "73cfb6949dc395773288a9a10695a70a6b45901d933cc7ed532bb95845406453"
+    },
+    {
+      "arm": "B",
+      "egress_row": "R2",
+      "node": "Main：🇺🇲 美国 | V1 | 03",
+      "status": "429",
+      "latency_ms": 1374,
+      "body_sha256": "73cfb6949dc395773288a9a10695a70a6b45901d933cc7ed532bb95845406453"
+    },
+    {
+      "arm": "C",
+      "egress_row": "R3",
+      "node": "Main：🇯🇵 日本 | V2 | 01",
+      "status": "429",
+      "latency_ms": 1368,
+      "body_sha256": "73cfb6949dc395773288a9a10695a70a6b45901d933cc7ed532bb95845406453"
+    }
+  ],
+  "conclusion_inputs": {
+    "generation_requests_used": 3,
+    "generation_budget": 4,
+    "found_200": false,
+    "arm_statuses": [
+      "429",
+      "429",
+      "429"
+    ],
+    "arm_statuses_all_identical": true,
+    "arm_response_body_sha256_all_identical": true,
+    "arm_response_body_sha256": "73cfb6949dc395773288a9a10695a70a6b45901d933cc7ed532bb95845406453",
+    "arm_response_body_exact": "RESOURCE_EXHAUSTED 429, 139 bytes",
+    "regions_scanned": [
+      "US(current)",
+      "US(alt)",
+      "JP",
+      "SG",
+      "DE",
+      "HK"
+    ],
+    "regions_with_genuine_location_verdict": [
+      "R1",
+      "R2",
+      "R3",
+      "R4",
+      "R6"
+    ],
+    "regions_without_verdict": [
+      "R5"
+    ],
+    "cli_probe_verdicts_distinct": [
+      "ineligible_zero_quota",
+      "no_verdict_transport_error"
+    ],
+    "cli_probe_location_message_present_in": [
+      "R1",
+      "R2",
+      "R3",
+      "R4",
+      "R6"
+    ],
+    "quota_consumed_by_cli_probes": false,
+    "not_200_at_any_of_3_distinct_egress_countries": true,
+    "egress_ips": {
+      "R1": "23.247.137.105",
+      "R2": "96.126.100.194",
+      "R3": "139.162.81.14",
+      "R4": "64.118.136.254",
+      "R5": null,
+      "R6": "203.175.14.47"
+    },
+    "connections_chain_evidence": {
+      "R1": "Main：🇺🇲 美国 | V2 | 02 -> Google x44",
+      "R2": "Main：🇺🇲 美国 | V1 | 03 -> Google x14",
+      "R3": "Main：🇯🇵 日本 | V2 | 01 -> Google x21",
+      "R4": "Main：🇸🇬 新加坡 | V2 | 01 -> Google x17",
+      "R6": "Main：🇭🇰 香港 | V2 | 01 -> Google x30"
+    },
+    "known_confounders": [
+      "account 3 token exp 2026-11-16T10:34:38Z (fresh at request time)",
+      "project aicode-consumers fixed across arms; request body byte-identical (sha256 8d964789...40bb)",
+      "ipinfo.io raw: 3 timeouts (R1/R2/R5, curl_rc=28) / 2 successes with geo (R3/R4) / 1 rate-limit (R6); egress geo sourced from ip-api.com (5/6 rows), ipapi.co 0 usable rows; dual-source IP agreement only R3/R4",
+      "request body byte-identical across arms (sha256 8d964789...40bb) but hand-built checkpoint shape — NOT the plugin body (plugin uses requestType AGENT / requestId agent/<uuid>/<step>, client.ts:98/435; 'checkpoint' 0 hits in src)",
+      "DE node (R5) returned transport EOF on loadCodeAssist and no geo source reachable -> no verdict for that region"
+    ]
+  }
+}

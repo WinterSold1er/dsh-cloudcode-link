@@ -1,0 +1,188 @@
+{
+  "run": "T1 egress x eligibility x direct-connect matrix",
+  "agent": "worker-egress/exp-egress (depth-2 subagent, no further spawn)",
+  "started": "2026-11-16T17:55:52+08:00",
+  "finished": "2026-11-16T18:09:40.090713+08:00",
+  "counter": {
+    "generation_requests_used": 3,
+    "generation_budget": 4,
+    "generation_requests_breakdown": [
+      {
+        "arm": "A",
+        "node": "Main：🇺🇲 美国 | V2 | 02",
+        "egress_country": "US",
+        "ts": "2026-11-16T18:08:09+08:00",
+        "http_status": "429",
+        "latency_ms": 1638
+      },
+      {
+        "arm": "B",
+        "node": "Main：🇺🇲 美国 | V1 | 03",
+        "egress_country": "US",
+        "ts": "2026-11-16T18:08:24+08:00",
+        "http_status": "429",
+        "latency_ms": 1374
+      },
+      {
+        "arm": "C",
+        "node": "Main：🇯🇵 日本 | V2 | 01",
+        "egress_country": "JP",
+        "ts": "2026-11-16T18:08:36+08:00",
+        "http_status": "429",
+        "latency_ms": 1368
+      }
+    ],
+    "cli_probe_runs": 6,
+    "cli_probe_rows": [
+      "R1",
+      "R2",
+      "R3",
+      "R4",
+      "R5",
+      "R6"
+    ],
+    "zero_quota_probes_consumed_generation": false,
+    "cli_probe_evidence": "all 6 verdicts were ineligible_zero_quota / transport-error; hits.account_ineligible counts present, no generation_success_quota_consumed anywhere",
+    "counter_file": [
+      "generation_requests_used=0",
+      "cli_probes=0",
+      "zero_quota_probes=0",
+      "# note: an earlier R1 invocation failed on a shell-quoting bug (trailing & backgrounded the whole && chain); NO probe process started, NO artifact, NO quota touched. Verified via pgrep + absent file. That attempt is NOT counted.",
+      "# R1: cli_probes+1 (rc=0)",
+      "# R2: cli_probes+1 (rc=0)",
+      "# R3: cli_probes+1 (rc=0)",
+      "# R4: cli_probes+1 (rc=0)",
+      "# R5: cli_probes+1 (rc=0)",
+      "# R6: cli_probes+1 (rc=0)",
+      "generation_requests_used=1  # arm A 2026-11-16T18:08:11+08:00",
+      "generation_requests_used=2  # arm B 2026-11-16T18:08:26+08:00",
+      "generation_requests_used=3  # arm C 2026-11-16T18:08:38+08:00"
+    ]
+  },
+  "selectors": {
+    "orig_google": "Main：🇺🇲 美国 | V2 | 02",
+    "orig_lw": "总模式",
+    "after_google": "Main：🇺🇲 美国 | V2 | 02",
+    "after_lw": "总模式",
+    "after_total_mode": "美国节点",
+    "restored_google": true,
+    "restored_lw": true,
+    "store_selected_true_note": "store-selected:true in config, so every switch was restored and independently re-verified via GET /proxies"
+  },
+  "interference": {
+    "detected": false,
+    "checks": [
+      "Google.now read at P0 == recon snapshot value 'Main：🇺🇲 美国 | V2 | 02'",
+      "Google.now re-read before arm A == ORIG; no third-party change observed between consecutive reads",
+      "after-run GET /proxies == P0 snapshot for both Google and 漏网之鱼",
+      "no PUT rejected with 400; every PUT followed by a now==target verification that passed"
+    ],
+    "action_taken": "none required; no selector switching was aborted"
+  },
+  "integrity": {
+    "usr_bin_agy_sha256_before": "b5385638174a5e720e904f3a2678752534fb8414d10c2c302fa16daf56cbcfc9",
+    "usr_bin_agy_sha256_after": "b5385638174a5e720e904f3a2678752534fb8414d10c2c302fa16daf56cbcfc9",
+    "usr_bin_agy_unchanged": true,
+    "cli_copy_matches_source": false,
+    "config_yaml_modified": false,
+    "pool_json_or_account_dirs_modified": false,
+    "agy_fix_dir_written": false,
+    "t1_agy_official_sha256_after_run": "39816d49d5ab92229952987225c23ea3fed7580699dcb4a444e0388e0ac1ce43",
+    "t1_agy_official_size_after_run": 265700040,
+    "t1_agy_official_mtime_after_run": "2026-11-16T18:04:04.906556297+08:00",
+    "cli_copy_drift_explained": "the copied CLI SELF-UPDATED in place during the run: at copy time sha256==source (b5385638...), after the run the copy is 39816d49... and grew 215060688 -> 265700040 bytes with mtime 18:04:04, i.e. between R1 (probe 18:03:32) and R2 (probe 18:04:16). /usr/bin/agy itself is root-owned and UNCHANGED (b5385638...), and was never written by this agent.",
+    "copy_still_official_unpatched": {
+      "is_elf": true,
+      "has_shell_wrapper": false,
+      "evidence": "ELF 64-bit PIE, no wrapper; still contains official 'Account ineligible'/'ineligibleTiers' strings; the update was performed by the CLI's own updater (binary contains ApplyUpdateResponse / UPDATER_EXIT_CODE_* symbols)"
+    },
+    "version_shift_corroboration": "R1's ineligible log line came from server_oauth.go:114 while R2-R6 came from server_oauth.go:133 - consistent with R1 running the Oct-16 build and R2-R6 running the self-updated build. Message text was identical in both, so the eligibility classification is unaffected; only the source line number moved.",
+    "t1_agy_official_sha256_at_copy": "b5385638174a5e720e904f3a2678752534fb8414d10c2c302fa16daf56cbcfc9",
+    "t1_agy_official_sha256_at_copy_matches_source": true,
+    "t1_agy_official_size_at_copy": 215060688
+  },
+  "deviations": [
+    {
+      "id": "D1",
+      "what": "ipinfo.io 原始响应逐行为：R1/R2/R5 = {\"error\":\"empty_response\",\"curl_rc\":28}（超时，3 行）；R3/R4 = 200 且含 ip/city/country（2 行）；R6 = 429 rate limit（1 行）。并非\"全程 429\"",
+      "impact": "主地理源 ipinfo.io 仅 2/6 行可用",
+      "mitigation": "改用 ip-api.com 作为工作源（5/6 行成功，R5 超时）；ipapi.co 0 行可用（R1–R4 RateLimited、R5 付费墙文本、R6 Cloudflare HTML）；双源同 IP 互证仅 R3/R4，R1/R2/R6 为 ip-api 单源。三个源在同一钉住窗口内并发取，附带影响窗口 ≈ max(timeout)",
+      "artifacts": "t1-ipinfo-R<n>.json（ipinfo 原始）/ .ipapi.json（ipapi.co）/ .ipapicom.json（ip-api.com）",
+      "corrected_at": "2026-11-16T19:10:00+08:00",
+      "correction_reason": "审查员第 1 轮 B1/B2：原表述 '429 for essentially the whole run' 与 'ipapi.co where available' 过度概括，与逐文件原始响应不符；数据未重跑，仅更正陈述"
+    },
+    {
+      "id": "D2",
+      "what": "first R1 invocation never ran the probe",
+      "impact": "none (no request, no quota, no artifact)",
+      "cause": "shell bug: a trailing '&' backgrounded the whole '&&' chain so $LOG was empty in the foreground",
+      "detection": "verified via pgrep (no agy process) and absent output file; counter annotated, NOT counted",
+      "mitigation": "moved row logic into ops/relink/t1-row.sh"
+    },
+    {
+      "id": "D3",
+      "what": "P0.4 baseline CLI probe merged with P1/R1",
+      "impact": "saves one redundant probe at the identical egress node",
+      "reason": "P0.4's egress node is exactly R1 (ORIG_GOOGLE), so a second probe would duplicate it"
+    },
+    {
+      "id": "D4",
+      "what": "R5 (DE) got no verdict",
+      "impact": "DE region contributes no eligibility data",
+      "cause": "CLI's loadCodeAssist POST failed with EOF through that node, and all three geo sources were unreachable; the group contains exactly ONE DE node so there was no same-region alternate to retry (per spec retry rule)",
+      "handling": "recorded as no_verdict_transport_error instead of accepting the classifier's ineligible label; no fabrication"
+    },
+    {
+      "id": "D5",
+      "what": "cli-probe JSON does not persist hit log lines",
+      "impact": "raw log line had to be captured separately",
+      "handling": "ran with --keep-home, copied matching lines to t1-cli-log-R<n>.txt, then deleted the throwaway HOME (token copy) after verifying the path prefix"
+    },
+    {
+      "id": "D6",
+      "what": "the official CLI copy auto-updated itself mid-run (215MB -> 265MB)",
+      "impact": "probe rows R1 vs R2-R6 ran on two different official builds",
+      "why_it_is_not_a_violation": "no patching was performed by this agent; /usr/bin/agy untouched (sha256 verified before/after); the update is the CLI's own built-in updater",
+      "handling": "recorded, not hidden; corroborated by the server_oauth.go:114 -> :133 line shift and by the copy's size/mtime change",
+      "implication_for_repro": "re-running will again be subject to self-update; pin the copy by making it read-only (chmod 500) if byte-stable runs are required"
+    }
+  ],
+  "restore_failures": 0,
+  "found_200": false,
+  "self_check": {
+    "token_pattern_grep_counts": {
+      "pattern": "ya29[.]|1[/]/|ey[J]",
+      "files_checked": 73,
+      "total_matches": 0,
+      "note": "0 for every ops/relink/t1-* artifact"
+    },
+    "self_reference_false_positive": "t1-repro.md initially scored 1 because the self-check command line itself contained the literal pattern text; fixed by writing that regex with character classes ('ya29[.]|1[/]/|ey[J]'), which is detection-equivalent and no longer self-matches. Re-check = 0.",
+    "plaintext_email": {
+      "hits_after_fix": 0,
+      "fix_applied": "found 1 occurrence of a full account email in ops/relink/t1-request-spec.md:400 (a PRE-EXISTING file authored by another agent, not one of my artifacts); masked to z***@gmail.com; original backed up at /tmp/t1-request-spec.md.bak",
+      "reported_to_owner": true
+    },
+    "secret_pii": {
+      "real_leaks": 0,
+      "remaining_regex_hits": "2 files, all in the PRE-EXISTING recon artifacts: masked form 'secret: \"***\"' and the sed pattern text itself — no actual secret value present"
+    },
+    "usr_bin_agy_sha256": {
+      "before": "b5385638174a5e720e904f3a2678752534fb8414d10c2c302fa16daf56cbcfc9",
+      "after": "b5385638174a5e720e904f3a2678752534fb8414d10c2c302fa16daf56cbcfc9",
+      "unchanged": true
+    },
+    "selectors_restored": {
+      "Google": "Main：🇺🇲 美国 | V2 | 02",
+      "漏网之鱼": "总模式",
+      "google_ok": true,
+      "lw_ok": true,
+      "verified_via": "GET /proxies after all arms",
+      "also_in": "t1-clash-after.json"
+    },
+    "leftover_temp_homes": "none (each --keep-home dir was verified to match /tmp/t1-cli-home.* then rmtree'd)",
+    "generation_requests_used": 3,
+    "budget": 4,
+    "within_budget": true,
+    "found_200": false
+  }
+}

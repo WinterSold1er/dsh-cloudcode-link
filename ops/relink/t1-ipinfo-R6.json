@@ -1,0 +1,7 @@
+{
+  "status": 429,
+  "error": {
+    "title": "Rate limit hit",
+    "message": "Sign up at ipinfo.io"
+  }
+}

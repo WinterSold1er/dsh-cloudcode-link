@@ -1,0 +1,27 @@
+{
+  "generated_at": "2026-11-16T18:08:54.189106+08:00",
+  "source": "GET http://127.0.0.1:9090/proxies",
+  "groups": {
+    "Google": {
+      "type": "Selector",
+      "now": "Main：🇺🇲 美国 | V2 | 02",
+      "member_count": 72,
+      "matches_origin": true
+    },
+    "漏网之鱼": {
+      "type": "Selector",
+      "now": "总模式",
+      "member_count": 72,
+      "matches_origin": true
+    },
+    "总模式": {
+      "type": "Selector",
+      "now": "美国节点",
+      "member_count": 10
+    }
+  },
+  "expected": {
+    "Google": "Main：🇺🇲 美国 | V2 | 02",
+    "漏网之鱼": "总模式"
+  }
+}

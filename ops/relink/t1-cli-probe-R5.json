@@ -1,0 +1,52 @@
+{
+  "kind": "cli_probe",
+  "attempts": 1,
+  "run_id": "t1cli-20261116T100502Z-2978163",
+  "ts_utc": "2026-11-16T10:05:15Z",
+  "ts_cst": "2026-11-16T18:05:15+08:00",
+  "binary": "/tmp/t1-agy-official",
+  "binary_realpath": "/tmp/t1-agy-official",
+  "binary_is_wrapper": false,
+  "binary_sha256": "39816d49d5ab92229952987225c23ea3fed7580699dcb4a444e0388e0ac1ce43",
+  "home_mode": "throwaway-home-copy",
+  "account_masked": "z***@gmail.com",
+  "command": {
+    "argv": [
+      "/tmp/t1-agy-official",
+      "-p",
+      "hi",
+      "--output-format",
+      "json"
+    ],
+    "timeout_s": 30
+  },
+  "exit_code": 1,
+  "timed_out": false,
+  "duration_ms": 13037,
+  "stdout": "{\"conversation_id\":\"\",\"status\":\"ERROR\",\"response\":\"\",\"error\":\"Eligibility check failed: Post \\\"https://daily-cloudcode-pa.googleapis.com/v1internal:loadCodeAssist\\\": EOF\",\"duration_seconds\":0,\"num_turns\":0,\"usage\":{\"input_tokens\":0,\"output_tokens\":0,\"thinking_tokens\":0,\"cache_read_tokens\":0,\"total_tokens\":0},\"finished_reason\":\"error\"}\n",
+  "stderr": "error: Eligibility check failed: Post \"https://daily-cloudcode-pa.googleapis.com/v1internal:loadCodeAssist\": EOF\n",
+  "stdout_status": "ERROR",
+  "log": {
+    "dir": "/tmp/t1-cli-home.GwPbTW/.gemini/antigravity-cli/log",
+    "scanned_file": "/tmp/t1-cli-home.GwPbTW/.gemini/antigravity-cli/log/cli-20261116_180502.log",
+    "new_files": 1,
+    "new_lines": 143,
+    "appended_lines": 143
+  },
+  "hits": {
+    "server_oauth_114": 0,
+    "server_oauth_133": 0,
+    "account_ineligible": 0,
+    "eligibility_failed": 3,
+    "location_unavailable": 0,
+    "not_logged_in": 11,
+    "resource_exhausted": 0,
+    "unavailable": 0
+  },
+  "verdict": "ineligible_zero_quota",
+  "zero_quota": true,
+  "notes": [
+    "unpatched CLI aborts before streamGenerateContent on ineligible accounts",
+    "generation_success_quota_consumed means a small amount of quota was spent"
+  ]
+}

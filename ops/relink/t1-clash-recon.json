@@ -1,0 +1,708 @@
+{
+  "generated_at": "2026-11-16T17:42:11.065969+08:00",
+  "tool": "recon-clash (worker-egress/1st-level, READ-ONLY)",
+  "config_path": "/home/csy/.config/clash-meta/config.yaml",
+  "running_instance": {
+    "pid": 1383,
+    "cmd": "/home/csy/.local/share/clash-meta/clash-meta -f /home/csy/.config/clash-meta/config.yaml -d /home/csy/.config/clash-meta",
+    "effective_config_confirmed": true,
+    "core": "mihomo",
+    "version": "v1.19.12",
+    "meta": true
+  },
+  "ports": {
+    "http_port": 7890,
+    "socks_port": 7891,
+    "mixed_port": 7898,
+    "tproxy_port": 1536,
+    "external_controller": "0.0.0.0:9090",
+    "dns_listen": "0.0.0.0:1053",
+    "listeners_section_present": false
+  },
+  "secret_ref": {
+    "config_line": 31,
+    "key": "secret",
+    "length": 6,
+    "plaintext_stored": false,
+    "note": "read at runtime into $SECRET; never written to artifacts"
+  },
+  "auth": {
+    "config_line": 38,
+    "enabled": true,
+    "user": "proxy",
+    "password_stored": false,
+    "note": "authentication: [proxy:REDACTED]; read from config at runtime as $CLASH_AUTH"
+  },
+  "mode": "rule",
+  "store_selected": true,
+  "store_fake_ip": true,
+  "tun": {
+    "enable": true,
+    "device": "Meta",
+    "stack": "gVisor",
+    "dns-hijack": [
+      "any:53",
+      "tcp://any:53"
+    ],
+    "auto-route": true,
+    "auto-detect-interface": true,
+    "gso-max-size": 65536,
+    "inet4-address": [
+      "172.20.0.1/30"
+    ],
+    "strict-route": true,
+    "udp-timeout": 300,
+    "file-descriptor": 0,
+    "recvmsgx": true
+  },
+  "dns": {
+    "enable": true,
+    "enhanced_mode": "fake-ip",
+    "fake_ip_range": "172.20.0.1/16",
+    "listen": "0.0.0.0:1053",
+    "note": "fake-ip: TCP connections carry the DOMAIN in metadata, so DOMAIN/RULE-SET(domain) rules apply; IP rules only for literal-IP dials"
+  },
+  "rule_providers_key": {
+    "Google_域": {
+      "behavior": "Domain",
+      "format": "MrsRule",
+      "name": "Google_域",
+      "ruleCount": 685,
+      "type": "Rule",
+      "vehicleType": "HTTP",
+      "updatedAt": "2026-11-16T16:06:00.527973882+08:00"
+    },
+    "Google_IP": {
+      "behavior": "IPCIDR",
+      "format": "MrsRule",
+      "name": "Google_IP",
+      "ruleCount": 5,
+      "type": "Rule",
+      "vehicleType": "HTTP",
+      "updatedAt": "2026-11-16T16:07:32.237544542+08:00"
+    },
+    "GoogleFCM_域": {
+      "behavior": "Domain",
+      "format": "MrsRule",
+      "name": "GoogleFCM_域",
+      "ruleCount": 15,
+      "type": "Rule",
+      "vehicleType": "HTTP",
+      "updatedAt": "2026-11-16T16:06:16.806382783+08:00"
+    },
+    "自定义出站": {
+      "behavior": "Classical",
+      "format": "TextRule",
+      "name": "自定义出站",
+      "ruleCount": 0,
+      "type": "Rule",
+      "vehicleType": "File",
+      "updatedAt": "0001-01-01T00:00:00Z"
+    }
+  },
+  "groups": {
+    "Google": {
+      "config_line": 304,
+      "type": "Selector",
+      "now": "Main：🇺🇲 美国 | V2 | 02",
+      "member_count": 72,
+      "chain": [
+        "Google",
+        "Main：🇺🇲 美国 | V2 | 02"
+      ]
+    },
+    "漏网之鱼": {
+      "config_line": 336,
+      "type": "Selector",
+      "now": "总模式",
+      "member_count": 72,
+      "chain": [
+        "漏网之鱼",
+        "总模式",
+        "美国节点",
+        "Main：🇺🇲 美国 | V1 | 02"
+      ]
+    },
+    "总模式": {
+      "config_line": 234,
+      "type": "Selector",
+      "now": "美国节点",
+      "member_count": 10,
+      "chain": [
+        "总模式",
+        "美国节点",
+        "Main：🇺🇲 美国 | V1 | 02"
+      ]
+    },
+    "美国节点": {
+      "config_line": 393,
+      "type": "URLTest",
+      "now": "Main：🇺🇲 美国 | V1 | 02",
+      "member_count": 8,
+      "chain": [
+        "美国节点",
+        "Main：🇺🇲 美国 | V1 | 02"
+      ]
+    },
+    "其它地区": {
+      "config_line": 403,
+      "type": "URLTest",
+      "now": "Main：🇦🇺 澳大利亚 | V1 | 01",
+      "member_count": 20,
+      "chain": [
+        "其它地区",
+        "Main：🇦🇺 澳大利亚 | V1 | 01"
+      ]
+    },
+    "日本节点": {
+      "config_line": 388,
+      "type": "URLTest",
+      "now": "Main：🇯🇵 日本 | V1 | 05",
+      "member_count": 10,
+      "chain": [
+        "日本节点",
+        "Main：🇯🇵 日本 | V1 | 05"
+      ]
+    },
+    "狮城节点": {
+      "config_line": 398,
+      "type": "URLTest",
+      "now": "Main：🇸🇬 新加坡 | V1 | 01",
+      "member_count": 8,
+      "chain": [
+        "狮城节点",
+        "Main：🇸🇬 新加坡 | V1 | 01"
+      ]
+    },
+    "香港节点": {
+      "config_line": 383,
+      "type": "URLTest",
+      "now": "Main：🇭🇰 香港 | V1 | 04",
+      "member_count": 9,
+      "chain": [
+        "香港节点",
+        "Main：🇭🇰 香港 | V1 | 04"
+      ]
+    }
+  },
+  "rule_lines": [
+    {
+      "config_line": 600,
+      "text": "DOMAIN,generativelanguage.googleapis.com,其它地区",
+      "runtime_index": 2,
+      "proxy": "其它地区"
+    },
+    {
+      "config_line": 636,
+      "text": "RULE-SET,Google_域,Google",
+      "runtime_index": 24,
+      "proxy": "Google"
+    },
+    {
+      "config_line": 637,
+      "text": "RULE-SET,Google_IP,Google",
+      "runtime_index": 25,
+      "proxy": "Google"
+    },
+    {
+      "config_line": 668,
+      "text": "MATCH,漏网之鱼",
+      "runtime_index": 46,
+      "proxy": "漏网之鱼"
+    },
+    {
+      "config_line": 605,
+      "text": "RULE-SET,自定义出站,白名单出站",
+      "runtime_index": 5,
+      "proxy": "白名单出站",
+      "note": "provider ruleCount=0 and ./etc/自定义规则.list is MISSING -> this rule is INERT"
+    }
+  ],
+  "total_rules": 47,
+  "domain_routing": [
+    {
+      "domain": "cloudcode-pa.googleapis.com",
+      "evidence": "PROVEN",
+      "how": "live /connections",
+      "rule": "RuleSet Google_域",
+      "runtime_index": 24,
+      "config_line": 636,
+      "group": "Google",
+      "chain_at_capture": [
+        "Google",
+        "Main：🇺🇲 美国 | V2 | 02"
+      ]
+    },
+    {
+      "domain": "autopush-cloudcode-pa.sandbox.googleapis.com",
+      "evidence": "PROVEN",
+      "how": "live /connections",
+      "rule": "RuleSet Google_域",
+      "runtime_index": 24,
+      "config_line": 636,
+      "group": "Google",
+      "chain_at_capture": [
+        "Google",
+        "Main：🇺🇲 美国 | V2 | 02"
+      ]
+    },
+    {
+      "domain": "oauth2.googleapis.com",
+      "evidence": "PROVEN",
+      "how": "live /connections",
+      "rule": "RuleSet Google_域",
+      "runtime_index": 24,
+      "config_line": 636,
+      "group": "Google",
+      "chain_at_capture": [
+        "Google",
+        "Main：🇺🇲 美国 | V2 | 02"
+      ]
+    },
+    {
+      "domain": "daily-cloudcode-pa.googleapis.com",
+      "evidence": "INFERRED",
+      "how": "same googleapis.com suffix as 3 proven siblings; not observed live",
+      "rule": "RuleSet Google_域 (expected)",
+      "runtime_index": 24,
+      "config_line": 636,
+      "group": "Google",
+      "chain_at_capture": [
+        "Google",
+        "Main：🇺🇲 美国 | V2 | 02"
+      ]
+    },
+    {
+      "domain": "daily-cloudcode-pa.sandbox.googleapis.com",
+      "evidence": "INFERRED",
+      "how": "sibling autopush-cloudcode-pa.sandbox proven",
+      "rule": "RuleSet Google_域 (expected)",
+      "runtime_index": 24,
+      "config_line": 636,
+      "group": "Google",
+      "chain_at_capture": [
+        "Google",
+        "Main：🇺🇲 美国 | V2 | 02"
+      ]
+    },
+    {
+      "domain": "antigravity.googleapis.com",
+      "evidence": "INFERRED",
+      "how": "googleapis.com suffix, same ruleset",
+      "rule": "RuleSet Google_域 (expected)",
+      "runtime_index": 24,
+      "config_line": 636,
+      "group": "Google",
+      "chain_at_capture": [
+        "Google",
+        "Main：🇺🇲 美国 | V2 | 02"
+      ]
+    },
+    {
+      "domain": "generativelanguage.googleapis.com",
+      "evidence": "PROVEN",
+      "how": "live /connections",
+      "rule": "Domain generativelanguage.googleapis.com (explicit, BEFORE Google_域)",
+      "runtime_index": 2,
+      "config_line": 600,
+      "group": "其它地区",
+      "chain_at_capture": [
+        "其它地区",
+        "Main：🇦🇺 澳大利亚 | V1 | 01"
+      ]
+    },
+    {
+      "domain": "accounts.google.com",
+      "evidence": "INFERRED",
+      "how": "google.com suffix in 685-entry Google_域 (explicit rule DOMAIN-KEYWORD mtalk.google at idx23 only covers mtalk)",
+      "rule": "RuleSet Google_域 (expected)",
+      "runtime_index": 24,
+      "config_line": 636,
+      "group": "Google",
+      "chain_at_capture": [
+        "Google",
+        "Main：🇺🇲 美国 | V2 | 02"
+      ]
+    },
+    {
+      "domain": "www.googleapis.com",
+      "evidence": "INFERRED",
+      "how": "googleapis.com suffix, same as proven siblings",
+      "rule": "RuleSet Google_域 (expected)",
+      "runtime_index": 24,
+      "config_line": 636,
+      "group": "Google",
+      "chain_at_capture": [
+        "Google",
+        "Main：🇺🇲 美国 | V2 | 02"
+      ]
+    },
+    {
+      "domain": "play.googleapis.com",
+      "evidence": "INFERRED",
+      "how": "googleapis.com suffix",
+      "rule": "RuleSet Google_域 (expected)",
+      "runtime_index": 24,
+      "config_line": 636,
+      "group": "Google",
+      "chain_at_capture": [
+        "Google",
+        "Main：🇺🇲 美国 | V2 | 02"
+      ]
+    },
+    {
+      "domain": "*.googleapis.com (generic suffix)",
+      "evidence": "PARTIAL",
+      "how": "no wildcard rule exists; coverage comes from 685-entry RuleSet Google_域",
+      "rule": "RuleSet Google_域 (only members listed in ruleset)",
+      "runtime_index": 24,
+      "config_line": 636,
+      "group": "Google",
+      "chain_at_capture": [
+        "Google",
+        "Main：🇺🇲 美国 | V2 | 02"
+      ]
+    },
+    {
+      "domain": "*.google.com",
+      "evidence": "INFERRED",
+      "how": "google.com suffix inside Google_域",
+      "rule": "RuleSet Google_域 (expected)",
+      "runtime_index": 24,
+      "config_line": 636,
+      "group": "Google",
+      "chain_at_capture": [
+        "Google",
+        "Main：🇺🇲 美国 | V2 | 02"
+      ]
+    },
+    {
+      "domain": "*.gstatic.com",
+      "evidence": "INFERRED",
+      "how": "gstatic.com suffix inside Google_域",
+      "rule": "RuleSet Google_域 (expected)",
+      "runtime_index": 24,
+      "config_line": 636,
+      "group": "Google",
+      "chain_at_capture": [
+        "Google",
+        "Main：🇺🇲 美国 | V2 | 02"
+      ]
+    },
+    {
+      "domain": "ipinfo.io",
+      "evidence": "PROVEN-BY-EXHAUSTION",
+      "how": "47 rules enumerated, none mentions ipinfo; falls through to MATCH",
+      "rule": "Match MATCH",
+      "runtime_index": 46,
+      "config_line": 596,
+      "group": "漏网之鱼",
+      "chain_at_capture": [
+        "漏网之鱼",
+        "总模式",
+        "美国节点",
+        "Main：🇺🇲 美国 | V1 | 02"
+      ]
+    }
+  ],
+  "connections_evidence": {
+    "captured_at": "2026-11-16T17:42:11.066021+08:00",
+    "total_live": 128,
+    "google_related": [
+      {
+        "host": "oauth2.googleapis.com",
+        "destinationIP": "142.250.141.95",
+        "destinationPort": "443",
+        "rule": "RuleSet",
+        "rulePayload": "Google_域",
+        "chains": [
+          "Main：🇺🇲 美国 | V2 | 02",
+          "Google"
+        ],
+        "remoteDestination": "144.225.78.50",
+        "networkType": "Tun",
+        "sourceIP": "172.20.0.1",
+        "start": "2026-11-16T07:04:41.023208209+08:00",
+        "process": ""
+      },
+      {
+        "host": "autopush-cloudcode-pa.sandbox.googleapis.com",
+        "destinationIP": "74.125.23.81",
+        "destinationPort": "443",
+        "rule": "RuleSet",
+        "rulePayload": "Google_域",
+        "chains": [
+          "Main：🇺🇲 美国 | V2 | 02",
+          "Google"
+        ],
+        "remoteDestination": "144.225.78.50",
+        "networkType": "Tun",
+        "sourceIP": "172.20.0.1",
+        "start": "2026-11-16T07:04:47.977208405+08:00",
+        "process": ""
+      }
+    ],
+    "note": "process field is EMPTY for TUN-captured connections -> cannot attribute by PID; use time-window + host + rulePayload"
+  },
+  "proxies_summary": {
+    "total_proxy_keys": 104,
+    "provider_cache": "~/.config/clash-meta/proxies/1.主要地址.yaml",
+    "provider_nodes": 60,
+    "distinct_servers": {
+      "g2.devoodev.com": 59,
+      "line.acetace.com": 1
+    },
+    "key_warning": "ALL nodes share 2 entry hosts; server IP does NOT identify exit country. Node country label is a claim, exit geo MUST be measured.",
+    "entry_ip_whois": "144.225.78.50 -> Country: US (ADCIL/IPXO/NETUTILS) - this is the RELAY entry, not the exit",
+    "google_group_members": [
+      "总模式",
+      "⛔️ 拒绝连接",
+      "延迟最低",
+      "故障转移",
+      "负载均衡",
+      "香港节点",
+      "台湾节点",
+      "狮城节点",
+      "日本节点",
+      "美国节点",
+      "其它地区",
+      "🇨🇳 瓦洛兰大陆",
+      "Main：🇭🇰 香港 | V2 | 01",
+      "Main：🇭🇰 香港 | V2 | 02",
+      "Main：🇭🇰 香港 | V1 | 01",
+      "Main：🇭🇰 香港 | V1 | 02",
+      "Main：🇭🇰 香港 | V1 | 03",
+      "Main：🇭🇰 香港 | V1 | 04",
+      "Main：🇭🇰 香港 | V1 | 05",
+      "Main：🇭🇰 香港 | V1 | 06",
+      "Main：🇨🇳 台湾 | V2 | 01",
+      "Main：🇨🇳 台湾 | V2 | 02",
+      "Main：🇨🇳 台湾 | V1 | 01",
+      "Main：🇨🇳 台湾 | V1 | 02",
+      "Main：🇨🇳 台湾 | V1 | 03",
+      "Main：🇯🇵 日本 | V2 | 01",
+      "Main：🇯🇵 日本| V2 | 02",
+      "Main：🇯🇵 日本 | V1 | 01",
+      "Main：🇯🇵 日本 | V1 | 02",
+      "Main：🇯🇵 日本 | V1 | 03",
+      "Main：🇯🇵 日本 | V1 | 04",
+      "Main：🇯🇵 日本 | V1 | 05",
+      "Main：🇸🇬 新加坡 | V2 | 01",
+      "Main：🇸🇬 新加坡 | V2 | 02",
+      "Main：🇸🇬 新加坡 | V1 | 01",
+      "Main：🇸🇬 新加坡 | V1 | 02",
+      "Main：🇸🇬 新加坡 | V1 | 03",
+      "Main：🇸🇬 新加坡 | V1 | 04",
+      "Main：🇺🇲 美国 | V2 | 01",
+      "Main：🇺🇲 美国 | V2 | 02",
+      "Main：🇺🇲 美国 | V1 | 01",
+      "Main：🇺🇲 美国 | V1 | 02",
+      "Main：🇺🇲 美国 | V1 | 03",
+      "Main：🇺🇲 美国 | V1 | 04",
+      "Main：🇺🇲 美国 | V1 | 05",
+      "Main：🇺🇲 美国 | V1 | 06",
+      "Main：🇰🇷 韩国 | V1 | 01",
+      "Main：🇰🇷 韩国 | V1 | 02",
+      "Main：🇻🇳 越南  | V2 | 01",
+      "Main：🇪🇸 西班牙  | V2 | 01",
+      "Main：🇮🇩 印尼  | V1 | 01",
+      "Main：🇫🇷 法国 | V1 | 01",
+      "Main：🇵🇭 菲律宾 | V1 | 01",
+      "Main：🇮🇳 印度 | V1 | 01",
+      "Main：🇹🇭 泰国 | V1 | 01",
+      "Main：🇬🇧 英国 | V1 | 01",
+      "Main：🇩🇪 德国 | V1 | 01",
+      "Main：🇨🇦 加拿大 | V1 | 01",
+      "Main：🇦🇺 澳大利亚 | V1 | 01",
+      "Main：🇵🇰 巴基斯坦 | V1 | 01",
+      "Main：🇨🇱 智利  | V1 | 01",
+      "Main：🇳🇬 尼日利亚 | V1 | 01",
+      "Main：🇮🇹 意大利 | V1 | 01",
+      "Main：🇲🇾 马来西亚 | V1 | 01",
+      "Main：🇹🇷 土耳其 | V1 | 01",
+      "Main：🇧🇷 巴西 | V1 | 01",
+      "Main：🇦🇷 阿根廷 | V1 | 01",
+      "Main：🇭🇰 香港 | V1 | 直连",
+      "Main：🇸🇬 试用 | 新加坡 | 01 | 限 20 Mbs",
+      "Main：🇸🇬 试用 | 新加坡 | 02 | 限 20 Mbs",
+      "Main：🇯🇵 试用 | 日本 | 01 | 限 20 Mbs",
+      "Main：🇯🇵 试用 | 日本 | 02 | 限 20 Mbs"
+    ]
+  },
+  "us_candidates": {
+    "count": 8,
+    "nodes": [
+      "Main：🇺🇲 美国 | V2 | 01",
+      "Main：🇺🇲 美国 | V2 | 02",
+      "Main：🇺🇲 美国 | V1 | 01",
+      "Main：🇺🇲 美国 | V1 | 02",
+      "Main：🇺🇲 美国 | V1 | 03",
+      "Main：🇺🇲 美国 | V1 | 04",
+      "Main：🇺🇲 美国 | V1 | 05",
+      "Main：🇺🇲 美国 | V1 | 06"
+    ],
+    "evidence": "group membership only (名称推断), exit geo NOT verified"
+  },
+  "other_candidates": {
+    "evidence": "group membership only (名称推断), exit geo NOT verified",
+    "japan": [
+      "Main：🇯🇵 日本 | V2 | 01",
+      "Main：🇯🇵 日本| V2 | 02",
+      "Main：🇯🇵 日本 | V1 | 01",
+      "Main：🇯🇵 日本 | V1 | 02",
+      "Main：🇯🇵 日本 | V1 | 03",
+      "Main：🇯🇵 日本 | V1 | 04",
+      "Main：🇯🇵 日本 | V1 | 05",
+      "Main：🇳🇬 尼日利亚 | V1 | 01",
+      "Main：🇯🇵 试用 | 日本 | 01 | 限 20 Mbs",
+      "Main：🇯🇵 试用 | 日本 | 02 | 限 20 Mbs"
+    ],
+    "singapore": [
+      "Main：🇸🇬 新加坡 | V2 | 01",
+      "Main：🇸🇬 新加坡 | V2 | 02",
+      "Main：🇸🇬 新加坡 | V1 | 01",
+      "Main：🇸🇬 新加坡 | V1 | 02",
+      "Main：🇸🇬 新加坡 | V1 | 03",
+      "Main：🇸🇬 新加坡 | V1 | 04",
+      "Main：🇸🇬 试用 | 新加坡 | 01 | 限 20 Mbs",
+      "Main：🇸🇬 试用 | 新加坡 | 02 | 限 20 Mbs"
+    ],
+    "hongkong": [
+      "Main：🇭🇰 香港 | V2 | 01",
+      "Main：🇭🇰 香港 | V2 | 02",
+      "Main：🇭🇰 香港 | V1 | 01",
+      "Main：🇭🇰 香港 | V1 | 02",
+      "Main：🇭🇰 香港 | V1 | 03",
+      "Main：🇭🇰 香港 | V1 | 04",
+      "Main：🇭🇰 香港 | V1 | 05",
+      "Main：🇭🇰 香港 | V1 | 06",
+      "Main：🇭🇰 香港 | V1 | 直连"
+    ],
+    "other_regions": [
+      "Main：🇰🇷 韩国 | V1 | 01",
+      "Main：🇰🇷 韩国 | V1 | 02",
+      "Main：🇻🇳 越南  | V2 | 01",
+      "Main：🇪🇸 西班牙  | V2 | 01",
+      "Main：🇮🇩 印尼  | V1 | 01",
+      "Main：🇫🇷 法国 | V1 | 01",
+      "Main：🇵🇭 菲律宾 | V1 | 01",
+      "Main：🇮🇳 印度 | V1 | 01",
+      "Main：🇹🇭 泰国 | V1 | 01",
+      "Main：🇬🇧 英国 | V1 | 01",
+      "Main：🇩🇪 德国 | V1 | 01",
+      "Main：🇨🇦 加拿大 | V1 | 01",
+      "Main：🇦🇺 澳大利亚 | V1 | 01",
+      "Main：🇵🇰 巴基斯坦 | V1 | 01",
+      "Main：🇨🇱 智利  | V1 | 01",
+      "Main：🇮🇹 意大利 | V1 | 01",
+      "Main：🇲🇾 马来西亚 | V1 | 01",
+      "Main：🇹🇷 土耳其 | V1 | 01",
+      "Main：🇧🇷 巴西 | V1 | 01",
+      "Main：🇦🇷 阿根廷 | V1 | 01"
+    ],
+    "japan_group_contaminated": "日本节点 contains Main：🇳🇬 尼日利亚 | V1 | 01 — filter regex [^-]日 matches 尼日利亚. Selecting 日本节点 does NOT guarantee Japan.",
+    "hongkong_group_contaminated": "香港节点 contains Main：🇭🇰 香港 | V1 | 直连 (type=direct -> local egress, NOT a proxy)"
+  },
+  "switch_plan": {
+    "target_group": "Google",
+    "group_type": "Selector -> DIRECTLY switchable",
+    "members_are_groups_AND_nodes": true,
+    "original_selection": "Main：🇺🇲 美国 | V2 | 02",
+    "original_chain": [
+      "Google",
+      "Main：🇺🇲 美国 | V2 | 02"
+    ],
+    "switch_cmd": "curl -sS -X PUT -H \"Authorization: Bearer $SECRET\" -H \"Content-Type: application/json\" --data '{\"name\":\"<NODE>\"}' http://127.0.0.1:9090/proxies/Google",
+    "restore_cmd": "curl -sS -X PUT -H \"Authorization: Bearer $SECRET\" -H \"Content-Type: application/json\" --data '{\"name\":\"<ORIGINAL_SELECTION>\"}' http://127.0.0.1:9090/proxies/Google",
+    "verify_cmd": "curl -sS -H \"Authorization: Bearer $SECRET\" http://127.0.0.1:9090/proxies | python3 -c \"import json,sys;print(json.load(sys.stdin)['proxies']['Google']['now'])\"",
+    "secondary_group_needed": "其它地区 handles generativelanguage.googleapis.com and is URLTest -> group-level only, NOT node-pinnable",
+    "urltest_groups_not_pinnable": {
+      "groups": [
+        "美国节点",
+        "日本节点",
+        "狮城节点",
+        "香港节点",
+        "其它地区",
+        "延迟最低",
+        "故障转移",
+        "负载均衡"
+      ],
+      "reason": "URLTest/Fallback/LoadBalance do not expose a stable selection interface; PUT is expected to be rejected (400). NOT tested here (read-only) -> mark unverified. Even if accepted, health-check reselects and overrides it.",
+      "workaround": "pin the PARENT Selector (Google / 漏网之鱼) to a concrete member node instead"
+    },
+    "generativelanguage_limitation": {
+      "domain": "generativelanguage.googleapis.com",
+      "rule": "idx2 Domain -> 其它地区 (hard-coded BEFORE Google_域)",
+      "group_type": "URLTest (20 members)",
+      "impact": "No Selector->node path exists for it, so it CANNOT be pinned to a chosen node without editing config.yaml. Only group-level influence is possible.",
+      "experiment_consequence": "cloudcode-pa and generativelanguage cannot be forced onto the same specific node under the current config; they are provably different groups."
+    }
+  },
+  "ipinfo_method": {
+    "key_finding": "ipinfo.io does NOT resolve to the Google group. It hits MATCH -> 漏网之鱼 -> 总模式 -> 美国节点 -> node. Switching Google does NOT change ipinfo egress.",
+    "preferred": "B",
+    "why_no_listener": "config has NO listeners: section -> no per-node dedicated socks/http port exists",
+    "method_B": {
+      "name": "temporary 漏网之鱼 pin to the SAME node as Google.now, then plain curl over TUN",
+      "steps": [
+        "ORIG=$(curl -sS -H \"Authorization: Bearer $SECRET\" http://127.0.0.1:9090/proxies | python3 -c \"import json,sys;print(json.load(sys.stdin)['proxies']['漏网之鱼']['now'])\")",
+        "NODE=$(curl -sS -H \"Authorization: Bearer $SECRET\" http://127.0.0.1:9090/proxies | python3 -c \"import json,sys;print(json.load(sys.stdin)['proxies']['Google']['now'])\")",
+        "trap 'curl -sS -X PUT -H \"Authorization: Bearer $SECRET\" -H \"Content-Type: application/json\" --data \"{\\\"name\\\":\\\"$ORIG\\\"}\" http://127.0.0.1:9090/proxies/漏网之鱼' EXIT INT TERM",
+        "curl -sS -X PUT -H \"Authorization: Bearer $SECRET\" -H \"Content-Type: application/json\" --data \"{\\\"name\\\":\\\"$NODE\\\"}\" http://127.0.0.1:9090/proxies/漏网之鱼",
+        "curl -sS --max-time 5 https://ipinfo.io/json",
+        "curl -sS -X PUT -H \"Authorization: Bearer $SECRET\" -H \"Content-Type: application/json\" --data \"{\\\"name\\\":\\\"$ORIG\\\"}\" http://127.0.0.1:9090/proxies/漏网之鱼",
+        "curl -sS -H \"Authorization: Bearer $SECRET\" http://127.0.0.1:9090/proxies | python3 -c \"import json,sys;print(json.load(sys.stdin)['proxies']['漏网之鱼']['now'])\""
+      ],
+      "window_seconds": 6,
+      "collateral": "All MATCH-fallback traffic of every local process egresses via that node for ~6s. Google/OpenAI/YouTube/etc have dedicated groups -> unaffected."
+    },
+    "method_A": "UNAVAILABLE - no listeners: section in config",
+    "method_C": "Not needed; avoid mode=global",
+    "method_D": {
+      "cmd": "curl -sS --max-time 5 -x \"http://$CLASH_AUTH@127.0.0.1:7890\" https://ipinfo.io/json",
+      "note": "CAUTION: rule-based, NOT node-pinned. ipinfo.io -> 漏网之鱼. Verified: no-creds=407, with-creds=401-to-local-9090 (auth accepted)."
+    },
+    "method_D_socks": {
+      "cmd": "curl -sS --max-time 5 -x \"socks5h://$CLASH_AUTH@127.0.0.1:7891\" https://ipinfo.io/json",
+      "note": "socks5h = remote DNS; verified no-creds fails (curl 97)"
+    }
+  },
+  "probe_capture": {
+    "purpose": "prove which node the agy CLI probe actually uses",
+    "snippet": "GET /connections every 1s for 12s while the CLI runs; keep only rows whose host matches googleapis/cloudcode",
+    "caveat": "metadata.process is EMPTY (TUN) -> cannot filter by PID; rely on time window + host + rulePayload",
+    "degraded": "if nothing is captured (short-lived gRPC streams): fall back to rule index + group.now snapshot and label it INFERRED"
+  },
+  "risks": [
+    "store-selected:true -> every PUT is PERSISTED in cache.db; an interrupted script leaves Google pinned to the test node even after Clash restart. ALWAYS run restore + verify.",
+    "Google group is shared by ALL googleapis traffic of every local session (plugin, agy, browser, oauth). Switching it re-routes other live sessions mid-flight.",
+    "日本节点 URLTest group contains a Nigeria node (filter bug) -> never assume \"日本节点\" == Japan.",
+    "香港节点 contains a type=direct member (直连) -> selecting it bypasses the proxy entirely.",
+    "地方组 (美国节点/日本节点/...) are URLTest/Fallback/LoadBalance -> NOT directly pin-able; they auto-reselect. Pin the PARENT Selector (Google / 漏网之鱼) instead.",
+    "All 59 nodes share entry host g2.devoodev.com -> exit country is only provable by measurement.",
+    "No listeners: section -> no zero-collateral per-node measurement port.",
+    "Do NOT switch mode=global: it would re-route ALL local traffic incl. Tailscale DERP/SSH/other sessions."
+  ],
+  "unverified": [
+    "daily-cloudcode-pa.googleapis.com actual rule hit (not observed live)",
+    "daily-cloudcode-pa.sandbox.googleapis.com actual rule hit",
+    "antigravity.googleapis.com actual rule hit",
+    "accounts.google.com / www.googleapis.com / play.googleapis.com / *.gstatic.com actual rule hit",
+    "exit IP/country of EVERY node (no ipinfo request was sent, per instructions)",
+    "whether 96.126.100.194 (parent prior observation) corresponds to 美国节点 V1|06 or the direct path",
+    "contents of Google_域.mrs (685 entries, zstd-compressed trie; not decodable by naive string scan)"
+  ],
+  "redaction": {
+    "checked": true,
+    "method": "token-shape scan over three OAuth families: access-token prefix, authorization-code prefix, JWT-header base64 prefix",
+    "result": {
+      "t1-clash-recon.json": 0,
+      "t1-clash-recon.md": 0,
+      "t1-clash-recon.log": 0
+    },
+    "applied_masking": "mihomo API secret -> $SECRET / ***  ; inbound proxy password -> $CLASH_AUTH / ***",
+    "note": "the three literal prefixes are intentionally NOT spelled out inside these artifacts, so that the scan itself stays at 0 hits (a spelled-out pattern would self-match). Run the scan from the runbook/parent side."
+  },
+  "chain_order": "artifacts list OUTERMOST-FIRST (rule-target group -> ... -> final node). mihomo GET /connections reports the REVERSE order (final node first).",
+  "snapshot_note": "URLTest groups (美国节点/日本节点/其它地区/延迟最低/故障转移) auto-reselect: their \"now\" drifted during this recon (美国节点: V1|06 -> V1|02). Any \"now\" is a point-in-time snapshot, always re-read before acting."
+}
