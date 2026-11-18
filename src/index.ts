@@ -11,6 +11,7 @@ import { dshHome, overridesPath, readOverrides, resolveConfig, stateDir } from '
 import { PROVIDER_ID, type PluginConfig } from './common/types.ts'
 import { AgyAdapter } from './host/adapter.ts'
 import { describePoolAuthHealth, reauthGuidanceResolver } from './host/account-health.ts'
+import { handleAccountModels } from './host/account-models.ts'
 import { defineAgyAskTool } from './host/ask-tool.ts'
 import { AuthHelper } from './host/auth.ts'
 import { cclCommandDefinition } from './host/commands.ts'
@@ -523,6 +524,40 @@ export function apply(ctx: Context, entryConfig: Record<string, unknown> = {}): 
           await quota.refreshAllQuotas(true)
         }
         sendJson(res as RawRes, 200, { ok: true, pool: pool.getPoolData() })
+      })()
+    })
+
+    // Normalized per-account model catalog: what this account is actually entitled to.
+    // GET  /pool/account-models?id=<accountId>
+    // POST /pool/account-models  { id, refresh? } — refresh:true re-reads quota first; a failed
+    //      refresh still answers 200 with the previously recorded data plus `refreshError`.
+    regBoth('pool/account-models', (req, res) => {
+      void (async () => {
+        const method = methodOf(req)
+        let id: unknown
+        let refresh: unknown = false
+        if (method === 'POST') {
+          const body = await readBody(req)
+          id = body.id
+          refresh = body.refresh
+        } else if (method === 'GET' || method === 'HEAD') {
+          id = parseQuery(req).id
+        } else {
+          sendJson(res as RawRes, 405, { ok: false, error: 'GET or POST only' })
+          return
+        }
+        try {
+          const result = await handleAccountModels(
+            { id, refresh },
+            {
+              getAccount: (accountId) => pool.getAccount(accountId),
+              refreshQuota: (account) => quota.refreshAccountQuota(account, true),
+            },
+          )
+          sendJson(res as RawRes, result.status, result.body)
+        } catch (err: unknown) {
+          sendJson(res as RawRes, 500, { ok: false, error: String(err) })
+        }
       })()
     })
 

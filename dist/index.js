@@ -29952,6 +29952,208 @@ var AgyAdapter = class extends LlmAdapter {
 	}
 };
 //#endregion
+//#region packages/core/src/account-models.ts
+/**
+* account-models.ts — the normalized "which grayscale models does this account actually
+* support" view, built only from what a quota refresh recorded on the account itself
+* (`account.quotas[family].models`, written by `QuotaService.refreshAccountQuota`).
+*
+* Contract rules the GUI relies on:
+*  - Nothing is invented. A family whose `models` array is missing or empty is reported as
+*    `known: false` with `models: []`; the global model catalog is never consulted here, so a
+*    model the backend never granted to this account can never appear in the answer.
+*  - Ordering is stable: families come back in `MODEL_FAMILY_ORDER`, models in ascending id
+*    order. The same account renders the same list in the same order every time, which keeps
+*    the UI diffless and makes the function testable.
+*  - One entry per (family, modelId): the more informative record wins, and when both records
+*    carry a remaining fraction the smaller (more conservative) one wins.
+*  - Family attribution follows the recorded quota key, corrected by `modelFamilyOf(id)` when
+*    the key is `unknown` or contradicts the model id.
+*  - Pure: the account is read, never written; no I/O, no clock. Callers own their refresh —
+*    see `handleAccountModels`, which injects it as a dependency.
+*/
+/** Rendering order for the family list: named providers first, undetermined last. */
+const MODEL_FAMILY_ORDER = [
+	"google",
+	"anthropic",
+	"openai",
+	"unknown"
+];
+const FAMILY_KEYS = MODEL_FAMILY_ORDER;
+function isModelFamily(value) {
+	return FAMILY_KEYS.includes(value);
+}
+function finiteNumber(value) {
+	return typeof value === "number" && Number.isFinite(value) ? value : void 0;
+}
+function trimmedString(value) {
+	return typeof value === "string" && value.trim().length > 0 ? value.trim() : void 0;
+}
+/** How much optional detail an entry carries: display name, reset time, remaining fraction. */
+function infoWeight(entry) {
+	let weight = 0;
+	if (entry.name !== entry.id) weight += 1;
+	if (entry.resetTime !== void 0) weight += 1;
+	if (entry.remainingFraction !== void 0) weight += 1;
+	return weight;
+}
+/**
+* True when `candidate` should replace `current` for the same model id in the same family.
+* A concrete remaining fraction beats a missing one, a smaller fraction beats a bigger one
+* (more conservative about what is left), and otherwise the richer record wins. Ties keep the
+* record already seen, so the result does not depend on upstream array order.
+*/
+function preferModel(current, candidate) {
+	const known = current.remainingFraction;
+	const incoming = candidate.remainingFraction;
+	if (known !== void 0 && incoming !== void 0 && known !== incoming) return incoming < known;
+	if (incoming !== void 0 !== (known !== void 0)) return incoming !== void 0;
+	return infoWeight(candidate) > infoWeight(current);
+}
+/** Copy the family quota summary, dropping fields upstream never filled in. */
+function familyQuotaSummary(info) {
+	if (!info || typeof info !== "object") return void 0;
+	const summary = {};
+	const remainingFraction = finiteNumber(info.remainingFraction);
+	if (remainingFraction !== void 0) summary.remainingFraction = remainingFraction;
+	const weeklyFraction = finiteNumber(info.weeklyFraction);
+	if (weeklyFraction !== void 0) summary.weeklyFraction = weeklyFraction;
+	const resetTime = trimmedString(info.resetTime);
+	if (resetTime !== void 0) summary.resetTime = resetTime;
+	const weeklyResetTime = trimmedString(info.weeklyResetTime);
+	if (weeklyResetTime !== void 0) summary.weeklyResetTime = weeklyResetTime;
+	const updatedAt = finiteNumber(info.updatedAt);
+	if (updatedAt !== void 0) summary.updatedAt = updatedAt;
+	return Object.keys(summary).length > 0 ? summary : void 0;
+}
+/**
+* Normalize one account's recorded model entitlements. Read-only: `account` is never mutated,
+* every returned object is freshly built, and no clock or I/O is touched.
+*/
+function describeAccountModels(account) {
+	const quotas = account.quotas ?? {};
+	const byFamily = /* @__PURE__ */ new Map();
+	const bucketFor = (family) => {
+		let bucket = byFamily.get(family);
+		if (!bucket) {
+			bucket = /* @__PURE__ */ new Map();
+			byFamily.set(family, bucket);
+		}
+		return bucket;
+	};
+	for (const [rawKey, info] of Object.entries(quotas)) {
+		if (!info || typeof info !== "object") continue;
+		const declared = isModelFamily(rawKey) ? rawKey : "unknown";
+		const models = Array.isArray(info.models) ? info.models : [];
+		for (const raw of models) {
+			if (!raw || typeof raw !== "object") continue;
+			const id = trimmedString(raw.modelId);
+			if (!id) continue;
+			const detected = modelFamilyOf(id);
+			const family = declared !== "unknown" && detected === declared ? declared : detected;
+			const entry = {
+				id,
+				name: trimmedString(raw.displayName) ?? id,
+				family
+			};
+			const remainingFraction = finiteNumber(raw.remainingFraction);
+			if (remainingFraction !== void 0) entry.remainingFraction = remainingFraction;
+			const resetTime = trimmedString(raw.resetTime);
+			if (resetTime !== void 0) entry.resetTime = resetTime;
+			const bucket = bucketFor(family);
+			const seen = bucket.get(id);
+			if (!seen || preferModel(seen, entry)) bucket.set(id, entry);
+		}
+	}
+	const familyModels = [];
+	let total = 0;
+	for (const family of MODEL_FAMILY_ORDER) {
+		const bucket = byFamily.get(family);
+		const models = bucket ? [...bucket.values()].sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0) : [];
+		const described = {
+			family,
+			known: models.length > 0,
+			models
+		};
+		const quota = familyQuotaSummary(quotas[family]);
+		if (quota !== void 0) described.quota = quota;
+		total += models.length;
+		familyModels.push(described);
+	}
+	let refreshedAt = null;
+	for (const family of MODEL_FAMILY_ORDER) {
+		const updatedAt = finiteNumber(quotas[family]?.updatedAt);
+		if (updatedAt !== void 0 && (refreshedAt === null || updatedAt > refreshedAt)) refreshedAt = updatedAt;
+	}
+	return {
+		known: familyModels.some((f) => f.known),
+		total,
+		refreshedAt,
+		familyModels
+	};
+}
+function errorMessage(err) {
+	if (err instanceof Error && err.message) return err.message;
+	return String(err);
+}
+/**
+* The single code path behind `GET|POST /plugins/cloudcode-link/pool/account-models`.
+*
+* Framework-free on purpose: it takes its account lookup and its refresh as dependencies and
+* returns `{ status, body }`, so the route in `src/index.ts` and the unit tests in
+* `test/account-models-api.test.ts` exercise the same logic instead of a re-implemented copy.
+*
+* A failed refresh never turns into a 500: the account's previously recorded data is still
+* worth showing, so the response stays 200 with `refreshError` alongside it.
+*/
+async function handleAccountModels(req, deps) {
+	const id = trimmedString(req.id);
+	if (!id) return {
+		status: 400,
+		body: {
+			ok: false,
+			error: "id_required"
+		}
+	};
+	const found = deps.getAccount(id);
+	if (!found) return {
+		status: 404,
+		body: {
+			ok: false,
+			error: "account_not_found"
+		}
+	};
+	let account = found;
+	let refreshError;
+	if (req.refresh === true || req.refresh === "true") {
+		if (deps.refreshQuota) {
+			try {
+				await deps.refreshQuota(account);
+			} catch (err) {
+				refreshError = errorMessage(err);
+			}
+			account = deps.getAccount(id) ?? account;
+		} else refreshError = "refresh_unavailable";
+	}
+	const catalog = describeAccountModels(account);
+	const alias = trimmedString(account.alias);
+	const email = trimmedString(account.email);
+	return {
+		status: 200,
+		body: {
+			ok: true,
+			id: account.id,
+			...alias !== void 0 ? { alias } : {},
+			...email !== void 0 ? { email } : {},
+			known: catalog.known,
+			total: catalog.total,
+			refreshedAt: catalog.refreshedAt,
+			familyModels: catalog.familyModels,
+			...refreshError !== void 0 ? { refreshError } : {}
+		}
+	};
+}
+//#endregion
 //#region packages/core/src/oneshot.ts
 const INLINE_MAX_BYTES = 262144;
 function looksTextual(head) {
@@ -32502,6 +32704,40 @@ function apply(ctx, entryConfig = {}) {
 					ok: true,
 					pool: pool.getPoolData()
 				});
+			})();
+		});
+		regBoth("pool/account-models", (req, res) => {
+			(async () => {
+				const method = methodOf(req);
+				let id;
+				let refresh = false;
+				if (method === "POST") {
+					const body = await readBody(req);
+					id = body.id;
+					refresh = body.refresh;
+				} else if (method === "GET" || method === "HEAD") id = parseQuery(req).id;
+				else {
+					sendJson(res, 405, {
+						ok: false,
+						error: "GET or POST only"
+					});
+					return;
+				}
+				try {
+					const result = await handleAccountModels({
+						id,
+						refresh
+					}, {
+						getAccount: (accountId) => pool.getAccount(accountId),
+						refreshQuota: (account) => quota.refreshAccountQuota(account, true)
+					});
+					sendJson(res, result.status, result.body);
+				} catch (err) {
+					sendJson(res, 500, {
+						ok: false,
+						error: String(err)
+					});
+				}
 			})();
 		});
 		regBoth("pool/clear-cooldown", (req, res) => {

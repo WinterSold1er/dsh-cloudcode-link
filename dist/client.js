@@ -29,8 +29,1156 @@ window.__ModuleLoader__.load({
 			x: "M18 6L6 18M6 6l12 12",
 			externalLink: "M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6M15 3h6v6M10 14L21 3",
 			alert: "M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0zM12 9v4M12 17h.01",
-			activity: "M22 12h-4l-3 9L9 3l-3 9H2"
+			activity: "M22 12h-4l-3 9L9 3l-3 9H2",
+			search: "M11 19a8 8 0 1 0 0-16 8 8 0 0 0 0 16zM21 21l-4.35-4.35",
+			layers: "M12 2 2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"
 		};
+		//#endregion
+		//#region src/client/theme.ts
+		const THEME_CSS = `
+/* agy-tokens:start */
+:root, body {
+	/* --- brand artwork (Antigravity orb gradient) --- */
+	--agy-brand-a: #4c8dff;
+	--agy-brand-b: #a96bff;
+
+	/* --- spacing: 8pt grid --- */
+	--agy-space-1: 4px;
+	--agy-space-2: 8px;
+	--agy-space-3: 12px;
+	--agy-space-4: 16px;
+	--agy-space-5: 24px;
+	--agy-space-6: 32px;
+
+	/* --- type scale (system stack + tabular numerals) --- */
+	--agy-font-family: var(--dsw-font-family, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", "Microsoft YaHei", sans-serif);
+	--agy-font-mono: ui-monospace, SFMono-Regular, "Cascadia Mono", Consolas, "Liberation Mono", monospace;
+	--agy-font-xs: 11px;
+	--agy-font-sm: 12px;
+	--agy-font-md: 13px;
+	--agy-font-lg: 14px;
+	--agy-font-xl: 16px;
+	--agy-font-2xl: 20px;
+
+	/* --- radii --- */
+	--agy-radius-sm: 6px;
+	--agy-radius-md: 8px;
+	--agy-radius-lg: 12px;
+	--agy-radius-pill: 999px;
+
+	/* --- elevation --- */
+	--agy-shadow-1: 0 1px 2px rgba(15, 23, 42, 0.06);
+	--agy-shadow-2: 0 4px 14px rgba(15, 23, 42, 0.09);
+	--agy-shadow-3: 0 18px 44px rgba(15, 23, 42, 0.22);
+
+	/* --- motion choreography --- */
+	--agy-ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+	--agy-ease-inout: cubic-bezier(0.65, 0, 0.35, 1);
+	--agy-dur-fast: 120ms;
+	--agy-dur-base: 180ms;
+	--agy-dur-slow: 240ms;
+	--agy-stagger: 55ms;
+
+	/* --- light theme surfaces --- */
+	--agy-bg-panel: var(--dsw-alias-bg-layer-2, #ffffff);
+	--agy-bg-card: var(--dsw-alias-bg-layer-2, #ffffff);
+	--agy-bg-card-primary: #eef5ff;
+	--agy-bg-header: var(--dsw-alias-bg-layer-2, #fbfcfe);
+	--agy-bg-subbox: var(--dsw-alias-bg-layer-3, #f4f6f9);
+	--agy-bg-box: var(--dsw-alias-bg-layer-3, #f7f9fb);
+	--agy-bg-input: var(--dsw-alias-bg-layer-1, #ffffff);
+	--agy-bg-btn: var(--dsw-alias-bg-layer-2, #ffffff);
+	--agy-bg-btn-hover: var(--dsw-alias-interactive-bg-hover, #f1f4f8);
+	--agy-bg-progress-track: #e6ebf2;
+	--agy-bg-skeleton: #e9edf3;
+	--agy-bg-skeleton-hi: #f5f8fb;
+	--agy-bg-nav: var(--dsw-alias-bg-layer-3, #f4f6f9);
+
+	/* --- light theme borders --- */
+	--agy-border-card: var(--dsw-alias-border-l1, #e2e8f0);
+	--agy-border-card-primary: #9ec3f5;
+	--agy-border-box: var(--dsw-alias-border-l1, #e3e8ef);
+	--agy-border-subbox: var(--dsw-alias-border-l2, #dbe2ea);
+	--agy-border-divider: var(--dsw-alias-border-l2, #e6ebf1);
+	--agy-border-btn: #d4dce6;
+	--agy-border-btn-primary: #7fa9e8;
+	--agy-border-input: #d4dce6;
+	--agy-border-input-focus: #1d4ed8;
+
+	/* --- light theme text (AA on layer-2 surfaces) --- */
+	--agy-text-primary: var(--dsw-alias-label-primary, #101828);
+	--agy-text-secondary: var(--dsw-alias-label-secondary, #475467);
+	--agy-text-tertiary: var(--dsw-alias-label-tertiary, #626e81);
+	--agy-text-muted: #626e81;
+	--agy-text-btn: #344054;
+	--agy-text-btn-primary: #f8fafc;
+	--agy-text-window-label: #1d4ed8;
+	--agy-on-primary: #f8fafc;
+
+	/* --- semantic status --- */
+	--agy-ok-text: #047857;
+	--agy-ok-bg: #e7f6ef;
+	--agy-ok-border: #a3d7c0;
+	--agy-warn-text: #b45309;
+	--agy-warn-bg: #fdf3e3;
+	--agy-warn-border: #f0d1a4;
+	--agy-danger-text: #b91c1c;
+	--agy-danger-bg: #fdecec;
+	--agy-danger-border: #f2bdbd;
+	--agy-info-text: #1d4ed8;
+	--agy-info-bg: #eaf1fe;
+	--agy-info-border: #bad2f7;
+	--agy-neutral-text: #475569;
+	--agy-neutral-bg: #eef2f6;
+	--agy-neutral-border: #d7dee8;
+
+	/* --- accents --- */
+	--agy-accent: #1d4ed8;
+	--agy-accent-hover: #1e40af;
+	--agy-accent-soft-bg: #eaf1fe;
+	--agy-accent-soft-border: #bcd3f7;
+	--agy-on-accent: #f8fafc;
+	--agy-focus-ring: #1d4ed8;
+
+	/* --- status-strong (data viz on tables/bars) --- */
+	--agy-strong-ok: #047857;
+	--agy-strong-warn: #b45309;
+	--agy-strong-danger: #dc2626;
+	--agy-strong-neutral: #64748b;
+	--agy-tint-ok: rgba(4, 120, 87, 0.12);
+	--agy-tint-warn: rgba(180, 83, 9, 0.12);
+	--agy-tint-danger: rgba(220, 38, 38, 0.12);
+	--agy-tint-neutral: rgba(100, 116, 139, 0.14);
+
+	/* --- quota gradients --- */
+	--agy-quota-high-grad: linear-gradient(90deg, #047857, #10b981);
+	--agy-quota-med-grad: linear-gradient(90deg, #b45309, #f59e0b);
+	--agy-quota-low-grad: linear-gradient(90deg, #b91c1c, #ef4444);
+	--agy-quota-cool-grad: linear-gradient(90deg, #475569, #64748b);
+	--agy-quota-high-text: #047857;
+	--agy-quota-med-text: #b45309;
+	--agy-quota-low-text: #b91c1c;
+	--agy-quota-none-text: #626e81;
+	--agy-quota-none-bg: transparent;
+	--agy-quota-none-border: var(--dsw-alias-border-l2, #dbe2ea);
+	--agy-quota-high-bg: var(--agy-tint-ok);
+	--agy-quota-med-bg: var(--agy-tint-warn);
+	--agy-quota-low-bg: var(--agy-tint-danger);
+	--agy-quota-high-border: var(--agy-ok-border);
+	--agy-quota-med-border: var(--agy-warn-border);
+	--agy-quota-low-border: var(--agy-danger-border);
+
+	/* --- badges --- */
+	--agy-badge-primary-bg: #dbeafe;
+	--agy-badge-primary-text: #1e40af;
+	--agy-badge-primary-border: #93bff4;
+	--agy-badge-tag-bg: #f1f5f9;
+	--agy-badge-tag-text: #475467;
+	--agy-badge-tag-border: #dde4ec;
+	--agy-badge-ready-bg: var(--agy-ok-bg);
+	--agy-badge-ready-text: var(--agy-ok-text);
+	--agy-badge-ready-border: var(--agy-ok-border);
+	--agy-badge-unready-bg: var(--agy-warn-bg);
+	--agy-badge-unready-text: var(--agy-warn-text);
+	--agy-badge-unready-border: var(--agy-warn-border);
+	--agy-badge-email-bg: var(--agy-info-bg);
+	--agy-badge-email-text: var(--agy-info-text);
+	--agy-badge-email-border: var(--agy-info-border);
+	--agy-badge-proxy-bg: var(--agy-neutral-bg);
+	--agy-badge-proxy-text: var(--agy-neutral-text);
+	--agy-badge-proxy-border: var(--agy-neutral-border);
+
+	/* --- auth add flow box --- */
+	--agy-auth-box-bg: var(--agy-bg-subbox);
+	--agy-auth-box-border: var(--agy-border-subbox);
+
+	/* --- toast --- */
+	--agy-toast-success-bg: var(--agy-ok-bg);
+	--agy-toast-success-text: var(--agy-ok-text);
+	--agy-toast-success-border: var(--agy-ok-border);
+	--agy-toast-info-bg: var(--agy-info-bg);
+	--agy-toast-info-text: var(--agy-info-text);
+	--agy-toast-info-border: var(--agy-info-border);
+	--agy-toast-warn-bg: var(--agy-warn-bg);
+	--agy-toast-warn-text: var(--agy-warn-text);
+	--agy-toast-warn-border: var(--agy-warn-border);
+	--agy-toast-error-bg: var(--agy-danger-bg);
+	--agy-toast-error-text: var(--agy-danger-text);
+	--agy-toast-error-border: var(--agy-danger-border);
+
+	/* --- warn buttons (clear cooldown) --- */
+	--agy-warn-btn-bg: #ffffff;
+	--agy-warn-btn-text: var(--agy-warn-text);
+	--agy-warn-btn-border: var(--agy-warn-border);
+	--agy-danger-bg: var(--agy-danger-bg);
+	--agy-danger-border: var(--agy-danger-border);
+	--agy-danger-text: var(--agy-danger-text);
+	--agy-danger-hover-bg: #f8d7d7;
+
+	/* --- segmented controls --- */
+	--agy-seg-group-bg: var(--agy-bg-nav);
+	--agy-seg-group-border: var(--agy-border-divider);
+	--agy-seg-btn-text: var(--agy-text-secondary);
+	--agy-seg-btn-active-bg: #ffffff;
+	--agy-seg-btn-active-text: var(--agy-text-primary);
+	--agy-seg-danger-bg: var(--agy-danger-bg);
+	--agy-seg-danger-text: var(--agy-danger-text);
+	--agy-seg-danger-border: var(--agy-danger-border);
+
+	/* --- audit drawer (theme-adaptive) --- */
+	--agy-drawer-overlay: rgba(15, 23, 42, 0.5);
+	--agy-drawer-bg: var(--dsw-alias-bg-layer-1, #ffffff);
+	--agy-drawer-head-bg: var(--dsw-alias-bg-layer-3, #f7f9fb);
+	--agy-drawer-border: var(--dsw-alias-border-l1, #e2e8f0);
+	--agy-table-text: var(--agy-text-primary);
+	--agy-table-soft: var(--agy-text-secondary);
+	--agy-table-dim: var(--agy-text-secondary);
+	--agy-table-faint: var(--agy-text-tertiary);
+	--agy-table-head-bg: var(--dsw-alias-bg-layer-3, #f7f9fb);
+	--agy-table-row-border: var(--dsw-alias-border-l2, #e8edf3);
+	--agy-drawer-btn-bg: var(--dsw-alias-bg-layer-3, #f1f4f8);
+	--agy-drawer-btn-text: var(--agy-text-btn);
+	--agy-drawer-btn-border: var(--agy-border-btn);
+
+	/* --- modal shadow / backdrop --- */
+	--agy-shadow-modal: var(--agy-shadow-3);
+	--agy-modal-backdrop: rgba(15, 23, 42, 0.5);
+	--agy-shadow-card: var(--agy-shadow-1);
+	--agy-shadow-card-hover: var(--agy-shadow-2);
+	--agy-shadow-card-primary: 0 0 0 1px var(--agy-border-card-primary), var(--agy-shadow-2);
+}
+
+body[data-ds-dark-theme],
+body.dark,
+body[data-theme="dark"] {
+	--agy-bg-panel: var(--dsw-alias-bg-layer-2, #171a20);
+	--agy-bg-card: var(--dsw-alias-bg-layer-2, #171a20);
+	--agy-bg-card-primary: #172232;
+	--agy-bg-header: var(--dsw-alias-bg-layer-2, #191c22);
+	--agy-bg-subbox: var(--dsw-alias-bg-layer-3, #1e2229);
+	--agy-bg-box: var(--dsw-alias-bg-layer-3, #1b1f26);
+	--agy-bg-input: var(--dsw-alias-bg-layer-1, #12151a);
+	--agy-bg-btn: var(--dsw-alias-bg-layer-3, #21252d);
+	--agy-bg-btn-hover: var(--dsw-alias-interactive-bg-hover, #272c35);
+	--agy-bg-progress-track: #2a303a;
+	--agy-bg-skeleton: #21262e;
+	--agy-bg-skeleton-hi: #2b313b;
+	--agy-bg-nav: var(--dsw-alias-bg-layer-3, #1e2229);
+
+	--agy-border-card: var(--dsw-alias-border-l1, #2b323d);
+	--agy-border-card-primary: #3c5a80;
+	--agy-border-box: var(--dsw-alias-border-l1, #2b323d);
+	--agy-border-subbox: var(--dsw-alias-border-l2, #333a45);
+	--agy-border-divider: var(--dsw-alias-border-l2, #292f38);
+	--agy-border-btn: #39414d;
+	--agy-border-btn-primary: #4a6fa5;
+	--agy-border-input: #39414d;
+	--agy-border-input-focus: #60a5fa;
+
+	--agy-text-primary: var(--dsw-alias-label-primary, #f1f3f6);
+	--agy-text-secondary: var(--dsw-alias-label-secondary, #b7c0cc);
+	--agy-text-tertiary: var(--dsw-alias-label-tertiary, #98a2b1);
+	--agy-text-muted: #98a2b1;
+	--agy-text-btn: #d4dae3;
+	--agy-text-btn-primary: #0b1220;
+	--agy-text-window-label: #93c5fd;
+	--agy-on-primary: #f8fafc;
+
+	--agy-ok-text: #34d399;
+	--agy-ok-bg: rgba(52, 211, 153, 0.14);
+	--agy-ok-border: rgba(52, 211, 153, 0.38);
+	--agy-warn-text: #fbbf24;
+	--agy-warn-bg: rgba(251, 191, 36, 0.13);
+	--agy-warn-border: rgba(251, 191, 36, 0.38);
+	--agy-danger-text: #f87171;
+	--agy-danger-bg: rgba(248, 113, 113, 0.13);
+	--agy-danger-border: rgba(248, 113, 113, 0.38);
+	--agy-info-text: #93c5fd;
+	--agy-info-bg: rgba(147, 197, 253, 0.13);
+	--agy-info-border: rgba(147, 197, 253, 0.38);
+	--agy-neutral-text: #b7c0cc;
+	--agy-neutral-bg: rgba(183, 192, 204, 0.12);
+	--agy-neutral-border: rgba(183, 192, 204, 0.3);
+
+	--agy-accent: #60a5fa;
+	--agy-accent-hover: #93c5fd;
+	--agy-accent-soft-bg: rgba(96, 165, 250, 0.14);
+	--agy-accent-soft-border: rgba(96, 165, 250, 0.4);
+	--agy-on-accent: #0b1220;
+	--agy-focus-ring: #60a5fa;
+
+	--agy-strong-ok: #34d399;
+	--agy-strong-warn: #fbbf24;
+	--agy-strong-danger: #f87171;
+	--agy-strong-neutral: #98a2b1;
+
+	--agy-quota-high-grad: linear-gradient(90deg, #059669, #34d399);
+	--agy-quota-med-grad: linear-gradient(90deg, #d97706, #fbbf24);
+	--agy-quota-low-grad: linear-gradient(90deg, #dc2626, #f87171);
+	--agy-quota-cool-grad: linear-gradient(90deg, #64748b, #98a2b1);
+	--agy-quota-high-text: #34d399;
+	--agy-quota-med-text: #fbbf24;
+	--agy-quota-low-text: #f87171;
+	--agy-quota-none-text: #98a2b1;
+
+	--agy-badge-primary-bg: rgba(96, 165, 250, 0.16);
+	--agy-badge-primary-text: #93c5fd;
+	--agy-badge-primary-border: rgba(96, 165, 250, 0.4);
+	--agy-badge-tag-bg: rgba(183, 192, 204, 0.1);
+	--agy-badge-tag-text: #b7c0cc;
+	--agy-badge-tag-border: rgba(183, 192, 204, 0.26);
+	--agy-badge-email-bg: var(--agy-info-bg);
+	--agy-badge-email-text: var(--agy-info-text);
+	--agy-badge-email-border: var(--agy-info-border);
+
+	--agy-warn-btn-bg: transparent;
+	--agy-danger-hover-bg: rgba(248, 113, 113, 0.22);
+
+	--agy-seg-btn-active-bg: #2a303a;
+	--agy-seg-btn-active-text: #f1f3f6;
+
+	--agy-drawer-overlay: rgba(5, 8, 12, 0.62);
+	--agy-drawer-bg: var(--dsw-alias-bg-layer-1, #12151a);
+	--agy-drawer-head-bg: var(--dsw-alias-bg-layer-3, #1b1f26);
+	--agy-drawer-border: var(--dsw-alias-border-l1, #2b323d);
+	--agy-table-head-bg: var(--dsw-alias-bg-layer-3, #1b1f26);
+	--agy-table-row-border: var(--dsw-alias-border-l2, #262c35);
+	--agy-drawer-btn-bg: #232831;
+	--agy-drawer-btn-text: #d4dae3;
+	--agy-drawer-btn-border: #39414d;
+
+	--agy-modal-backdrop: rgba(5, 8, 12, 0.62);
+	--agy-shadow-card-primary: 0 0 0 1px var(--agy-border-card-primary), 0 4px 14px rgba(0, 0, 0, 0.35);
+}
+/* agy-tokens:end */
+
+@keyframes agy-spin {
+	0% { transform: rotate(0deg); }
+	100% { transform: rotate(360deg); }
+}
+
+@keyframes agy-pulse {
+	0%, 100% { opacity: 1; transform: scale(1); }
+	50% { opacity: 0.55; transform: scale(0.86); }
+}
+
+@keyframes agy-rise {
+	from { opacity: 0; transform: translateY(10px); }
+	to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes agy-fill {
+	from { transform: scaleX(0); }
+	to { transform: scaleX(1); }
+}
+
+@keyframes agy-breathe {
+	0%, 100% { box-shadow: 0 0 0 0 var(--agy-warn-border); }
+	50% { box-shadow: 0 0 0 4px var(--agy-warn-bg); }
+}
+
+@keyframes agy-shimmer {
+	0% { background-position: 200% 0; }
+	100% { background-position: -200% 0; }
+}
+
+@keyframes agy-slide-in {
+	from { opacity: 0; transform: translateX(28px); }
+	to { opacity: 1; transform: translateX(0); }
+}
+
+.agy-root {
+	font-family: var(--agy-font-family);
+	color: var(--agy-text-primary);
+	font-size: var(--agy-font-md);
+}
+
+.agy-num {
+	font-family: var(--agy-font-mono);
+	font-variant-numeric: tabular-nums;
+}
+
+/* stagger helper: children set --i inline (capped by the renderer) */
+.agy-rise {
+	animation: agy-rise var(--agy-dur-slow) var(--agy-ease-out) both;
+	animation-delay: calc(var(--i, 0) * var(--agy-stagger));
+}
+
+.agy-btn {
+	font-family: inherit;
+	transition: background var(--agy-dur-fast) var(--agy-ease-out),
+		border-color var(--agy-dur-fast) var(--agy-ease-out),
+		box-shadow var(--agy-dur-fast) var(--agy-ease-out),
+		transform var(--agy-dur-fast) var(--agy-ease-out);
+}
+
+.agy-btn:hover:not(:disabled) {
+	transform: translateY(-1px);
+}
+
+.agy-btn:active:not(:disabled) {
+	transform: translateY(0);
+}
+
+.agy-btn:disabled {
+	opacity: 0.55;
+	cursor: not-allowed;
+}
+
+.agy-root :is(button, input, a, [tabindex]):focus-visible,
+.agy-drawer :is(button, input, a, [tabindex]):focus-visible {
+	outline: 2px solid var(--agy-focus-ring);
+	outline-offset: 2px;
+	border-radius: var(--agy-radius-sm);
+}
+
+.agy-spinner {
+	display: inline-block;
+	width: 12px;
+	height: 12px;
+	border-radius: 50%;
+	border: 2px solid var(--agy-border-btn);
+	border-top-color: var(--agy-accent);
+	animation: agy-spin 720ms linear infinite;
+	vertical-align: -1px;
+}
+
+.agy-pulse-dot {
+	display: inline-block;
+	width: 8px;
+	height: 8px;
+	border-radius: 50%;
+	animation: agy-pulse 2.4s var(--agy-ease-inout) infinite;
+	flex-shrink: 0;
+}
+
+.agy-card-hover {
+	transition: box-shadow var(--agy-dur-base) var(--agy-ease-out),
+		border-color var(--agy-dur-base) var(--agy-ease-out),
+		transform var(--agy-dur-base) var(--agy-ease-out);
+}
+
+.agy-card-hover:hover {
+	box-shadow: var(--agy-shadow-2);
+	transform: translateY(-1px);
+}
+
+.agy-progress-fill {
+	transform-origin: left center;
+	animation: agy-fill var(--agy-dur-slow) var(--agy-ease-out) both;
+}
+
+.agy-cooldown-breathe {
+	animation: agy-breathe 2.2s var(--agy-ease-inout) infinite;
+}
+
+.agy-skeleton {
+	position: relative;
+	overflow: hidden;
+	background: var(--agy-bg-skeleton);
+	border-radius: var(--agy-radius-sm);
+}
+
+.agy-skeleton::after {
+	content: "";
+	position: absolute;
+	inset: 0;
+	background: linear-gradient(90deg, transparent, var(--agy-bg-skeleton-hi), transparent);
+	background-size: 200% 100%;
+	animation: agy-shimmer 1.2s var(--agy-ease-inout) infinite;
+}
+
+.agy-sr-only {
+	position: absolute;
+	width: 1px;
+	height: 1px;
+	padding: 0;
+	margin: -1px;
+	overflow: hidden;
+	clip: rect(0, 0, 0, 0);
+	white-space: nowrap;
+	border: 0;
+}
+
+.agy-tab {
+	font-family: inherit;
+	transition: background var(--agy-dur-fast) var(--agy-ease-out),
+		color var(--agy-dur-fast) var(--agy-ease-out),
+		box-shadow var(--agy-dur-fast) var(--agy-ease-out);
+}
+
+.agy-tab[aria-selected="true"] {
+	background: var(--agy-seg-btn-active-bg);
+	color: var(--agy-seg-btn-active-text);
+	box-shadow: var(--agy-shadow-1);
+}
+
+.agy-chip {
+	font-family: inherit;
+	transition: background var(--agy-dur-fast) var(--agy-ease-out),
+		border-color var(--agy-dur-fast) var(--agy-ease-out),
+		color var(--agy-dur-fast) var(--agy-ease-out);
+}
+
+.agy-chip[aria-pressed="true"] {
+	background: var(--agy-accent-soft-bg);
+	border-color: var(--agy-accent-soft-border);
+	color: var(--agy-accent);
+}
+
+.agy-drawer-backdrop {
+	position: fixed;
+	top: 0;
+	left: 0;
+	right: 0;
+	bottom: 0;
+	background: var(--agy-drawer-overlay);
+	backdrop-filter: blur(3px);
+	z-index: 99999;
+	display: flex;
+	justify-content: flex-end;
+}
+
+.agy-drawer {
+	width: min(940px, 96vw);
+	height: 100%;
+	background: var(--agy-drawer-bg);
+	border-left: 1px solid var(--agy-drawer-border);
+	color: var(--agy-table-text);
+	display: flex;
+	flex-direction: column;
+	box-shadow: var(--agy-shadow-modal);
+	animation: agy-slide-in var(--agy-dur-slow) var(--agy-ease-out) both;
+}
+
+.agy-table {
+	width: 100%;
+	border-collapse: collapse;
+	font-size: var(--agy-font-sm);
+}
+
+.agy-table th {
+	padding: var(--agy-space-2) var(--agy-space-3);
+	color: var(--agy-table-dim);
+	text-align: left;
+	font-weight: 600;
+	border-bottom: 1px solid var(--agy-drawer-border);
+	background: var(--agy-table-head-bg);
+}
+
+.agy-table td {
+	padding: var(--agy-space-2) var(--agy-space-3);
+	border-bottom: 1px solid var(--agy-table-row-border);
+	color: var(--agy-table-soft);
+}
+
+.agy-model-row {
+	animation: agy-rise var(--agy-dur-base) var(--agy-ease-out) both;
+	animation-delay: calc(var(--i, 0) * var(--agy-stagger));
+}
+
+.agy-input {
+	font-family: inherit;
+	transition: border-color var(--agy-dur-fast) var(--agy-ease-out),
+		box-shadow var(--agy-dur-fast) var(--agy-ease-out);
+}
+
+.agy-input:focus {
+	border-color: var(--agy-border-input-focus);
+	box-shadow: 0 0 0 3px var(--agy-accent-soft-bg);
+	outline: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.agy-root *,
+	.agy-root *::before,
+	.agy-root *::after,
+	.agy-drawer-backdrop,
+	.agy-drawer,
+	.agy-drawer * {
+		animation: none !important;
+		transition: none !important;
+		scroll-behavior: auto !important;
+	}
+	.agy-progress-fill { transform: none !important; }
+}
+`;
+		/** React inline-style presets. Values reference tokens only — zero literals outside the token block. */
+		const S = {
+			container: {
+				display: "flex",
+				flexDirection: "column",
+				gap: "var(--agy-space-3)",
+				padding: "var(--agy-space-2) var(--agy-space-1)",
+				fontFamily: "var(--agy-font-family)",
+				color: "var(--agy-text-primary)",
+				fontSize: "var(--agy-font-md)",
+				maxWidth: "1080px"
+			},
+			headerCard: {
+				display: "flex",
+				alignItems: "center",
+				justifyContent: "space-between",
+				flexWrap: "wrap",
+				gap: "var(--agy-space-2)",
+				padding: "var(--agy-space-3) var(--agy-space-4)",
+				background: "var(--agy-bg-header)",
+				border: "1px solid var(--agy-border-card)",
+				borderRadius: "var(--agy-radius-lg)",
+				boxShadow: "var(--agy-shadow-1)"
+			},
+			navBar: {
+				display: "inline-flex",
+				alignItems: "center",
+				gap: "2px",
+				padding: "3px",
+				background: "var(--agy-bg-nav)",
+				border: "1px solid var(--agy-border-divider)",
+				borderRadius: "var(--agy-radius-md)",
+				flexWrap: "wrap"
+			},
+			tab: {
+				padding: "6px 13px",
+				borderRadius: "var(--agy-radius-sm)",
+				border: "none",
+				background: "transparent",
+				color: "var(--agy-seg-btn-text)",
+				cursor: "pointer",
+				fontSize: "var(--agy-font-sm)",
+				fontWeight: 650,
+				lineHeight: 1.35
+			},
+			panelTitle: {
+				fontSize: "var(--agy-font-lg)",
+				fontWeight: 750,
+				letterSpacing: "0.01em",
+				color: "var(--agy-text-primary)"
+			},
+			panelCaption: {
+				fontSize: "var(--agy-font-xs)",
+				fontWeight: 600,
+				letterSpacing: "0.06em",
+				color: "var(--agy-text-tertiary)",
+				textTransform: "uppercase"
+			},
+			badgeBase: {
+				display: "inline-flex",
+				alignItems: "center",
+				padding: "2px 8px",
+				borderRadius: "var(--agy-radius-pill)",
+				fontSize: "var(--agy-font-xs)",
+				fontWeight: 650,
+				lineHeight: 1.5
+			},
+			badgePrimary: {
+				display: "inline-flex",
+				alignItems: "center",
+				padding: "2px 8px",
+				borderRadius: "var(--agy-radius-pill)",
+				background: "var(--agy-badge-primary-bg)",
+				color: "var(--agy-badge-primary-text)",
+				border: "1px solid var(--agy-badge-primary-border)",
+				fontSize: "var(--agy-font-xs)",
+				fontWeight: 650,
+				lineHeight: 1.5
+			},
+			badgeTag: {
+				display: "inline-flex",
+				alignItems: "center",
+				padding: "2px 8px",
+				borderRadius: "var(--agy-radius-pill)",
+				background: "var(--agy-badge-tag-bg)",
+				color: "var(--agy-badge-tag-text)",
+				border: "1px solid var(--agy-badge-tag-border)",
+				fontSize: "var(--agy-font-xs)",
+				fontWeight: 550,
+				lineHeight: 1.5
+			},
+			badgeReady: {
+				display: "inline-flex",
+				alignItems: "center",
+				padding: "2px 8px",
+				borderRadius: "var(--agy-radius-pill)",
+				background: "var(--agy-badge-ready-bg)",
+				color: "var(--agy-badge-ready-text)",
+				border: "1px solid var(--agy-badge-ready-border)",
+				fontSize: "var(--agy-font-xs)",
+				fontWeight: 650
+			},
+			badgeUnready: {
+				display: "inline-flex",
+				alignItems: "center",
+				padding: "2px 8px",
+				borderRadius: "var(--agy-radius-pill)",
+				background: "var(--agy-badge-unready-bg)",
+				color: "var(--agy-badge-unready-text)",
+				border: "1px solid var(--agy-badge-unready-border)",
+				fontSize: "var(--agy-font-xs)",
+				fontWeight: 650
+			},
+			statBox: {
+				padding: "var(--agy-space-3)",
+				background: "var(--agy-bg-box)",
+				border: "1px solid var(--agy-border-box)",
+				borderRadius: "var(--agy-radius-md)"
+			},
+			statLabel: {
+				fontSize: "var(--agy-font-xs)",
+				fontWeight: 650,
+				letterSpacing: "0.05em",
+				color: "var(--agy-text-tertiary)",
+				textTransform: "uppercase",
+				marginBottom: "6px"
+			},
+			statValue: {
+				fontFamily: "var(--agy-font-mono)",
+				fontVariantNumeric: "tabular-nums",
+				fontSize: "var(--agy-font-xl)",
+				fontWeight: 750,
+				color: "var(--agy-text-primary)",
+				lineHeight: 1.2
+			},
+			statSub: {
+				fontSize: "var(--agy-font-xs)",
+				color: "var(--agy-text-tertiary)",
+				marginTop: "5px",
+				fontFamily: "var(--agy-font-mono)",
+				fontVariantNumeric: "tabular-nums"
+			},
+			card: {
+				padding: "var(--agy-space-3) var(--agy-space-4)",
+				background: "var(--agy-bg-card)",
+				border: "1px solid var(--agy-border-card)",
+				borderRadius: "var(--agy-radius-lg)",
+				boxShadow: "var(--agy-shadow-1)",
+				marginBottom: "var(--agy-space-3)"
+			},
+			cardPrimary: {
+				padding: "var(--agy-space-3) var(--agy-space-4)",
+				background: "var(--agy-bg-card-primary)",
+				border: "1px solid var(--agy-border-card-primary)",
+				borderRadius: "var(--agy-radius-lg)",
+				boxShadow: "var(--agy-shadow-card-primary)",
+				marginBottom: "var(--agy-space-3)"
+			},
+			quotaBox: { marginTop: "var(--agy-space-2)" },
+			progressBarBg: {
+				flex: 1,
+				minWidth: "64px",
+				height: "7px",
+				background: "var(--agy-bg-progress-track)",
+				borderRadius: "var(--agy-radius-pill)",
+				overflow: "hidden"
+			},
+			btn: {
+				display: "inline-flex",
+				alignItems: "center",
+				gap: "5px",
+				padding: "6px 12px",
+				borderRadius: "var(--agy-radius-sm)",
+				border: "1px solid var(--agy-border-btn)",
+				background: "var(--agy-bg-btn)",
+				color: "var(--agy-text-btn)",
+				fontSize: "var(--agy-font-sm)",
+				fontWeight: 650,
+				cursor: "pointer",
+				lineHeight: 1.35
+			},
+			btnPrimary: {
+				display: "inline-flex",
+				alignItems: "center",
+				gap: "5px",
+				padding: "6px 12px",
+				borderRadius: "var(--agy-radius-sm)",
+				border: "1px solid var(--agy-border-btn-primary)",
+				background: "var(--agy-accent)",
+				color: "var(--agy-on-accent)",
+				fontSize: "var(--agy-font-sm)",
+				fontWeight: 700,
+				cursor: "pointer",
+				lineHeight: 1.35,
+				boxShadow: "var(--agy-shadow-1)"
+			},
+			btnDanger: {
+				display: "inline-flex",
+				alignItems: "center",
+				gap: "5px",
+				padding: "6px 12px",
+				borderRadius: "var(--agy-radius-sm)",
+				border: "1px solid var(--agy-danger-border)",
+				background: "transparent",
+				color: "var(--agy-danger-text)",
+				fontSize: "var(--agy-font-sm)",
+				fontWeight: 650,
+				cursor: "pointer",
+				lineHeight: 1.35
+			},
+			btnSm: {
+				display: "inline-flex",
+				alignItems: "center",
+				gap: "5px",
+				padding: "4px 9px",
+				borderRadius: "var(--agy-radius-sm)",
+				border: "1px solid var(--agy-border-btn)",
+				background: "var(--agy-bg-btn)",
+				color: "var(--agy-text-btn)",
+				fontSize: "var(--agy-font-xs)",
+				fontWeight: 600,
+				cursor: "pointer",
+				lineHeight: 1.35
+			},
+			btnSmPrimary: {
+				display: "inline-flex",
+				alignItems: "center",
+				gap: "5px",
+				padding: "4px 9px",
+				borderRadius: "var(--agy-radius-sm)",
+				border: "1px solid var(--agy-border-btn-primary)",
+				background: "var(--agy-accent)",
+				color: "var(--agy-on-accent)",
+				fontSize: "var(--agy-font-xs)",
+				fontWeight: 650,
+				cursor: "pointer",
+				lineHeight: 1.35
+			},
+			segGroup: {
+				display: "inline-flex",
+				gap: "3px",
+				padding: "3px",
+				background: "var(--agy-seg-group-bg)",
+				border: "1px solid var(--agy-seg-group-border)",
+				borderRadius: "var(--agy-radius-md)"
+			},
+			segBtn: {
+				padding: "5px 12px",
+				borderRadius: "var(--agy-radius-sm)",
+				border: "none",
+				background: "transparent",
+				color: "var(--agy-seg-btn-text)",
+				cursor: "pointer",
+				fontSize: "var(--agy-font-sm)",
+				fontWeight: 600
+			},
+			segBtnActive: {
+				padding: "5px 12px",
+				borderRadius: "var(--agy-radius-sm)",
+				border: "none",
+				background: "var(--agy-seg-btn-active-bg)",
+				color: "var(--agy-seg-btn-active-text)",
+				cursor: "pointer",
+				fontSize: "var(--agy-font-sm)",
+				fontWeight: 700,
+				boxShadow: "var(--agy-shadow-1)"
+			},
+			input: {
+				flex: 1,
+				minWidth: "0",
+				padding: "7px 10px",
+				borderRadius: "var(--agy-radius-sm)",
+				border: "1px solid var(--agy-border-input)",
+				background: "var(--agy-bg-input)",
+				color: "var(--agy-text-primary)",
+				fontSize: "var(--agy-font-sm)",
+				fontFamily: "var(--agy-font-family)"
+			},
+			muted: {
+				color: "var(--agy-text-muted)",
+				fontSize: "var(--agy-font-sm)"
+			},
+			noticeBanner: {
+				display: "flex",
+				alignItems: "center",
+				justifyContent: "space-between",
+				gap: "var(--agy-space-2)",
+				padding: "9px var(--agy-space-3)",
+				borderRadius: "var(--agy-radius-md)",
+				fontSize: "var(--agy-font-sm)",
+				marginBottom: "var(--agy-space-2)"
+			},
+			authModal: {
+				padding: "var(--agy-space-4)",
+				background: "var(--agy-auth-box-bg)",
+				border: "1px solid var(--agy-auth-box-border)",
+				borderRadius: "var(--agy-radius-lg)",
+				marginBottom: "var(--agy-space-3)"
+			}
+		};
+		//#endregion
+		//#region src/client/account-models.ts
+		const EMPTY_PANEL = {
+			status: "idle",
+			payload: null,
+			source: "quota-fallback",
+			error: null,
+			refreshError: null,
+			fetchedAt: null
+		};
+		const QUOTA_FAMILY_ORDER = [
+			"google",
+			"anthropic",
+			"openai"
+		];
+		function parsePayload(raw) {
+			if (!raw || typeof raw !== "object") return null;
+			const data = raw;
+			const familyModels = Array.isArray(data.familyModels) ? data.familyModels : [];
+			return {
+				ok: typeof data.ok === "boolean" ? data.ok : true,
+				id: typeof data.id === "string" ? data.id : void 0,
+				alias: typeof data.alias === "string" ? data.alias : void 0,
+				email: typeof data.email === "string" ? data.email : void 0,
+				known: data.known === true,
+				total: typeof data.total === "number" ? data.total : familyModels.reduce((n, g) => n + g.models.length, 0),
+				refreshedAt: typeof data.refreshedAt === "number" ? data.refreshedAt : null,
+				familyModels,
+				refreshError: typeof data.refreshError === "string" ? data.refreshError : void 0
+			};
+		}
+		async function readResult(res) {
+			if (!res) return {
+				payload: null,
+				error: "network_unreachable",
+				status: null
+			};
+			if (res.status === 404) return {
+				payload: null,
+				error: "account_not_found",
+				status: 404
+			};
+			let body = null;
+			try {
+				body = await res.json();
+			} catch {
+				return {
+					payload: null,
+					error: "bad_json",
+					status: res.status
+				};
+			}
+			if (!res.ok) return {
+				payload: null,
+				error: body && typeof body === "object" && typeof body.error === "string" ? body.error : `http_${res.status}`,
+				status: res.status
+			};
+			const payload = parsePayload(body);
+			if (!payload) return {
+				payload: null,
+				error: "bad_payload",
+				status: res.status
+			};
+			return {
+				payload,
+				error: null,
+				status: res.status
+			};
+		}
+		/** GET the discovered model list for one account. */
+		async function fetchAccountModels(fetchJson, apiPrefix, id) {
+			return readResult(await fetchJson(`${apiPrefix}/pool/account-models?id=${encodeURIComponent(id)}`));
+		}
+		/** POST a forced rediscovery for one account; on failure callers keep the previous panel data. */
+		async function postAccountModelsRefresh(fetchJson, apiPrefix, id) {
+			return readResult(await fetchJson(`${apiPrefix}/pool/account-models`, {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({
+					id,
+					refresh: true
+				})
+			}));
+		}
+		/**
+		* Build the same payload shape from the quota data embedded in status.pool, so the panel
+		* can degrade gracefully when /pool/account-models is unavailable. The UI always labels
+		* this source as a fallback.
+		*/
+		function buildQuotaFallbackPayload(acc) {
+			const familyModels = [];
+			for (const family of QUOTA_FAMILY_ORDER) {
+				const quota = acc.quotas[family];
+				if (!quota || !Array.isArray(quota.models) || quota.models.length === 0) continue;
+				const models = quota.models.filter((m) => typeof m.modelId === "string" && m.modelId.trim() !== "").map((m) => ({
+					id: m.modelId,
+					name: m.displayName || m.modelId,
+					family,
+					remainingFraction: m.remainingFraction,
+					resetTime: m.resetTime
+				}));
+				if (models.length === 0) continue;
+				familyModels.push({
+					family,
+					known: true,
+					models
+				});
+			}
+			return {
+				ok: true,
+				id: acc.id,
+				alias: acc.alias,
+				email: acc.email,
+				known: familyModels.length > 0,
+				total: familyModels.reduce((n, g) => n + g.models.length, 0),
+				refreshedAt: null,
+				familyModels
+			};
+		}
+		function selectPanelPayload(panel, acc) {
+			if (panel?.payload) return {
+				payload: panel.payload,
+				usingFallback: panel.source !== "api"
+			};
+			return {
+				payload: buildQuotaFallbackPayload(acc),
+				usingFallback: true
+			};
+		}
+		/** Discovered model ids for one account (last payload if any, quota fallback otherwise). */
+		function accountModelIds(acc, panel) {
+			const { payload } = selectPanelPayload(panel, acc);
+			const ids = [];
+			for (const group of payload.familyModels) for (const model of group.models) ids.push(model.id);
+			return ids;
+		}
+		/**
+		* Panel state after a failed initial GET: the previous payload and its source are kept
+		* (an empty panel stays an empty panel); the error is recorded for the visible strip.
+		*/
+		function markPanelLoadFailure(prev, error, now) {
+			return {
+				...prev,
+				status: "error",
+				payload: prev.payload,
+				source: prev.source,
+				error,
+				refreshError: null,
+				fetchedAt: now
+			};
+		}
+		/** Panel state after a failed POST refresh: same payload preservation plus the refreshError marker. */
+		function markPanelRefreshFailure(prev, error, now) {
+			return {
+				...prev,
+				status: "error",
+				payload: prev.payload,
+				source: prev.source,
+				error,
+				refreshError: error,
+				fetchedAt: now
+			};
+		}
+		/** Panel state after a successful fetch (GET or refresh): the fresh payload becomes the panel's truth. */
+		function markPanelSuccess(prev, payload, refreshError, now) {
+			return {
+				...prev,
+				status: "ok",
+				payload,
+				source: "api",
+				error: null,
+				refreshError,
+				fetchedAt: now
+			};
+		}
+		/** A loaded panel is considered fresh for this long before on-demand rediscovery re-triggers. */
+		const PANEL_TTL_MS = 6e4;
+		/**
+		* Which accounts the auto-load effect should (re)load right now:
+		* - panels never loaded (missing / idle), and
+		* - healthy panels whose data exceeded the TTL.
+		* 'loading' and 'error' panels are deliberately excluded: a broken endpoint is retried
+		* only by an explicit user action, never implicitly on every status-poll reference change.
+		*/
+		function collectStalePanelAccounts(panels, accounts, now, ttlMs = PANEL_TTL_MS) {
+			return accounts.filter((acc) => {
+				const panel = panels[acc.id];
+				if (!panel || panel.status === "idle") return true;
+				if (panel.status === "loading" || panel.status === "error") return false;
+				return panel.fetchedAt !== null && now - panel.fetchedAt > ttlMs;
+			});
+		}
+		/** Single source of truth for the expandable model panel's DOM id (aria-controls wiring). */
+		function modelsPanelDomId(accId) {
+			return `models-panel-${accId}`;
+		}
+		/** Human-readable reset window: absolute clock + remaining countdown, weekly vs 5h aware. */
+		function formatQuotaWindow(resetTimeStr, nowMs = Date.now()) {
+			if (!resetTimeStr) return { resetText: "" };
+			try {
+				const d = new Date(resetTimeStr);
+				const diffMs = d.getTime() - nowMs;
+				if (!Number.isFinite(diffMs) || diffMs <= 0) return { resetText: "" };
+				const totalMins = Math.ceil(diffMs / 6e4);
+				const days = Math.floor(totalMins / 1440);
+				const hours = Math.floor(totalMins % 1440 / 60);
+				const mins = totalMins % 60;
+				const isWeekly = days >= 1;
+				const countdown = days > 0 ? `${days}d${hours}h` : hours > 0 ? `${hours}h${mins}m` : `${mins}m`;
+				const hh = d.getHours().toString().padStart(2, "0");
+				const mm = d.getMinutes().toString().padStart(2, "0");
+				return { resetText: isWeekly ? `${d.getMonth() + 1}/${d.getDate()} ${hh}:${mm} (${countdown})` : `${hh}:${mm} (${countdown})` };
+			} catch {
+				return { resetText: "" };
+			}
+		}
+		/** Size of the discovered-model union across all accounts (the denominator of coverage). */
+		function computeModelUnion(panels, accounts) {
+			const union = /* @__PURE__ */ new Set();
+			for (const acc of accounts) for (const id of accountModelIds(acc, panels[acc.id])) union.add(id);
+			return union.size;
+		}
+		/** Model ids that at least one *other* account also supports. */
+		function computeOtherAccountModelIds(panels, accounts, accId) {
+			const others = /* @__PURE__ */ new Set();
+			for (const acc of accounts) {
+				if (acc.id === accId) continue;
+				for (const id of accountModelIds(acc, panels[acc.id])) others.add(id);
+			}
+			return others;
+		}
+		//#endregion
+		//#region src/client/poll-state.ts
+		/**
+		* Fold one poll outcome into the poll UI state.
+		* - A failed poll only flips `pollOk` (the shown data stays, stamped with the last good time).
+		* - Any successful poll restores `pollOk = true` — even when the status JSON is unchanged,
+		*   so the page can never stay stuck on 「轮询中断」 after connectivity recovers.
+		* - `lastUpdatedAt` is re-stamped on recovery and on data change; a healthy poll of unchanged
+		*   data keeps the previous timestamp so React bails out instead of re-rendering the tree.
+		*/
+		function applyPollOutcome(prev, outcome, nowMs) {
+			if (!outcome.ok) return {
+				pollOk: false,
+				lastUpdatedAt: prev.lastUpdatedAt
+			};
+			if (!prev.pollOk || outcome.statusChanged) return {
+				pollOk: true,
+				lastUpdatedAt: nowMs
+			};
+			return {
+				pollOk: true,
+				lastUpdatedAt: prev.lastUpdatedAt
+			};
+		}
+		/**
+		* Seed the config input drafts from the backend status.
+		* - `undefined` means "the user has never touched this field" and gets seeded from status.
+		* - Any string (including one the user cleared to '') is a user edit and is preserved.
+		* - A null status (not loaded yet) must not freeze the drafts to '' — that is exactly what
+		*   used to make the fields never backfill, because '' is not "unedited".
+		*/
+		function seedConfigDrafts(prev, status) {
+			if (!status) return prev;
+			const next = { ...prev };
+			if (next.defaultModel === void 0 && typeof status.defaultModel === "string") next.defaultModel = status.defaultModel;
+			if (next.defaultEffort === void 0 && typeof status.defaultEffort === "string") next.defaultEffort = status.defaultEffort;
+			return next;
+		}
+		function accountAddFlowView(addingAccount, poolAuthPhase) {
+			const flowActive = addingAccount && (poolAuthPhase === "waiting" || poolAuthPhase === "exchanging");
+			return {
+				flowActive,
+				showBrowserStart: !flowActive
+			};
+		}
 		//#endregion
 		//#region src/client/index.ts
 		const { createElement: h, useState, useEffect, useRef } = require("react");
@@ -46,23 +1194,32 @@ window.__ModuleLoader__.load({
 		const base = win.location?.origin ?? "";
 		const API_PREFIX = "/plugins/cloudcode-link";
 		const LEGACY_API_PREFIX = "/plugins/agy-link";
+		/**
+		* Primary prefix, then a 404-only fallback to the legacy prefix (older host builds).
+		* Failure is visible: null means "no usable response" and every caller surfaces it in the UI.
+		*/
 		async function fetchWithFallback(urlPath, options) {
-			const norm = urlPath.startsWith("/") ? urlPath : `/${urlPath}`;
-			const primaryUrl = `${base}${norm}`;
+			if (!win.fetch) return null;
+			const fullUrl = `${base}${urlPath}`;
 			try {
-				const res = await win.fetch?.(primaryUrl, options);
-				if (res && res.status !== 404) return res;
-				if (norm.startsWith(API_PREFIX)) {
-					const legacyPath = norm.replace(API_PREFIX, LEGACY_API_PREFIX);
-					const legacyRes = await win.fetch?.(`${base}${legacyPath}`, options);
-					if (legacyRes) return legacyRes;
+				const res = await win.fetch(fullUrl, options);
+				if (res && res.status === 404 && urlPath.startsWith(API_PREFIX)) {
+					const legacy = `${base}${LEGACY_API_PREFIX}${urlPath.slice(23)}`;
+					const res2 = await win.fetch(legacy, options);
+					if (res2) return {
+						ok: res2.ok,
+						status: res2.status,
+						json: () => res2.json()
+					};
+					return null;
 				}
-				return res ?? null;
+				if (res) return {
+					ok: res.ok,
+					status: res.status,
+					json: () => res.json()
+				};
+				return null;
 			} catch {
-				if (norm.startsWith(API_PREFIX)) try {
-					const legacyPath = norm.replace(API_PREFIX, LEGACY_API_PREFIX);
-					return await win.fetch?.(`${base}${legacyPath}`, options) ?? null;
-				} catch {}
 				return null;
 			}
 		}
@@ -95,43 +1252,6 @@ window.__ModuleLoader__.load({
 				return null;
 			}
 		}
-		/** Global modal state for opening Antigravity console dialog from footer shortcut or header status */
-		const agyModalStore = {
-			open: false,
-			listeners: /* @__PURE__ */ new Set(),
-			setOpen(v) {
-				agyModalStore.open = v;
-				agyModalStore.listeners.forEach((fn) => fn());
-			},
-			subscribe(fn) {
-				agyModalStore.listeners.add(fn);
-				return () => {
-					agyModalStore.listeners.delete(fn);
-				};
-			}
-		};
-		/**
-		* Format reset timestamp into readable date/time + relative countdown.
-		*/
-		function formatQuotaWindow(resetTimeStr) {
-			if (!resetTimeStr) return { resetText: "" };
-			try {
-				const d = new Date(resetTimeStr);
-				const diffMs = d.getTime() - Date.now();
-				if (diffMs <= 0) return { resetText: "" };
-				const totalMins = Math.ceil(diffMs / 6e4);
-				const days = Math.floor(totalMins / 1440);
-				const hours = Math.floor(totalMins % 1440 / 60);
-				const mins = totalMins % 60;
-				const isWeekly = days >= 1;
-				const countdown = days > 0 ? `${days}d${hours}h` : hours > 0 ? `${hours}h${mins}m` : `${mins}m`;
-				const hh = d.getHours().toString().padStart(2, "0");
-				const mm = d.getMinutes().toString().padStart(2, "0");
-				return { resetText: isWeekly ? `${d.getMonth() + 1}/${d.getDate()} ${hh}:${mm} (${countdown})` : `${hh}:${mm} (${countdown})` };
-			} catch {
-				return { resetText: "" };
-			}
-		}
 		/**
 		* Mask email address for privacy display (e.g. user123@gmail.com -> us***@gmail.com).
 		*/
@@ -152,6 +1272,14 @@ window.__ModuleLoader__.load({
 			if (n >= 1e6) return (n / 1e6).toFixed(1) + "M";
 			if (n >= 1e3) return (n / 1e3).toFixed(1) + "K";
 			return String(n);
+		}
+		function formatClock(ms) {
+			if (!ms) return "—";
+			try {
+				return new Date(ms).toLocaleTimeString("zh-CN", { hour12: false });
+			} catch {
+				return new Date(ms).toISOString().slice(11, 19);
+			}
 		}
 		/** Inline brand logo (Gemini / Claude / OpenAI) as a crisp SVG mark. */
 		function brandIcon(key, size = 13) {
@@ -198,10 +1326,20 @@ window.__ModuleLoader__.load({
 			anthropic: "claude",
 			openai: "openai"
 		};
-		let agyIconSeq = 0;
+		const FAMILY_LABEL = {
+			google: "Gemini",
+			anthropic: "Claude",
+			openai: "GPT-OSS",
+			unknown: "其他"
+		};
+		const agyIconGradientIds = /* @__PURE__ */ new Map();
 		/** Antigravity mark: gradient orb with an orbit ring (product has no public simple-icon). */
 		function agyIcon(size = 14) {
-			const gid = `agy-g${++agyIconSeq}`;
+			let gid = agyIconGradientIds.get(size);
+			if (!gid) {
+				gid = `agy-g-${size}`;
+				agyIconGradientIds.set(size, gid);
+			}
 			return h("svg", {
 				viewBox: "0 0 24 24",
 				width: size,
@@ -220,10 +1358,10 @@ window.__ModuleLoader__.load({
 				y2: "1"
 			}, h("stop", {
 				offset: "0",
-				"stop-color": "#4C8DFF"
+				"stop-color": "var(--agy-brand-a)"
 			}), h("stop", {
 				offset: "1",
-				"stop-color": "#A96BFF"
+				"stop-color": "var(--agy-brand-b)"
 			}))), h("circle", {
 				cx: 12,
 				cy: 12,
@@ -240,589 +1378,30 @@ window.__ModuleLoader__.load({
 				transform: "rotate(-18 12 12)"
 			}));
 		}
-		const GLOBAL_CSS = `
-@keyframes agy-spin {
-	0% { transform: rotate(0deg); }
-	100% { transform: rotate(360deg); }
-}
-
-:root, body {
-	--agy-font-family: var(--dsw-font-family, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", "Microsoft YaHei", sans-serif);
-	--agy-bg-panel: var(--dsw-alias-bg-layer-2, #ffffff);
-	--agy-bg-card: var(--dsw-alias-bg-layer-2, #ffffff);
-	--agy-bg-card-primary: #f0f7ff;
-	--agy-bg-header: var(--dsw-alias-bg-layer-1, #f8fafc);
-	--agy-bg-box: var(--dsw-alias-bg-layer-1, #f8fafc);
-	--agy-bg-subbox: var(--dsw-alias-bg-layer-3, #f1f5f9);
-	--agy-bg-input: var(--dsw-alias-bg-layer-1, #ffffff);
-	--agy-bg-btn: var(--dsw-alias-bg-layer-3, #f1f5f9);
-	--agy-bg-btn-hover: var(--dsw-alias-interactive-bg-hover, #e2e8f0);
-	--agy-bg-btn-primary: var(--dsw-alias-state-business-primary, #2563eb);
-	--agy-bg-progress-track: #e2e8f0;
-
-	--agy-border-card: var(--dsw-alias-border-l2, #e2e8f0);
-	--agy-border-card-primary: #3b82f6;
-	--agy-border-box: var(--dsw-alias-border-l1, #e2e8f0);
-	--agy-border-subbox: var(--dsw-alias-border-l2, #cbd5e1);
-	--agy-border-input: var(--dsw-alias-border-l2, #cbd5e1);
-	--agy-border-input-focus: var(--dsw-alias-state-business-primary, #2563eb);
-	--agy-border-btn: var(--dsw-alias-border-l2, #cbd5e1);
-	--agy-border-btn-primary: #2563eb;
-	--agy-border-divider: var(--dsw-alias-border-l2, #e2e8f0);
-
-	--agy-text-primary: var(--dsw-alias-label-primary, #0f172a);
-	--agy-text-secondary: var(--dsw-alias-label-secondary, #334155);
-	--agy-text-tertiary: var(--dsw-alias-label-tertiary, #64748b);
-	--agy-text-muted: var(--dsw-alias-label-caption, #94a3b8);
-	--agy-text-btn: var(--dsw-alias-label-primary, #0f172a);
-	--agy-text-btn-primary: #ffffff;
-	--agy-text-window-label: #2563eb;
-
-	--agy-shadow-card: 0 1px 3px rgba(0, 0, 0, 0.05);
-	--agy-shadow-card-hover: 0 4px 12px rgba(0, 0, 0, 0.08);
-	--agy-shadow-card-primary: 0 0 0 1px #3b82f6, 0 4px 14px rgba(37, 99, 235, 0.12);
-	--agy-shadow-modal: 0 20px 50px rgba(0, 0, 0, 0.18);
-	--agy-modal-backdrop: rgba(15, 23, 42, 0.5);
-
-	/* Badges */
-	--agy-badge-primary-bg: #dbeafe;
-	--agy-badge-primary-text: #1e40af;
-	--agy-badge-primary-border: #60a5fa;
-
-	--agy-badge-tag-bg: #f1f5f9;
-	--agy-badge-tag-text: #334155;
-	--agy-badge-tag-border: #cbd5e1;
-
-	--agy-badge-email-bg: #eff6ff;
-	--agy-badge-email-text: #1d4ed8;
-	--agy-badge-email-border: #bfdbfe;
-
-	--agy-badge-proxy-bg: #ecfdf5;
-	--agy-badge-proxy-text: #047857;
-	--agy-badge-proxy-border: #a7f3d0;
-
-	--agy-badge-ready-bg: #ecfdf5;
-	--agy-badge-ready-text: #047857;
-	--agy-badge-ready-border: #a7f3d0;
-
-	--agy-badge-unready-bg: #eff6ff;
-	--agy-badge-unready-text: #1d4ed8;
-	--agy-badge-unready-border: #bfdbfe;
-
-	/* Quota status pills */
-	--agy-quota-high-bg: #ecfdf5;
-	--agy-quota-high-text: #047857;
-	--agy-quota-high-border: #a7f3d0;
-	--agy-quota-med-bg: #fffbeb;
-	--agy-quota-med-text: #b45309;
-	--agy-quota-med-border: #fde68a;
-	--agy-quota-low-bg: #fef2f2;
-	--agy-quota-low-text: #b91c1c;
-	--agy-quota-low-border: #fecaca;
-	--agy-quota-none-bg: #f1f5f9;
-	--agy-quota-none-text: #64748b;
-	--agy-quota-none-border: #cbd5e1;
-
-	/* Danger button */
-	--agy-danger-bg: #fef2f2;
-	--agy-danger-text: #b91c1c;
-	--agy-danger-border: #fecaca;
-	--agy-danger-hover-bg: #fee2e2;
-
-	/* Warning banner */
-	--agy-warn-bg: #fffbeb;
-	--agy-warn-text: #92400e;
-	--agy-warn-border: #fcd34d;
-	--agy-warn-btn-bg: #fef3c7;
-	--agy-warn-btn-text: #92400e;
-	--agy-warn-btn-border: #f59e0b;
-
-	/* Toast notices */
-	--agy-toast-success-bg: #ecfdf5;
-	--agy-toast-success-text: #065f46;
-	--agy-toast-success-border: #6ee7b7;
-	--agy-toast-info-bg: #eff6ff;
-	--agy-toast-info-text: #1e40af;
-	--agy-toast-info-border: #93c5fd;
-	--agy-toast-warn-bg: #fffbeb;
-	--agy-toast-warn-text: #92400e;
-	--agy-toast-warn-border: #fcd34d;
-	--agy-toast-error-bg: #fef2f2;
-	--agy-toast-error-text: #991b1b;
-	--agy-toast-error-border: #fca5a5;
-
-	/* Auth Modal / Box */
-	--agy-auth-box-bg: #f0f7ff;
-	--agy-auth-box-border: #3b82f6;
-
-	/* Segment control */
-	--agy-seg-group-bg: #e2e8f0;
-	--agy-seg-group-border: #cbd5e1;
-	--agy-seg-btn-text: #475569;
-	--agy-seg-btn-active-bg: var(--dsw-alias-state-business-primary, #2563eb);
-	--agy-seg-btn-active-text: #ffffff;
-	--agy-seg-danger-bg: #dc2626;
-	--agy-seg-danger-text: #ffffff;
-	--agy-seg-danger-border: #b91c1c;
-}
-
-body[data-ds-dark-theme],
-body.dark,
-[data-theme="dark"] {
-	--agy-bg-panel: #0d0e12;
-	--agy-bg-card: #161922;
-	--agy-bg-card-primary: #171f30;
-	--agy-bg-header: #181b22;
-	--agy-bg-box: #12141a;
-	--agy-bg-subbox: #0c0e12;
-	--agy-bg-input: #12141a;
-	--agy-bg-btn: #27272a;
-	--agy-bg-btn-hover: #3f3f46;
-	--agy-bg-btn-primary: #2563eb;
-	--agy-bg-progress-track: #27272a;
-
-	--agy-border-card: #27272a;
-	--agy-border-card-primary: #3b82f6;
-	--agy-border-box: #27272a;
-	--agy-border-subbox: #27272a;
-	--agy-border-input: #27272a;
-	--agy-border-input-focus: #3b82f6;
-	--agy-border-btn: #3f3f46;
-	--agy-border-btn-primary: #3b82f6;
-	--agy-border-divider: #27272a;
-
-	--agy-text-primary: var(--dsw-alias-label-primary, #f8fafc);
-	--agy-text-secondary: var(--dsw-alias-label-secondary, #cbd5e1);
-	--agy-text-tertiary: var(--dsw-alias-label-tertiary, #94a3b8);
-	--agy-text-muted: var(--dsw-alias-label-caption, #64748b);
-	--agy-text-btn: var(--dsw-alias-label-primary, #ffffff);
-	--agy-text-btn-primary: #ffffff;
-	--agy-text-window-label: #93c5fd;
-
-	--agy-shadow-card: 0 2px 8px rgba(0, 0, 0, 0.3);
-	--agy-shadow-card-hover: 0 6px 16px rgba(0, 0, 0, 0.4);
-	--agy-shadow-card-primary: 0 0 16px rgba(59, 130, 246, 0.25);
-	--agy-shadow-modal: 0 25px 60px rgba(0, 0, 0, 0.8);
-	--agy-modal-backdrop: rgba(0, 0, 0, 0.75);
-
-	/* Badges */
-	--agy-badge-primary-bg: #1e3a8a;
-	--agy-badge-primary-text: #93c5fd;
-	--agy-badge-primary-border: #3b82f6;
-
-	--agy-badge-tag-bg: #0f172a;
-	--agy-badge-tag-text: #cbd5e1;
-	--agy-badge-tag-border: #334155;
-
-	--agy-badge-email-bg: #1e293b;
-	--agy-badge-email-text: #93c5fd;
-	--agy-badge-email-border: #3b82f6;
-
-	--agy-badge-proxy-bg: #064e3b;
-	--agy-badge-proxy-text: #6ee7b7;
-	--agy-badge-proxy-border: #059669;
-
-	--agy-badge-ready-bg: rgba(16, 185, 129, 0.15);
-	--agy-badge-ready-text: #34d399;
-	--agy-badge-ready-border: rgba(16, 185, 129, 0.35);
-
-	--agy-badge-unready-bg: rgba(59, 130, 246, 0.15);
-	--agy-badge-unready-text: #93c5fd;
-	--agy-badge-unready-border: rgba(59, 130, 246, 0.35);
-
-	/* Quota status pills */
-	--agy-quota-high-bg: #064e3b;
-	--agy-quota-high-text: #6ee7b7;
-	--agy-quota-high-border: #059669;
-	--agy-quota-med-bg: #451a03;
-	--agy-quota-med-text: #fde68a;
-	--agy-quota-med-border: #d97706;
-	--agy-quota-low-bg: #450a0a;
-	--agy-quota-low-text: #fca5a5;
-	--agy-quota-low-border: #dc2626;
-	--agy-quota-none-bg: #1e293b;
-	--agy-quota-none-text: #94a3b8;
-	--agy-quota-none-border: #475569;
-
-	/* Danger button */
-	--agy-danger-bg: #450a0a;
-	--agy-danger-text: #fca5a5;
-	--agy-danger-border: #ef4444;
-	--agy-danger-hover-bg: #5f1313;
-
-	/* Warning banner */
-	--agy-warn-bg: #451a03;
-	--agy-warn-text: #fde68a;
-	--agy-warn-border: #d97706;
-	--agy-warn-btn-bg: #78350f;
-	--agy-warn-btn-text: #fde68a;
-	--agy-warn-btn-border: #d97706;
-
-	/* Toast notices */
-	--agy-toast-success-bg: #064e3b;
-	--agy-toast-success-text: #6ee7b7;
-	--agy-toast-success-border: #059669;
-	--agy-toast-info-bg: #1e3a8a;
-	--agy-toast-info-text: #93c5fd;
-	--agy-toast-info-border: #3b82f6;
-	--agy-toast-warn-bg: #451a03;
-	--agy-toast-warn-text: #fde68a;
-	--agy-toast-warn-border: #d97706;
-	--agy-toast-error-bg: #450a0a;
-	--agy-toast-error-text: #fca5a5;
-	--agy-toast-error-border: #dc2626;
-
-	/* Auth Modal / Box */
-	--agy-auth-box-bg: #0f223a;
-	--agy-auth-box-border: #3b82f6;
-
-	/* Segment control */
-	--agy-seg-group-bg: #090d16;
-	--agy-seg-group-border: #334155;
-	--agy-seg-btn-text: #94a3b8;
-	--agy-seg-btn-active-bg: var(--dsw-alias-state-business-primary, #2563eb);
-	--agy-seg-btn-active-text: #ffffff;
-	--agy-seg-danger-bg: #7f1d1d;
-	--agy-seg-danger-text: #fca5a5;
-	--agy-seg-danger-border: #ef4444;
-}
-
-.agy-spinner {
-	display: inline-block;
-	width: 12px;
-	height: 12px;
-	border: 2px solid currentColor;
-	border-top-color: transparent;
-	border-radius: 50%;
-	animation: agy-spin 0.75s linear infinite;
-	vertical-align: -2px;
-	margin-right: 5px;
-}
-.agy-pulse-dot {
-	display: inline-block;
-	width: 8px;
-	height: 8px;
-	border-radius: 50%;
-}
-.agy-card-hover {
-	transition: border-color 0.2s ease, box-shadow 0.2s ease, transform 0.15s ease;
-}
-.agy-card-hover:hover {
-	border-color: var(--agy-border-card-primary, #3b82f6) !important;
-	box-shadow: var(--agy-shadow-card-hover) !important;
-}
-.agy-btn {
-	transition: all 0.15s ease;
-	user-select: none;
-}
-.agy-btn:hover:not(:disabled) {
-	filter: brightness(1.08);
-	transform: translateY(-0.5px);
-}
-.agy-btn:active:not(:disabled) {
-	transform: translateY(0.5px);
-}
-.agy-progress-fill {
-	transition: width 0.4s cubic-bezier(0.16, 1, 0.3, 1);
-}
-.agy-modal-backdrop {
-	position: fixed;
-	inset: 0;
-	z-index: 9999;
-	background: var(--agy-modal-backdrop);
-	backdrop-filter: blur(6px);
-	display: flex;
-	align-items: center;
-	justify-content: center;
-	padding: 16px;
-	box-sizing: border-box;
-}
-.agy-modal-panel {
-	position: relative;
-	width: 100%;
-	max-width: 640px;
-	max-height: min(820px, calc(100vh - 48px));
-	background: var(--agy-bg-panel);
-	border: 1px solid var(--agy-border-card);
-	border-radius: 14px;
-	box-shadow: var(--agy-shadow-modal);
-	display: flex;
-	flex-direction: column;
-	overflow: hidden;
-	color: var(--agy-text-primary);
-	font-family: var(--agy-font-family);
-}
-.agy-submodel-row {
-	display: flex;
-	align-items: center;
-	justify-content: space-between;
-	padding: 7px 10px;
-	font-size: 11.5px;
-	border-radius: 6px;
-	background: var(--agy-bg-subbox);
-	border: 1px solid var(--agy-border-box);
-	margin: 4px 0;
-	color: var(--agy-text-primary);
-}
-`;
-		const S = {
-			container: {
-				lineHeight: 1.5,
-				fontSize: "13px",
-				fontFamily: "var(--agy-font-family)",
-				color: "var(--agy-text-primary)"
-			},
-			headerCard: {
-				display: "flex",
-				alignItems: "center",
-				justifyContent: "space-between",
-				padding: "12px 16px",
-				background: "var(--agy-bg-header)",
-				border: "1px solid var(--agy-border-card)",
-				borderRadius: "10px",
-				marginBottom: "12px",
-				color: "var(--agy-text-primary)",
-				boxShadow: "var(--agy-shadow-card)"
-			},
-			badgePrimary: {
-				display: "inline-flex",
-				alignItems: "center",
-				gap: "4px",
-				background: "var(--agy-badge-primary-bg)",
-				color: "var(--agy-badge-primary-text)",
-				border: "1px solid var(--agy-badge-primary-border)",
-				padding: "2px 8px",
-				borderRadius: "5px",
-				fontSize: "11px",
-				fontWeight: 700
-			},
-			badgeTag: {
-				display: "inline-flex",
-				alignItems: "center",
-				gap: "4px",
-				background: "var(--agy-badge-tag-bg)",
-				color: "var(--agy-badge-tag-text)",
-				border: "1px solid var(--agy-badge-tag-border)",
-				padding: "2px 7px",
-				borderRadius: "5px",
-				fontSize: "11px",
-				fontWeight: 600
-			},
-			badgeReady: {
-				display: "inline-flex",
-				alignItems: "center",
-				gap: "4px",
-				background: "var(--agy-badge-ready-bg)",
-				color: "var(--agy-badge-ready-text)",
-				border: "1px solid var(--agy-badge-ready-border)",
-				padding: "2px 8px",
-				borderRadius: "5px",
-				fontSize: "11px",
-				fontWeight: 700
-			},
-			badgeUnready: {
-				display: "inline-flex",
-				alignItems: "center",
-				gap: "4px",
-				background: "var(--agy-badge-unready-bg)",
-				color: "var(--agy-badge-unready-text)",
-				border: "1px solid var(--agy-badge-unready-border)",
-				padding: "2px 8px",
-				borderRadius: "5px",
-				fontSize: "11px",
-				fontWeight: 700
-			},
-			statBox: {
-				background: "var(--agy-bg-box)",
-				border: "1px solid var(--agy-border-card)",
-				borderRadius: "8px",
-				padding: "12px 14px",
-				display: "flex",
-				flexDirection: "column",
-				gap: "4px"
-			},
-			statLabel: {
-				fontSize: "11px",
-				color: "var(--agy-text-tertiary)",
-				fontWeight: 600,
-				textTransform: "uppercase",
-				letterSpacing: "0.4px"
-			},
-			statValue: {
-				fontSize: "20px",
-				fontWeight: 800,
-				color: "var(--agy-text-primary)",
-				fontFamily: "monospace"
-			},
-			statSub: {
-				fontSize: "11px",
-				color: "var(--agy-text-muted)",
-				marginTop: "2px"
-			},
-			card: {
-				background: "var(--agy-bg-card)",
-				border: "1px solid var(--agy-border-card)",
-				borderRadius: "10px",
-				padding: "14px 16px",
-				marginBottom: "12px",
-				color: "var(--agy-text-primary)",
-				boxShadow: "var(--agy-shadow-card)"
-			},
-			cardPrimary: {
-				background: "var(--agy-bg-card-primary)",
-				border: "1.5px solid var(--agy-border-card-primary)",
-				borderRadius: "10px",
-				padding: "14px 16px",
-				marginBottom: "12px",
-				boxShadow: "var(--agy-shadow-card-primary)",
-				color: "var(--agy-text-primary)"
-			},
-			quotaBox: {
-				background: "var(--agy-bg-box)",
-				border: "1px solid var(--agy-border-box)",
-				borderRadius: "8px",
-				padding: "8px 10px",
-				marginTop: "10px"
-			},
-			progressBarBg: {
-				flex: "1",
-				height: "8px",
-				borderRadius: "4px",
-				background: "var(--agy-bg-progress-track)",
-				border: "1px solid var(--agy-border-box)",
-				overflow: "hidden",
-				margin: "0 10px"
-			},
-			btn: {
-				display: "inline-flex",
-				alignItems: "center",
-				justifyContent: "center",
-				padding: "5px 12px",
-				borderRadius: "6px",
-				border: "1px solid var(--agy-border-btn)",
-				background: "var(--agy-bg-btn)",
-				color: "var(--agy-text-btn)",
-				cursor: "pointer",
-				fontSize: "12px",
-				fontWeight: 600
-			},
-			btnPrimary: {
-				display: "inline-flex",
-				alignItems: "center",
-				justifyContent: "center",
-				padding: "5px 13px",
-				borderRadius: "6px",
-				border: "1px solid var(--agy-border-btn-primary)",
-				background: "var(--agy-bg-btn-primary)",
-				color: "var(--agy-text-btn-primary)",
-				cursor: "pointer",
-				fontSize: "12px",
-				fontWeight: 700,
-				boxShadow: "0 2px 6px rgba(37, 99, 235, 0.35)"
-			},
-			btnDanger: {
-				display: "inline-flex",
-				alignItems: "center",
-				justifyContent: "center",
-				padding: "4px 9px",
-				borderRadius: "6px",
-				border: "1px solid var(--agy-danger-border)",
-				background: "var(--agy-danger-bg)",
-				color: "var(--agy-danger-text)",
-				cursor: "pointer",
-				fontSize: "11px",
-				fontWeight: 600
-			},
-			btnSm: {
-				display: "inline-flex",
-				alignItems: "center",
-				justifyContent: "center",
-				padding: "4px 9px",
-				borderRadius: "5px",
-				border: "1px solid var(--agy-border-btn)",
-				background: "var(--agy-bg-btn)",
-				color: "var(--agy-text-btn)",
-				cursor: "pointer",
-				fontSize: "11.5px",
-				fontWeight: 600
-			},
-			btnSmPrimary: {
-				display: "inline-flex",
-				alignItems: "center",
-				justifyContent: "center",
-				padding: "4px 9px",
-				borderRadius: "5px",
-				border: "1px solid var(--agy-border-btn-primary)",
-				background: "var(--agy-bg-btn-primary)",
-				color: "var(--agy-text-btn-primary)",
-				cursor: "pointer",
-				fontSize: "11.5px",
-				fontWeight: 700
-			},
-			segGroup: {
-				display: "inline-flex",
-				background: "var(--agy-seg-group-bg)",
-				borderRadius: "7px",
-				padding: "3px",
-				border: "1px solid var(--agy-seg-group-border)"
-			},
-			segBtn: {
-				padding: "4px 10px",
-				borderRadius: "4px",
-				border: "none",
-				background: "transparent",
-				color: "var(--agy-seg-btn-text)",
-				cursor: "pointer",
-				fontSize: "11.5px",
-				fontWeight: 600
-			},
-			segBtnActive: {
-				padding: "4px 10px",
-				borderRadius: "4px",
-				border: "none",
-				background: "var(--agy-seg-btn-active-bg)",
-				color: "var(--agy-seg-btn-active-text)",
-				cursor: "pointer",
-				fontSize: "11.5px",
-				fontWeight: 700,
-				boxShadow: "0 2px 4px rgba(37, 99, 235, 0.4)"
-			},
-			input: {
-				flex: "1",
-				padding: "7px 12px",
-				borderRadius: "6px",
-				border: "1.5px solid var(--agy-border-input)",
-				background: "var(--agy-bg-input)",
-				color: "var(--agy-text-primary)",
-				fontSize: "12.5px",
-				outline: "none"
-			},
-			muted: {
-				color: "var(--agy-text-tertiary)",
-				fontSize: "11.5px"
-			},
-			noticeBanner: {
-				display: "flex",
-				alignItems: "center",
-				justifyContent: "space-between",
-				padding: "10px 14px",
-				borderRadius: "8px",
-				marginBottom: "12px",
-				fontSize: "12.5px",
-				fontWeight: 500
-			},
-			authModal: {
-				background: "var(--agy-auth-box-bg)",
-				border: "1.5px solid var(--agy-auth-box-border)",
-				borderRadius: "10px",
-				padding: "14px 16px",
-				marginBottom: "14px",
-				color: "var(--agy-text-primary)"
-			}
-		};
+		/**
+		* Self-ticking reset countdown. This leaf is the only node that re-renders once per
+		* second; the page tree around it stays put. Renders `↻ HH:MM (XhYm)` while a reset
+		* window is pending, or the empty marker (default `—`) once it is gone.
+		*/
+		function ResetCountdown(props) {
+			const [tick, setTick] = useState(0);
+			useEffect(() => {
+				const timer = setInterval(() => setTick((n) => n + 1), 1e3);
+				return () => clearInterval(timer);
+			}, []);
+			const { resetText } = formatQuotaWindow(props.resetTime);
+			const body = resetText ? `${props.prefix ?? "↻ "}${resetText}` : `${props.emptyPrefix ?? "—"}${props.emptyText ?? ""}`;
+			return h("span", {
+				className: props.className,
+				style: props.style
+			}, `${body}${props.suffix ?? ""}`);
+		}
 		function apply(ctx) {
 			const AgySettingsSection = (props) => {
 				const [status, setStatus] = useState(statusCache);
+				const [pollOk, setPollOk] = useState(statusCache !== null);
+				const [lastUpdatedAt, setLastUpdatedAt] = useState(statusCache ? Date.now() : null);
+				const [activeSection, setActiveSection] = useState("overview");
 				const [aliasInput, setAliasInput] = useState("");
 				const [proxyInputs, setProxyInputs] = useState({});
 				const [editingProxyId, setEditingProxyId] = useState(null);
@@ -831,8 +1410,11 @@ body.dark,
 				const [loadingAction, setLoadingAction] = useState(null);
 				const [toast, setToast] = useState(null);
 				const [expandedModels, setExpandedModels] = useState({});
+				const [modelPanels, setModelPanels] = useState({});
+				const [modelQueries, setModelQueries] = useState({});
+				const [familyFilters, setFamilyFilters] = useState({});
 				const [statsOverview, setStatsOverview] = useState(null);
-				const [statsLoading, setStatsLoading] = useState(false);
+				const [statsError, setStatsError] = useState(null);
 				const [showAuditDrawer, setShowAuditDrawer] = useState(false);
 				const [auditTab, setAuditTab] = useState("requests");
 				const [auditRequests, setAuditRequests] = useState([]);
@@ -843,71 +1425,111 @@ body.dark,
 				const [auditSessionsTotal, setAuditSessionsTotal] = useState(0);
 				const [auditSessionsPage, setAuditSessionsPage] = useState(0);
 				const [auditSessionsLoading, setAuditSessionsLoading] = useState(false);
+				const [auditError, setAuditError] = useState(null);
+				const [cfgDrafts, setCfgDrafts] = useState({});
+				const flowStartedRef = useRef(false);
+				const pollOkRef = useRef(statusCache !== null);
+				const lastUpdatedRef = useRef(statusCache ? Date.now() : null);
+				const toastTimerRef = useRef(null);
+				const tabRefs = useRef({});
+				const showToast = (text, type) => {
+					setToast({
+						text,
+						type
+					});
+					if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+					toastTimerRef.current = setTimeout(() => setToast(null), 6e3);
+				};
 				const fetchStatsOverview = async () => {
 					try {
-						setStatsLoading(true);
 						const res = await fetchWithFallback(`${API_PREFIX}/stats/overview`);
-						if (res && res.ok) {
-							const data = await res.json();
-							if (data && data.ok && data.overview) setStatsOverview(data.overview);
+						if (!res || !res.ok) {
+							setStatsError("用量统计加载失败（后端未返回可用数据）");
+							return;
 						}
-					} catch {} finally {
-						setStatsLoading(false);
+						const data = await res.json();
+						if (!data.overview) {
+							setStatsError("用量统计加载失败（响应缺少 overview 字段）");
+							return;
+						}
+						setStatsOverview(data.overview);
+						setStatsError(null);
+					} catch {
+						setStatsError("用量统计加载失败（网络异常）");
 					}
 				};
-				const fetchAuditRequests = async (page = 0) => {
+				const fetchAuditRequests = async (limit, offset) => {
+					setAuditLoading(true);
 					try {
-						setAuditLoading(true);
-						const limit = 20;
-						const offset = page * limit;
 						const res = await fetchWithFallback(`${API_PREFIX}/stats/requests?limit=${limit}&offset=${offset}`);
-						if (res && res.ok) {
-							const data = await res.json();
-							if (data && data.ok) {
-								setAuditRequests(data.requests || []);
-								setAuditTotal(data.total || 0);
-								setAuditPage(page);
-							}
+						if (!res || !res.ok) {
+							setAuditError("请求明细加载失败（后端未返回可用数据）");
+							return;
 						}
-					} catch {} finally {
+						const data = await res.json();
+						setAuditRequests(data.requests ?? []);
+						setAuditTotal(typeof data.total === "number" ? data.total : data.requests?.length ?? 0);
+						setAuditError(null);
+					} catch {
+						setAuditError("请求明细加载失败（网络异常）");
+					} finally {
 						setAuditLoading(false);
 					}
 				};
-				const fetchAuditSessions = async (page = 0) => {
+				const fetchAuditSessions = async (limit, offset) => {
+					setAuditSessionsLoading(true);
 					try {
-						setAuditSessionsLoading(true);
-						const limit = 20;
-						const offset = page * limit;
 						const res = await fetchWithFallback(`${API_PREFIX}/stats/sessions?limit=${limit}&offset=${offset}`);
-						if (res && res.ok) {
-							const data = await res.json();
-							if (data && data.ok) {
-								setAuditSessions(data.sessions || []);
-								setAuditSessionsTotal(data.total || 0);
-								setAuditSessionsPage(page);
-							}
+						if (!res || !res.ok) {
+							setAuditError("会话统计加载失败（后端未返回可用数据）");
+							return;
 						}
-					} catch {} finally {
+						const data = await res.json();
+						setAuditSessions(data.sessions ?? []);
+						setAuditSessionsTotal(typeof data.total === "number" ? data.total : data.sessions?.length ?? 0);
+						setAuditError(null);
+					} catch {
+						setAuditError("会话统计加载失败（网络异常）");
+					} finally {
 						setAuditSessionsLoading(false);
 					}
 				};
 				useEffect(() => {
 					let alive = true;
-					let lastJson = "";
+					let lastJson = status ? JSON.stringify(status) : "";
 					const tick = async () => {
 						const st = await getStatus();
-						if (!alive || !st) return;
+						if (!alive) return;
+						if (!st) {
+							pollOkRef.current = false;
+							setPollOk(false);
+							return;
+						}
 						const json = JSON.stringify(st);
-						if (json !== lastJson) {
+						const changed = json !== lastJson;
+						if (changed) {
 							lastJson = json;
 							setStatus(st);
 						}
+						const next = applyPollOutcome({
+							pollOk: pollOkRef.current,
+							lastUpdatedAt: lastUpdatedRef.current
+						}, {
+							ok: true,
+							statusChanged: changed
+						}, Date.now());
+						pollOkRef.current = next.pollOk;
+						lastUpdatedRef.current = next.lastUpdatedAt;
+						setPollOk(next.pollOk);
+						setLastUpdatedAt(next.lastUpdatedAt);
 					};
 					tick();
+					const timer = setInterval(() => {
+						tick();
+					}, 3e3);
 					fetchStatsOverview();
-					const timer = setInterval(tick, 3e3);
 					const statsTimer = setInterval(() => {
-						if (alive) fetchStatsOverview();
+						fetchStatsOverview();
 					}, 1e4);
 					return () => {
 						alive = false;
@@ -915,1122 +1537,1487 @@ body.dark,
 						clearInterval(statsTimer);
 					};
 				}, []);
-				const flowStartedRef = useRef(false);
+				useEffect(() => () => {
+					if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+				}, []);
 				useEffect(() => {
-					if (!addingAccount || !flowStartedRef.current) return;
-					const pa = status?.poolAuth;
-					if (!pa) return;
-					if (pa.phase === "done") {
+					if (!showAuditDrawer) return;
+					const onKey = (ev) => {
+						if (ev.key === "Escape") setShowAuditDrawer(false);
+					};
+					win.addEventListener?.("keydown", onKey, true);
+					return () => {
+						win.removeEventListener?.("keydown", onKey, true);
+					};
+				}, [showAuditDrawer]);
+				useEffect(() => {
+					if (!showAuditDrawer) return;
+					fetchAuditRequests(20, auditPage * 20);
+				}, [showAuditDrawer, auditPage]);
+				useEffect(() => {
+					if (!showAuditDrawer || auditTab !== "sessions") return;
+					fetchAuditSessions(20, auditSessionsPage * 20);
+				}, [
+					showAuditDrawer,
+					auditTab,
+					auditSessionsPage
+				]);
+				useEffect(() => {
+					const phase = status?.poolAuth?.phase;
+					if (phase === "waiting" || phase === "exchanging") flowStartedRef.current = true;
+					if (phase === "done" && flowStartedRef.current) {
 						flowStartedRef.current = false;
 						setAddingAccount(false);
 						setAuthCodeInput("");
-						setAliasInput("");
-						showToast(pa.message || "账号已激活入池", "success");
-					} else if (pa.phase === "failed") {
+						showToast("账号已激活入池", "success");
+					} else if (phase === "failed" && flowStartedRef.current) {
 						flowStartedRef.current = false;
-						showToast(pa.message || "授权失败", "error");
+						showToast(status?.poolAuth?.message || "账号激活失败，请重试或手动粘贴授权码", "error");
 					}
-				}, [
-					addingAccount,
-					status?.poolAuth?.phase,
-					status?.poolAuth?.message
-				]);
-				const showToast = (text, type = "info") => {
-					setToast({
-						text,
-						type,
-						id: Date.now()
-					});
-					setTimeout(() => {
-						setToast((prev) => prev?.text === text ? null : prev);
-					}, 6e3);
+				}, [status?.poolAuth?.phase]);
+				useEffect(() => {
+					if (!status) return;
+					setCfgDrafts((prev) => seedConfigDrafts(prev, status));
+				}, [status?.defaultModel, status?.defaultEffort]);
+				const accounts = status?.pool?.accounts ?? [];
+				const isAuthed = status?.auth?.phase === "ok" || accounts.length > 0;
+				const isBusy = typeof loadingAction === "string";
+				const modelUnionTotal = computeModelUnion(modelPanels, accounts);
+				const accountModelIdsOf = (acc) => accountModelIds(acc, modelPanels[acc.id]);
+				const loadModelsPanel = async (accId) => {
+					setModelPanels((prev) => ({
+						...prev,
+						[accId]: {
+							...prev[accId] ?? EMPTY_PANEL,
+							status: "loading"
+						}
+					}));
+					const result = await fetchAccountModels(fetchWithFallback, API_PREFIX, accId);
+					const payload = result.payload;
+					if (payload && payload.ok !== false) {
+						setModelPanels((prev) => ({
+							...prev,
+							[accId]: markPanelSuccess(prev[accId] ?? EMPTY_PANEL, payload, payload.refreshError ?? null, Date.now())
+						}));
+						return;
+					}
+					setModelPanels((prev) => ({
+						...prev,
+						[accId]: markPanelLoadFailure(prev[accId] ?? EMPTY_PANEL, result.error ?? "models_endpoint_failed", Date.now())
+					}));
 				};
+				const refreshModelsPanel = async (acc) => {
+					setModelPanels((prev) => ({
+						...prev,
+						[acc.id]: {
+							...prev[acc.id] ?? EMPTY_PANEL,
+							status: "loading"
+						}
+					}));
+					const result = await postAccountModelsRefresh(fetchWithFallback, API_PREFIX, acc.id);
+					const payload = result.payload;
+					if (payload && payload.ok !== false) {
+						setModelPanels((prev) => ({
+							...prev,
+							[acc.id]: markPanelSuccess(prev[acc.id] ?? EMPTY_PANEL, payload, payload.refreshError ?? null, Date.now())
+						}));
+						if (payload.refreshError) showToast(`刷新未完成：${payload.refreshError}（旧清单已保留）`, "warn");
+						else showToast("模型清单已刷新", "success");
+						return;
+					}
+					setModelPanels((prev) => ({
+						...prev,
+						[acc.id]: markPanelRefreshFailure(prev[acc.id] ?? EMPTY_PANEL, result.error ?? "models_refresh_failed", Date.now())
+					}));
+					showToast("模型刷新失败，已保留上一次发现的模型数据", "error");
+				};
+				const ensureModelsLoaded = (accId) => {
+					const panel = modelPanels[accId];
+					if (!panel || panel.status === "idle") loadModelsPanel(accId);
+				};
+				const accountIdsFingerprint = accounts.map((acc) => acc.id).join("|");
+				useEffect(() => {
+					if (activeSection !== "models") return;
+					const stale = collectStalePanelAccounts(modelPanels, accounts, Date.now());
+					if (stale.length === 0) return;
+					(async () => {
+						for (const acc of stale) await loadModelsPanel(acc.id);
+					})();
+				}, [activeSection, accountIdsFingerprint]);
 				const refresh = async () => {
-					setStatus(await getStatus());
+					setLoadingAction("status");
+					try {
+						const st = await getStatus();
+						if (!st) {
+							pollOkRef.current = false;
+							setPollOk(false);
+							showToast("状态刷新失败：暂时联系不上后端，页面保留的是上次成功拉取的数据", "error");
+							return;
+						}
+						pollOkRef.current = true;
+						lastUpdatedRef.current = Date.now();
+						setPollOk(true);
+						setLastUpdatedAt(lastUpdatedRef.current);
+						setStatus(st);
+						showToast("状态已刷新", "success");
+					} finally {
+						setLoadingAction(null);
+					}
+				};
+				const runPoolAction = async (label, path, payload, okText) => {
+					setLoadingAction(label);
+					try {
+						const res = await postJson(`${API_PREFIX}${path}`, payload);
+						if (!res || res.ok === false) {
+							const reason = res && typeof res.error === "string" ? res.error : "后端未响应";
+							showToast(`${okText}失败：${reason}`, "error");
+							return null;
+						}
+						showToast(okText, "success");
+						return res;
+					} finally {
+						setLoadingAction(null);
+					}
 				};
 				const handleBeginAddAccount = async () => {
-					setLoadingAction("pool:beginAdd");
-					const alias = aliasInput.trim() || void 0;
-					const res = await postJson(`${API_PREFIX}/pool/begin-add`, { ...alias ? { alias } : {} });
-					setLoadingAction(null);
-					if (res && res.ok) {
-						flowStartedRef.current = true;
-						await refresh();
-						if (res.browserOpened) showToast("浏览器已打开 Google 授权页，完成授权后将自动同步", "info");
-						else showToast("无法自动打开浏览器，请点击下方链接手动完成授权", "warn");
-					} else showToast(`启动 Google 授权失败: ${res?.message || "请检查网络或代理配置"}`, "error");
+					setLoadingAction("begin-add");
+					try {
+						const trimmed = aliasInput.trim();
+						const res = await postJson(`${API_PREFIX}/pool/begin-add`, trimmed ? { alias: trimmed } : {});
+						if (!res) {
+							showToast("无法联系后端，添加流程未启动", "error");
+							return;
+						}
+						if (res.ok === false) {
+							showToast(`添加流程启动失败：${typeof res.error === "string" ? res.error : "未知原因"}`, "error");
+							return;
+						}
+						setAddingAccount(true);
+						if (res.browserOpened === false) showToast("未自动打开浏览器，请在添加面板中使用手动授权链接", "warn");
+						else showToast("已发起浏览器授权，请在打开的 Google 登录页完成授权", "info");
+					} finally {
+						setLoadingAction(null);
+					}
 				};
 				const handleCompleteAddAccount = async () => {
-					if (!authCodeInput.trim()) return;
-					setLoadingAction("pool:completeAdd");
-					const res = await postJson(`${API_PREFIX}/pool/complete-add`, { code: authCodeInput.trim() });
-					setLoadingAction(null);
-					if (res && res.ok) {
-						flowStartedRef.current = false;
-						setAuthCodeInput("");
-						setAliasInput("");
-						setAddingAccount(false);
-						await refresh();
-						showToast(res.message || "成功添加并激活 Google 账号", "success");
-					} else showToast(res?.message || res?.error || "授权码验证失败", "error");
+					const code = authCodeInput.trim();
+					if (!code) {
+						showToast("请先粘贴授权码或回调链接", "warn");
+						return;
+					}
+					if (await runPoolAction("complete-add", "/pool/complete-add", { code }, "手动激活请求已提交")) setAuthCodeInput("");
 				};
 				const handleCancelAddAccount = async () => {
 					flowStartedRef.current = false;
-					await postJson(`${API_PREFIX}/pool/cancel-add`, {});
-					setAuthCodeInput("");
-					setAliasInput("");
 					setAddingAccount(false);
-					await refresh();
+					setAuthCodeInput("");
+					await runPoolAction("cancel-add", "/pool/cancel-add", {}, "添加流程已取消");
+				};
+				const setCfg = async (key, value) => {
+					if (await runPoolAction(`config:${key}`, "/config", {
+						key,
+						value
+					}, `${key} 已保存`)) setStatus((prev) => prev ? {
+						...prev,
+						[key]: value
+					} : prev);
 				};
 				const setPrimary = async (id) => {
-					setLoadingAction(`primary:${id}`);
-					await postJson(`${API_PREFIX}/pool/primary`, { id });
-					await refresh();
-					setLoadingAction(null);
-					showToast("已设为主用账号", "success");
+					await runPoolAction("primary", "/pool/primary", { id }, "已设为主用账号");
 				};
-				const removeAccount = async (id, alias) => {
-					setLoadingAction(`remove:${id}`);
-					await postJson(`${API_PREFIX}/pool/remove`, { id });
-					await refresh();
-					setLoadingAction(null);
-					showToast(`已移除账号: ${alias}`, "info");
+				const removeAccount = async (id) => {
+					await runPoolAction("remove", "/pool/remove", { id }, "账号已移除");
 				};
 				const refreshQuota = async (id) => {
-					setLoadingAction(id ? `refresh:${id}` : "refresh:all");
-					await postJson(`${API_PREFIX}/pool/refresh-quota`, { id });
-					await refresh();
-					setLoadingAction(null);
-					showToast("额度已刷新", "success");
+					await runPoolAction("quota", "/pool/refresh-quota", id ? { id } : {}, "额度已刷新");
 				};
 				const saveProxy = async (id) => {
-					setLoadingAction(`proxy:${id}`);
-					const proxyUrl = proxyInputs[id];
-					await postJson(`${API_PREFIX}/pool/proxy`, {
+					const proxyUrl = (proxyInputs[id] ?? "").trim();
+					if (await runPoolAction("proxy", "/pool/proxy", {
 						id,
 						proxyUrl
-					});
-					setEditingProxyId(null);
-					await refresh();
-					setLoadingAction(null);
-					showToast("代理已保存", "success");
+					}, proxyUrl ? "代理已保存" : "已改用全局代理")) setEditingProxyId(null);
 				};
 				const clearCooldown = async (id) => {
-					setLoadingAction(id ? `clearCooldown:${id}` : "clearCooldown:all");
-					await postJson(`${API_PREFIX}/pool/clear-cooldown`, { id });
-					await refresh();
-					setLoadingAction(null);
-					showToast("已清除冷却", "success");
+					await runPoolAction("cooldown", "/pool/clear-cooldown", id ? { id } : {}, "本地冷却已清除");
 				};
 				const toggleExpand = (accId) => {
+					const next = !expandedModels[accId];
 					setExpandedModels((prev) => ({
 						...prev,
-						[accId]: !prev[accId]
+						[accId]: next
 					}));
+					if (next) ensureModelsLoaded(accId);
 				};
-				const authPhase = status?.auth?.phase ?? "unknown";
-				const pool = status?.pool;
-				const accounts = pool?.accounts ?? [];
-				const isAuthed = authPhase === "ok" || accounts.length > 0;
-				const isBusy = loadingAction !== null;
-				const renderSpinner = () => h("span", { className: "agy-spinner" });
-				const renderToastBanner = () => {
-					if (!toast) return null;
-					const style = {
-						success: {
-							background: "var(--agy-toast-success-bg)",
-							border: "1px solid var(--agy-toast-success-border)",
-							color: "var(--agy-toast-success-text)"
-						},
-						info: {
-							background: "var(--agy-toast-info-bg)",
-							border: "1px solid var(--agy-toast-info-border)",
-							color: "var(--agy-toast-info-text)"
-						},
-						warn: {
-							background: "var(--agy-toast-warn-bg)",
-							border: "1px solid var(--agy-toast-warn-border)",
-							color: "var(--agy-toast-warn-text)"
-						},
-						error: {
-							background: "var(--agy-toast-error-bg)",
-							border: "1px solid var(--agy-toast-error-border)",
-							color: "var(--agy-toast-error-text)"
-						}
-					}[toast.type];
-					return h("div", { style: {
-						...S.noticeBanner,
-						...style
-					} }, h("div", { style: {
+				const renderSkeletonRow = (widthPct, heightPx = 14) => h("div", {
+					className: "agy-skeleton",
+					"aria-hidden": true,
+					style: {
+						width: `${widthPct}%`,
+						height: `${heightPx}px`,
+						marginBottom: "var(--agy-space-2)"
+					}
+				});
+				const renderSkeletonCard = () => h("div", { style: S.card }, renderSkeletonRow(35, 18), renderSkeletonRow(80), renderSkeletonRow(60), h("span", { className: "agy-sr-only" }, "正在加载"));
+				const renderEmptyState = (text, action) => h("div", { style: {
+					padding: "var(--agy-space-5)",
+					textAlign: "center",
+					border: "1px dashed var(--agy-border-divider)",
+					borderRadius: "var(--agy-radius-lg)",
+					background: "var(--agy-bg-subbox)"
+				} }, h("div", { style: {
+					color: "var(--agy-text-secondary)",
+					fontSize: "var(--agy-font-md)",
+					lineHeight: 1.6
+				} }, text), action ? h("div", { style: { marginTop: "var(--agy-space-3)" } }, action) : null);
+				const renderStrip = (kind, text, retry) => h("div", {
+					role: "alert",
+					style: {
 						display: "flex",
 						alignItems: "center",
-						gap: "8px",
-						fontWeight: 600
-					} }, uiIcon(toast.type === "success" ? "check" : toast.type === "error" || toast.type === "warn" ? "alert" : "globe", 14, style.color), h("span", null, toast.text)), h("button", {
-						type: "button",
-						style: {
-							background: "transparent",
-							border: "none",
-							color: "inherit",
-							cursor: "pointer",
-							padding: "0 4px",
-							opacity: .8,
-							display: "inline-flex",
-							alignItems: "center"
+						justifyContent: "space-between",
+						gap: "var(--agy-space-2)",
+						padding: "9px var(--agy-space-3)",
+						borderRadius: "var(--agy-radius-md)",
+						background: kind === "error" ? "var(--agy-danger-bg)" : kind === "warn" ? "var(--agy-warn-bg)" : "var(--agy-info-bg)",
+						border: `1px solid ${kind === "error" ? "var(--agy-danger-border)" : kind === "warn" ? "var(--agy-warn-border)" : "var(--agy-info-border)"}`,
+						color: kind === "error" ? "var(--agy-danger-text)" : kind === "warn" ? "var(--agy-warn-text)" : "var(--agy-info-text)",
+						fontSize: "var(--agy-font-sm)",
+						marginBottom: "var(--agy-space-2)"
+					}
+				}, h("span", null, text), retry ? h("button", {
+					className: "agy-btn",
+					style: S.btnSm,
+					onClick: retry,
+					"aria-label": "重试加载"
+				}, uiIcon("refresh", 12), "重试") : null);
+				const numOf = (obj, key) => {
+					const v = obj ? obj[key] : void 0;
+					return typeof v === "number" && Number.isFinite(v) ? v : null;
+				};
+				const renderStatCard = (label, value, sub, valueColor) => h("div", {
+					className: "agy-card-hover",
+					style: {
+						...S.statBox,
+						flex: "1 1 150px"
+					}
+				}, h("div", { style: S.statLabel }, label), h("div", { style: {
+					...S.statValue,
+					color: valueColor ?? "var(--agy-text-primary)"
+				} }, value), sub ? h("div", { style: S.statSub }, sub) : null);
+				const renderToastBanner = () => {
+					if (!toast) return null;
+					const tone = {
+						success: {
+							bg: "var(--agy-toast-success-bg)",
+							border: "var(--agy-toast-success-border)",
+							text: "var(--agy-toast-success-text)"
 						},
-						onClick: () => setToast(null)
+						info: {
+							bg: "var(--agy-toast-info-bg)",
+							border: "var(--agy-toast-info-border)",
+							text: "var(--agy-toast-info-text)"
+						},
+						warn: {
+							bg: "var(--agy-toast-warn-bg)",
+							border: "var(--agy-toast-warn-border)",
+							text: "var(--agy-toast-warn-text)"
+						},
+						error: {
+							bg: "var(--agy-toast-error-bg)",
+							border: "var(--agy-toast-error-border)",
+							text: "var(--agy-toast-error-text)"
+						}
+					}[toast.type];
+					return h("div", {
+						role: "status",
+						"aria-live": "polite",
+						className: "agy-rise",
+						style: {
+							...S.noticeBanner,
+							background: tone.bg,
+							border: `1px solid ${tone.border}`,
+							color: tone.text
+						}
+					}, h("span", null, toast.text), h("button", {
+						className: "agy-btn",
+						style: {
+							...S.btnSm,
+							background: "transparent",
+							border: "none"
+						},
+						onClick: () => setToast(null),
+						"aria-label": "关闭提示"
 					}, uiIcon("x", 12)));
+				};
+				const quotaGradientFor = (pct, cooling) => {
+					if (cooling) return "var(--agy-quota-cool-grad)";
+					if (pct < 10) return "var(--agy-quota-low-grad)";
+					if (pct <= 30) return "var(--agy-quota-med-grad)";
+					return "var(--agy-quota-high-grad)";
+				};
+				const quotaTextFor = (pct, cooling) => {
+					if (cooling) return "var(--agy-quota-none-text)";
+					if (pct < 10) return "var(--agy-quota-low-text)";
+					if (pct <= 30) return "var(--agy-quota-med-text)";
+					return "var(--agy-quota-high-text)";
 				};
 				const renderQuotaBar = (label, familyKey, acc) => {
 					const info = acc.quotas[familyKey];
 					const cd = acc.cooldowns[familyKey];
-					const inCooldown = cd && cd.cooldownUntil > Date.now();
-					const pct5h = typeof info?.remainingFraction === "number" && Number.isFinite(info.remainingFraction) ? Math.max(0, Math.min(100, Math.round(info.remainingFraction * 100))) : -1;
-					const cdNote = inCooldown ? " · 本地冷却中" : "";
-					const w5h = formatQuotaWindow(info?.resetTime);
-					const pctWeekly = typeof info?.weeklyFraction === "number" && Number.isFinite(info.weeklyFraction) ? Math.max(0, Math.min(100, Math.round(info.weeklyFraction * 100))) : -1;
-					const wWeekly = formatQuotaWindow(info?.weeklyResetTime);
-					const getColors = (pct, isCooling = false) => {
-						if (isCooling) return {
-							bar: "linear-gradient(90deg, #475569, #64748b)",
-							text: "#94a3b8",
-							bg: "rgba(100, 116, 139, 0.15)",
-							border: "rgba(100, 116, 139, 0.3)"
-						};
-						if (pct < 0) return {
-							bar: "var(--agy-quota-none-border)",
-							text: "var(--agy-quota-none-text)",
-							bg: "var(--agy-quota-none-bg)",
-							border: "var(--agy-quota-none-border)"
-						};
-						if (pct < 10) return {
-							bar: "linear-gradient(90deg, #dc2626, #ef4444)",
-							text: "#ef4444",
-							bg: "rgba(239, 68, 68, 0.12)",
-							border: "rgba(239, 68, 68, 0.3)"
-						};
-						if (pct <= 30) return {
-							bar: "linear-gradient(90deg, #d97706, #f59e0b)",
-							text: "#f59e0b",
-							bg: "rgba(245, 158, 11, 0.12)",
-							border: "rgba(245, 158, 11, 0.3)"
-						};
-						return {
-							bar: "linear-gradient(90deg, #059669, #10b981)",
-							text: "#10b981",
-							bg: "rgba(16, 185, 129, 0.12)",
-							border: "rgba(16, 185, 129, 0.3)"
-						};
-					};
-					const c5h = getColors(pct5h, inCooldown);
-					const cWeekly = getColors(pctWeekly);
-					const renderLine = (windowName, percent, c, resetStr) => {
+					const cooling = !!(cd && cd.cooldownUntil > Date.now());
+					const pct5h = typeof info?.remainingFraction === "number" ? Math.max(0, Math.min(100, Math.round(info.remainingFraction * 100))) : -1;
+					const pctWeekly = typeof info?.weeklyFraction === "number" ? Math.max(0, Math.min(100, Math.round(info.weeklyFraction * 100))) : -1;
+					const cdNote = cooling ? " · 本地冷却中" : "";
+					const line = (windowLabel, pct, resetTime) => {
+						if (pct < 0) return h("div", { style: {
+							display: "flex",
+							alignItems: "center",
+							gap: "var(--agy-space-2)",
+							marginBottom: "5px"
+						} }, h("span", { style: {
+							width: "56px",
+							color: "var(--agy-text-tertiary)",
+							fontSize: "var(--agy-font-xs)"
+						} }, windowLabel), h("span", {
+							className: "agy-num",
+							style: {
+								...S.muted,
+								fontSize: "var(--agy-font-xs)"
+							}
+						}, `未同步${cdNote}`));
 						return h("div", { style: {
 							display: "flex",
 							alignItems: "center",
-							fontSize: "11.5px",
-							margin: "4px 0"
+							gap: "var(--agy-space-2)",
+							marginBottom: "5px"
 						} }, h("span", { style: {
-							width: "52px",
-							color: "var(--agy-text-window-label)",
-							fontSize: "11px",
-							fontWeight: 700,
-							flexShrink: 0
-						} }, windowName), h("div", { style: S.progressBarBg }, h("div", {
+							width: "56px",
+							color: "var(--agy-text-tertiary)",
+							fontSize: "var(--agy-font-xs)"
+						} }, windowLabel), h("div", {
+							style: S.progressBarBg,
+							"aria-hidden": true
+						}, h("div", {
 							className: "agy-progress-fill",
 							style: {
-								width: `${percent < 0 ? 100 : percent}%`,
+								width: `${pct}%`,
 								height: "100%",
-								background: c.bar,
-								borderRadius: "3px"
+								borderRadius: "var(--agy-radius-pill)",
+								background: quotaGradientFor(pct, cooling)
 							}
-						})), h("div", { style: {
-							display: "inline-flex",
-							alignItems: "center",
-							gap: "8px",
-							minWidth: "140px",
-							justifyContent: "flex-end",
-							flexShrink: 0
-						} }, h("span", { style: {
-							padding: "2px 7px",
-							borderRadius: "4px",
-							background: c.bg,
-							color: c.text,
-							border: `1px solid ${c.border}`,
-							fontWeight: 700,
-							fontSize: "11.5px",
-							lineHeight: 1.2
-						} }, percent < 0 ? "—" : `${percent}%`), resetStr ? h("span", { style: {
-							color: "var(--agy-text-secondary)",
-							fontSize: "11px",
-							fontWeight: 500
-						} }, `↻ ${resetStr}`) : null));
+						})), h("span", {
+							className: "agy-num",
+							style: {
+								fontSize: "var(--agy-font-xs)",
+								fontWeight: 700,
+								color: quotaTextFor(pct, cooling),
+								minWidth: "38px",
+								textAlign: "right"
+							}
+						}, `${pct}%`), h(ResetCountdown, {
+							resetTime,
+							suffix: cdNote,
+							className: "agy-num",
+							style: {
+								fontSize: "var(--agy-font-xs)",
+								color: "var(--agy-text-tertiary)",
+								minWidth: "128px"
+							}
+						}));
 					};
-					return h("div", { style: {
-						margin: "6px 0",
-						padding: "8px 10px",
-						background: "var(--agy-bg-subbox)",
-						borderRadius: "7px",
-						border: "1px solid var(--agy-border-box)"
-					} }, h("div", { style: {
+					return h("div", { style: S.quotaBox }, h("div", { style: {
 						display: "flex",
 						alignItems: "center",
 						gap: "6px",
+						marginBottom: "5px"
+					} }, brandIcon(FAMILY_BRAND[familyKey], 13), h("span", { style: {
+						fontSize: "var(--agy-font-sm)",
 						fontWeight: 700,
-						fontSize: "12.5px",
-						marginBottom: "5px",
 						color: "var(--agy-text-primary)"
-					} }, brandIcon(FAMILY_BRAND[familyKey], 14), h("span", null, label)), renderLine("5h 额度", pct5h, c5h, w5h.resetText ? w5h.resetText + cdNote : cdNote.replace(/^ · /, "")), renderLine("周额度", pctWeekly, cWeekly, wWeekly.resetText));
+					} }, label)), line("5h 额度", pct5h, info?.resetTime), line("周额度", pctWeekly, info?.weeklyResetTime));
 				};
-				const renderedAccountCards = accounts.map((acc) => {
-					const isPrimary = acc.id === pool?.primaryAccountId;
-					const hasCooldown = Object.entries(acc.cooldowns).some(([, cd]) => cd && cd.cooldownUntil > Date.now());
-					const isAuthRequired = acc.authRequired;
-					const dotColor = !acc.enabled ? "#64748b" : isAuthRequired ? "#ef4444" : hasCooldown ? "#f59e0b" : "#10b981";
-					const isEditingProxy = editingProxyId === acc.id;
-					const isExpanded = expandedModels[acc.id] ?? false;
-					const cardStyle = isPrimary ? { ...S.cardPrimary } : { ...S.card };
-					const googleModels = acc.quotas.google?.models ?? [];
-					const anthropicModels = acc.quotas.anthropic?.models ?? [];
-					const openaiModels = acc.quotas.openai?.models ?? [];
-					const allChildModels = [
-						...googleModels.map((m) => ({
-							family: "Google",
-							model: m
-						})),
-						...anthropicModels.map((m) => ({
-							family: "Anthropic",
-							model: m
-						})),
-						...openaiModels.map((m) => ({
-							family: "OpenAI",
-							model: m
-						}))
-					];
+				const renderedAccountCards = accounts.map((acc, idx) => {
+					const isPrimary = acc.id === status?.pool?.primaryAccountId;
+					const hasCooldown = Object.values(acc.cooldowns ?? {}).some((cd) => cd && cd.cooldownUntil > Date.now());
+					const isAuthRequired = acc.authRequired === true;
+					const dotColor = !acc.enabled ? "var(--agy-strong-neutral)" : isAuthRequired ? "var(--agy-strong-danger)" : hasCooldown ? "var(--agy-strong-warn)" : "var(--agy-strong-ok)";
 					const isAutoAlias = !acc.alias || /^备用.*账号/i.test(acc.alias) || /^主账号/i.test(acc.alias);
 					const displayName = acc.email ? isAutoAlias ? acc.email : acc.alias : acc.alias || acc.id;
-					const showEmailBadge = Boolean(acc.email && displayName !== acc.email);
+					const showEmailBadge = acc.email && !isAutoAlias;
+					const modelCount = accountModelIdsOf(acc).length;
+					const expanded = !!expandedModels[acc.id];
 					return h("div", {
 						key: acc.id,
-						className: "agy-card-hover",
-						style: cardStyle
+						className: "agy-card-hover agy-rise",
+						style: {
+							...isPrimary ? S.cardPrimary : S.card,
+							"--i": Math.min(idx, 8)
+						}
 					}, h("div", { style: {
 						display: "flex",
 						alignItems: "center",
 						justifyContent: "space-between",
-						marginBottom: "8px"
+						flexWrap: "wrap",
+						gap: "var(--agy-space-2)"
 					} }, h("div", { style: {
 						display: "flex",
 						alignItems: "center",
-						gap: "8px",
-						flexWrap: "wrap"
+						gap: "var(--agy-space-2)",
+						flexWrap: "wrap",
+						minWidth: 0
 					} }, h("span", {
 						className: "agy-pulse-dot",
-						style: {
-							background: dotColor,
-							boxShadow: `0 0 8px ${dotColor}aa`
-						}
+						"aria-hidden": true,
+						style: { background: dotColor }
 					}), h("span", { style: {
-						fontWeight: 700,
-						fontSize: "13.5px",
-						color: "var(--agy-text-primary)"
-					} }, displayName), isAuthRequired ? h("span", { style: {
-						...S.badgeTag,
-						background: "var(--agy-badge-email-bg)",
-						color: "#ef4444",
-						borderColor: "#fca5a5",
-						gap: "4px",
-						fontWeight: 700
-					} }, uiIcon("alert", 11, "#ef4444"), "需重新登录") : null, showEmailBadge ? h("span", {
-						style: {
-							...S.badgeTag,
-							background: "var(--agy-badge-email-bg)",
-							color: "var(--agy-badge-email-text)",
-							borderColor: "var(--agy-badge-email-border)",
-							gap: "5px"
-						},
-						title: maskEmail(acc.email)
-					}, uiIcon("mail", 11, "var(--agy-badge-email-text)"), maskEmail(acc.email)) : null, isPrimary ? h("span", { style: {
-						...S.badgePrimary,
-						gap: "4px"
-					} }, uiIcon("star", 10, "var(--agy-badge-primary-text)"), "主用") : null, acc.proxyUrl ? h("span", { style: {
-						...S.badgeTag,
-						background: "var(--agy-badge-proxy-bg)",
-						color: "var(--agy-badge-proxy-text)",
-						borderColor: "var(--agy-badge-proxy-border)",
-						gap: "5px"
-					} }, uiIcon("globe", 11, "var(--agy-badge-proxy-text)"), "代理") : null), h("div", { style: {
+						fontSize: "var(--agy-font-lg)",
+						fontWeight: 750,
+						color: "var(--agy-text-primary)",
+						overflow: "hidden",
+						textOverflow: "ellipsis",
+						whiteSpace: "nowrap",
+						maxWidth: "340px"
+					} }, displayName), isPrimary ? h("span", { style: S.badgePrimary }, uiIcon("star", 11), " 主用") : null, acc.proxyUrl ? h("span", {
+						style: S.badgeTag,
+						title: `专属代理：${acc.proxyUrl}`
+					}, uiIcon("globe", 11), " 代理") : null, showEmailBadge ? h("span", {
+						style: S.badgeTag,
+						title: acc.email
+					}, uiIcon("mail", 11), ` ${maskEmail(acc.email)}`) : null, isAuthRequired ? h("span", { style: S.badgeUnready }, "需重新登录") : null, h("span", {
+						style: S.badgeTag,
+						title: "已发现的模型数"
+					}, uiIcon("layers", 11), ` 模型 ${modelCount}`)), h("div", { style: {
 						display: "flex",
+						alignItems: "center",
 						gap: "5px",
-						alignItems: "center"
-					} }, allChildModels.length > 0 ? h("button", {
-						type: "button",
+						flexWrap: "wrap"
+					} }, h("button", {
 						className: "agy-btn",
-						style: isExpanded ? {
-							...S.btnSmPrimary,
-							gap: "3px"
-						} : {
-							...S.btnSm,
-							gap: "3px"
-						},
-						onClick: () => toggleExpand(acc.id)
-					}, isExpanded ? [uiIcon("chevronUp", 11), " 收起"] : [uiIcon("chevronDown", 11), " 明细"]) : null, h("button", {
-						type: "button",
+						style: S.btnSm,
+						onClick: () => toggleExpand(acc.id),
+						"aria-expanded": expanded,
+						"aria-controls": modelsPanelDomId(acc.id),
+						title: "查看该账号支持的模型与额度"
+					}, uiIcon(expanded ? "chevronUp" : "chevronDown", 11), expanded ? " 收起" : " 明细"), h("button", {
 						className: "agy-btn",
-						style: {
-							...S.btnSm,
-							gap: "4px"
-						},
+						style: S.btnSm,
+						onClick: () => void refreshQuota(acc.id),
+						disabled: isBusy,
 						title: "刷新此账号（换号后点这里立即同步 email / 额度 / 模型）",
-						disabled: isBusy,
-						onClick: () => void refreshQuota(acc.id)
-					}, loadingAction === `refresh:${acc.id}` ? [renderSpinner(), "同步中"] : [uiIcon("refresh", 11), " 同步"]), !isPrimary ? h("button", {
-						type: "button",
+						"aria-label": `同步账号 ${displayName}`
+					}, uiIcon("refresh", 11), " 同步"), !isPrimary ? h("button", {
 						className: "agy-btn",
+						style: S.btnSm,
+						onClick: () => void setPrimary(acc.id),
+						disabled: isBusy,
+						title: "切换调度主用账号"
+					}, "设为主用") : null, h("button", {
+						className: "agy-btn",
+						style: S.btnSm,
+						onClick: () => {
+							if (editingProxyId === acc.id) setEditingProxyId(null);
+							else {
+								setEditingProxyId(acc.id);
+								setProxyInputs((prev) => ({
+									...prev,
+									[acc.id]: acc.proxyUrl ?? ""
+								}));
+							}
+						},
+						"aria-expanded": editingProxyId === acc.id,
+						title: "配置该账号的专属代理"
+					}, uiIcon("globe", 11), " 代理"), accounts.length > 1 ? h("button", {
+						className: "agy-btn",
+						style: S.btnDanger,
+						onClick: () => void removeAccount(acc.id),
+						disabled: isBusy,
+						"aria-label": `移除此账号 ${displayName}`,
+						title: "从账号池移除（不会吊销 Google 侧授权）"
+					}, uiIcon("trash", 11), " 移除此") : null)), h("div", { style: {
+						display: "flex",
+						gap: "var(--agy-space-4)",
+						flexWrap: "wrap",
+						marginTop: "var(--agy-space-2)"
+					} }, renderQuotaBar("Gemini", "google", acc), renderQuotaBar("Claude", "anthropic", acc), renderQuotaBar("GPT-OSS", "openai", acc)), hasCooldown ? h("div", {
+						className: "agy-cooldown-breathe",
 						style: {
-							...S.btnSm,
-							gap: "4px"
-						},
-						disabled: isBusy,
-						onClick: () => void setPrimary(acc.id)
-					}, loadingAction === `primary:${acc.id}` ? [renderSpinner(), "设置中"] : [uiIcon("star", 11), " 设为主用"]) : null, h("button", {
-						type: "button",
-						className: "agy-btn",
-						style: isEditingProxy ? {
-							...S.btnSmPrimary,
-							gap: "4px"
-						} : {
-							...S.btnSm,
-							gap: "4px"
-						},
-						disabled: isBusy,
-						onClick: () => setEditingProxyId(isEditingProxy ? null : acc.id)
-					}, [uiIcon("globe", 11), " 代理"]), accounts.length > 1 ? h("button", {
-						type: "button",
-						className: "agy-btn",
-						style: {
-							...S.btnDanger,
-							padding: "3px 7px"
-						},
-						title: "移除此账号",
-						disabled: isBusy,
-						onClick: () => void removeAccount(acc.id, displayName)
-					}, loadingAction === `remove:${acc.id}` ? renderSpinner() : uiIcon("trash", 12, "var(--agy-danger-text)")) : null)), h("div", { style: S.quotaBox }, renderQuotaBar("Gemini", "google", acc), renderQuotaBar("Claude", "anthropic", acc), renderQuotaBar("GPT-OSS", "openai", acc), isExpanded && allChildModels.length > 0 ? h("div", { style: {
-						marginTop: "8px",
-						paddingTop: "8px",
-						borderTop: "1px solid var(--agy-border-box)"
-					} }, h("div", { style: {
-						color: "var(--agy-text-secondary)",
-						marginBottom: "6px",
-						fontWeight: 600,
-						fontSize: "11px"
-					} }, "单模型明细:"), allChildModels.map(({ family, model }) => {
-						const frac = model.remainingFraction ?? 1;
-						const pct = Math.round(frac * 100);
-						const w = formatQuotaWindow(model.resetTime);
-						const pColor = pct <= 20 ? "var(--agy-quota-low-text)" : pct <= 50 ? "var(--agy-quota-med-text)" : "var(--agy-quota-high-text)";
-						return h("div", {
-							key: model.modelId,
-							className: "agy-submodel-row"
-						}, h("span", { style: {
-							fontWeight: 500,
-							color: "var(--agy-text-primary)"
-						} }, `[${family}] ${model.displayName || model.modelId}`), h("div", { style: {
 							display: "flex",
 							alignItems: "center",
-							gap: "8px"
-						} }, h("span", { style: {
-							color: pColor,
-							fontWeight: 700
-						} }, `${pct}%`), w.resetText ? h("span", { style: {
-							color: "var(--agy-text-tertiary)",
-							fontSize: "10.5px"
-						} }, `↻ ${w.resetText}`) : null));
-					})) : null), hasCooldown ? h("div", { style: {
-						background: "var(--agy-warn-bg)",
-						border: "1px solid var(--agy-warn-border)",
-						borderRadius: "7px",
-						padding: "6px 10px",
-						color: "var(--agy-warn-text)",
-						fontSize: "11.5px",
-						fontWeight: 600,
-						marginTop: "8px",
-						display: "flex",
-						alignItems: "center",
-						justifyContent: "space-between"
-					} }, h("div", { style: {
-						display: "flex",
+							justifyContent: "space-between",
+							gap: "var(--agy-space-2)",
+							marginTop: "var(--agy-space-2)",
+							padding: "8px var(--agy-space-3)",
+							borderRadius: "var(--agy-radius-md)",
+							background: "var(--agy-warn-bg)",
+							border: "1px solid var(--agy-warn-border)",
+							color: "var(--agy-warn-text)",
+							fontSize: "var(--agy-font-sm)"
+						}
+					}, h("span", { style: {
+						display: "inline-flex",
 						alignItems: "center",
 						gap: "6px"
-					} }, uiIcon("alert", 13, "var(--agy-warn-text)"), h("span", null, "部分模型限流中，已自动切换账号")), h("button", {
-						type: "button",
+					} }, uiIcon("zap", 12), "部分模型限流中，已自动切换账号"), h("button", {
 						className: "agy-btn",
 						style: {
 							...S.btnSm,
-							color: "var(--agy-warn-btn-text)",
-							borderColor: "var(--agy-warn-btn-border)",
 							background: "var(--agy-warn-btn-bg)",
-							gap: "4px"
+							color: "var(--agy-warn-btn-text)",
+							border: "1px solid var(--agy-warn-btn-border)"
 						},
-						disabled: isBusy,
-						onClick: () => void clearCooldown(acc.id)
-					}, loadingAction === `clearCooldown:${acc.id}` ? [renderSpinner(), ""] : [uiIcon("zap", 11, "var(--agy-warn-btn-text)"), " 清除冷却"])) : null, isEditingProxy ? h("div", { style: {
-						marginTop: "8px",
-						padding: "10px 12px",
-						background: "var(--agy-bg-subbox)",
-						borderRadius: "7px",
-						border: "1px solid var(--agy-border-subbox)"
-					} }, h("div", { style: {
+						onClick: () => void clearCooldown(acc.id),
+						disabled: isBusy
+					}, "清除冷却")) : null, editingProxyId === acc.id ? h("div", { style: {
 						display: "flex",
-						gap: "8px"
+						gap: "var(--agy-space-2)",
+						marginTop: "var(--agy-space-2)",
+						flexWrap: "wrap"
 					} }, h("input", {
+						className: "agy-input",
 						style: S.input,
-						value: proxyInputs[acc.id] !== void 0 ? proxyInputs[acc.id] : acc.proxyUrl ?? "",
+						value: proxyInputs[acc.id] ?? "",
 						placeholder: "专属代理 URL (如: http://127.0.0.1:7890，留空则使用全局)",
-						onChange: (e) => setProxyInputs({
-							...proxyInputs,
+						"aria-label": `账号 ${displayName} 的专属代理 URL`,
+						onChange: (e) => setProxyInputs((prev) => ({
+							...prev,
 							[acc.id]: e.target.value
-						})
+						}))
 					}), h("button", {
-						type: "button",
 						className: "agy-btn",
-						style: S.btnPrimary,
-						disabled: isBusy,
-						onClick: () => void saveProxy(acc.id)
-					}, loadingAction === `proxy:${acc.id}` ? [renderSpinner(), "保存"] : "保存"), h("button", {
-						type: "button",
+						style: S.btnSmPrimary,
+						onClick: () => void saveProxy(acc.id),
+						disabled: isBusy
+					}, "保存"), h("button", {
 						className: "agy-btn",
-						style: S.btn,
+						style: S.btnSm,
 						onClick: () => setEditingProxyId(null)
-					}, "取消"))) : null);
-				});
-				const poolAuth = status?.poolAuth;
-				const flowPhase = poolAuth?.phase ?? "idle";
-				const flowActive = flowPhase === "waiting" || flowPhase === "exchanging";
-				const addAccountSection = addingAccount ? h("div", { style: S.authModal }, h("div", { style: {
-					fontWeight: 700,
-					fontSize: "13.5px",
-					marginBottom: "10px",
-					display: "flex",
-					alignItems: "center",
-					gap: "6px",
-					color: "var(--agy-text-primary)"
-				} }, uiIcon("plus", 13, "var(--agy-btn-primary-bg)"), "添加 Google 账号"), !flowActive ? h("div", null, h("div", { style: {
-					display: "flex",
-					gap: "8px"
-				} }, h("input", {
-					style: S.input,
-					value: aliasInput,
-					placeholder: "可选别名 (留空直接使用 Google 账号名称)",
-					onChange: (e) => setAliasInput(e.target.value)
-				}), h("button", {
-					type: "button",
-					className: "agy-btn",
-					style: {
-						...S.btnPrimary,
-						gap: "4px"
-					},
-					disabled: isBusy,
-					onClick: () => void handleBeginAddAccount()
-				}, loadingAction === "pool:beginAdd" ? [renderSpinner(), "正在打开浏览器..."] : [uiIcon("externalLink", 12, "#ffffff"), " 打开浏览器登录"]), h("button", {
-					type: "button",
-					className: "agy-btn",
-					style: S.btn,
-					onClick: () => handleCancelAddAccount()
-				}, "取消")), flowPhase === "failed" && poolAuth?.message ? h("div", { style: {
-					...S.muted,
-					color: "var(--agy-danger-text)",
-					marginTop: "8px",
-					display: "flex",
-					alignItems: "center",
-					gap: "5px",
-					fontWeight: 600
-				} }, uiIcon("alert", 12, "var(--agy-danger-text)"), poolAuth.message) : null) : h("div", null, h("div", { style: {
-					display: "flex",
-					alignItems: "center",
-					color: "var(--agy-text-secondary)",
-					marginBottom: "8px",
-					lineHeight: 1.5,
-					fontSize: "12px"
-				} }, renderSpinner(), flowPhase === "exchanging" ? "正在验证授权并激活账号，请稍候..." : "等待浏览器中完成 Google 授权，成功后将自动激活。"), poolAuth?.url ? h("div", { style: { marginBottom: "8px" } }, h("a", {
-					href: poolAuth.url,
-					target: "_blank",
-					style: {
-						color: "var(--dsw-alias-state-business-primary, #2563eb)",
-						textDecoration: "underline",
-						fontSize: "12px",
-						fontWeight: 600,
-						display: "inline-flex",
-						alignItems: "center",
-						gap: "4px"
-					}
-				}, uiIcon("externalLink", 12, "currentColor"), "若浏览器未打开，请点击此处手动打开 Google 登录页")) : null, h("div", { style: {
-					color: "var(--agy-text-tertiary)",
-					marginBottom: "6px",
-					fontSize: "11px",
-					fontWeight: 500
-				} }, "未完成自动回调时，可粘贴授权码或回调 URL："), h("div", { style: {
-					display: "flex",
-					gap: "8px"
-				} }, h("input", {
-					style: S.input,
-					value: authCodeInput,
-					placeholder: "授权码 或 http://localhost:51121/oauth-callback?code=... 完整链接",
-					onChange: (e) => setAuthCodeInput(e.target.value)
-				}), h("button", {
-					type: "button",
-					className: "agy-btn",
-					style: {
-						...S.btnPrimary,
-						gap: "4px"
-					},
-					disabled: isBusy || !authCodeInput.trim(),
-					onClick: () => void handleCompleteAddAccount()
-				}, loadingAction === "pool:completeAdd" ? [renderSpinner(), "验证激活中..."] : [uiIcon("check", 12, "#ffffff"), " 手动激活"]), h("button", {
-					type: "button",
-					className: "agy-btn",
-					style: S.btn,
-					onClick: () => handleCancelAddAccount()
-				}, "取消")))) : null;
-				const renderAuditDrawer = () => {
-					if (!showAuditDrawer) return null;
-					const o = statsOverview;
-					const totalReq = o?.totalRequests ?? 0;
-					const successCount = o?.totalSuccess ?? 0;
-					const failCount = o?.totalFailed ?? 0;
-					const cacheRate = typeof o?.cacheHitRate === "number" ? Math.max(0, Math.min(100, o.cacheHitRate * 100)) : 0;
-					const cacheColor = cacheRate > 30 ? "#10b981" : cacheRate >= 10 ? "#f59e0b" : "#94a3b8";
-					const avgLat = o?.avgLatencyMs ?? 0;
-					const avgTtft = o?.avgTtftMs ?? 0;
-					const p90 = o?.p90LatencyMs ?? 0;
-					const isRefreshing = (auditTab === "requests" ? auditLoading : auditSessionsLoading) || statsLoading;
-					return portalToBody(h("div", {
-						className: "agy-modal-backdrop",
-						style: {
-							position: "fixed",
-							top: 0,
-							left: 0,
-							right: 0,
-							bottom: 0,
-							background: "rgba(0, 0, 0, 0.75)",
-							backdropFilter: "blur(4px)",
-							zIndex: 99999,
-							display: "flex",
-							justifyContent: "flex-end"
-						},
-						onClick: (e) => {
-							if (e.target === e.currentTarget) setShowAuditDrawer(false);
-						}
-					}, h("div", { style: {
-						width: "min(920px, 95vw)",
-						height: "100%",
-						background: "#12141a",
-						borderLeft: "1px solid #27272a",
-						display: "flex",
-						flexDirection: "column",
-						boxShadow: "-8px 0 30px rgba(0, 0, 0, 0.5)",
-						color: "#f4f4f5"
-					} }, h("div", { style: {
-						padding: "14px 18px",
-						borderBottom: "1px solid #27272a",
-						display: "flex",
-						alignItems: "center",
-						justifyContent: "space-between",
-						background: "#181b22"
-					} }, h("div", { style: {
-						display: "flex",
-						alignItems: "center",
-						gap: "8px"
-					} }, uiIcon("activity", 15, "#3b82f6"), h("span", { style: {
-						fontSize: "14px",
-						fontWeight: 700
-					} }, "请求审计与会话统计 (Audit Log)"), h("span", { style: {
-						fontSize: "12px",
-						color: "#71717a",
-						marginLeft: "6px"
-					} }, auditTab === "requests" ? `共 ${auditTotal} 条记录` : `共 ${auditSessionsTotal} 个会话`)), h("div", { style: {
-						display: "flex",
-						gap: "8px",
-						alignItems: "center"
-					} }, h("button", {
-						type: "button",
-						className: "agy-btn",
-						style: {
-							...S.btnSm,
-							background: "#27272a",
-							borderColor: "#3f3f46",
-							color: "#e4e4e7"
-						},
-						disabled: isRefreshing,
-						onClick: () => {
-							fetchStatsOverview();
-							if (auditTab === "requests") fetchAuditRequests(auditPage);
-							else fetchAuditSessions(auditSessionsPage);
-						}
-					}, isRefreshing ? [renderSpinner(), "刷新中"] : [uiIcon("refresh", 11), "刷新"]), h("button", {
-						type: "button",
-						className: "agy-btn",
-						style: {
-							...S.btnSm,
-							padding: "4px 8px"
-						},
-						onClick: () => setShowAuditDrawer(false)
-					}, "✕"))), h("div", { style: {
-						flex: 1,
-						overflowY: "auto",
-						padding: "16px 20px"
-					} }, h("div", { style: {
-						display: "grid",
-						gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))",
-						gap: "10px",
-						marginBottom: "16px"
-					} }, h("div", { style: {
-						...S.statBox,
-						background: "#181b22",
-						borderColor: "#27272a"
-					} }, h("div", { style: S.statLabel }, "请求总数"), h("div", { style: S.statValue }, formatNumber(totalReq)), h("div", { style: S.statSub }, h("span", { style: {
-						color: "#10b981",
-						fontWeight: 600
-					} }, `${formatNumber(successCount)} 成功`), failCount > 0 ? h("span", { style: {
-						color: "#ef4444",
-						marginLeft: "6px"
-					} }, `${formatNumber(failCount)} 失败`) : null)), h("div", { style: {
-						...S.statBox,
-						background: "#181b22",
-						borderColor: "#27272a"
-					} }, h("div", { style: S.statLabel }, "缓存命中率 (Cache Hit %)"), h("div", { style: {
-						...S.statValue,
-						color: cacheColor
-					} }, `${cacheRate.toFixed(1)}%`), h("div", { style: S.statSub }, `节省: ${formatCompactTokens(o?.totalCachedTokens ?? 0)} tokens`)), h("div", { style: {
-						...S.statBox,
-						background: "#181b22",
-						borderColor: "#27272a"
-					} }, h("div", { style: S.statLabel }, "Token 汇总 (P / C / O)"), h("div", { style: S.statValue }, formatCompactTokens(o?.totalTokens ?? 0)), h("div", { style: S.statSub }, `P: ${formatCompactTokens(o?.totalPromptTokens ?? 0)} · O: ${formatCompactTokens(o?.totalOutputTokens ?? 0)}`)), h("div", { style: {
-						...S.statBox,
-						background: "#181b22",
-						borderColor: "#27272a"
-					} }, h("div", { style: S.statLabel }, "平均耗时 / TTFT"), h("div", { style: S.statValue }, `${formatNumber(avgLat)} ms`), h("div", { style: S.statSub }, `TTFT: ${formatNumber(avgTtft)} ms · P90: ${formatNumber(p90)} ms`))), h("div", { style: {
-						display: "flex",
-						alignItems: "center",
-						justifyContent: "space-between",
-						marginBottom: "14px"
-					} }, h("div", { style: {
-						display: "inline-flex",
-						background: "#181b22",
-						borderRadius: "8px",
-						padding: "3px",
-						border: "1px solid #27272a"
-					} }, h("button", {
-						type: "button",
-						className: "agy-btn",
-						style: auditTab === "requests" ? {
-							padding: "5px 14px",
-							borderRadius: "6px",
-							border: "none",
-							background: "#2563eb",
-							color: "#ffffff",
-							cursor: "pointer",
-							fontSize: "12px",
-							fontWeight: 700,
-							boxShadow: "0 2px 4px rgba(37, 99, 235, 0.4)"
-						} : {
-							padding: "5px 14px",
-							borderRadius: "6px",
-							border: "none",
-							background: "transparent",
-							color: "#a1a1aa",
-							cursor: "pointer",
-							fontSize: "12px",
-							fontWeight: 600
-						},
-						onClick: () => setAuditTab("requests")
-					}, "按请求明细 (Requests)"), h("button", {
-						type: "button",
-						className: "agy-btn",
-						style: auditTab === "sessions" ? {
-							padding: "5px 14px",
-							borderRadius: "6px",
-							border: "none",
-							background: "#2563eb",
-							color: "#ffffff",
-							cursor: "pointer",
-							fontSize: "12px",
-							fontWeight: 700,
-							boxShadow: "0 2px 4px rgba(37, 99, 235, 0.4)"
-						} : {
-							padding: "5px 14px",
-							borderRadius: "6px",
-							border: "none",
-							background: "transparent",
-							color: "#a1a1aa",
-							cursor: "pointer",
-							fontSize: "12px",
-							fontWeight: 600
-						},
-						onClick: () => {
-							setAuditTab("sessions");
-							if (auditSessions.length === 0 && !auditSessionsLoading) fetchAuditSessions(0);
-						}
-					}, "按会话统计 (Sessions)"))), auditTab === "requests" ? h("table", { style: {
-						width: "100%",
-						borderCollapse: "collapse",
-						fontSize: "12px"
-					} }, h("thead", null, h("tr", { style: {
-						borderBottom: "1px solid #27272a",
-						color: "#a1a1aa",
-						textAlign: "left"
-					} }, h("th", { style: { padding: "8px 10px" } }, "时间"), h("th", { style: { padding: "8px 10px" } }, "模型"), h("th", { style: { padding: "8px 10px" } }, "账号"), h("th", { style: { padding: "8px 10px" } }, "Token (P/C/O)"), h("th", { style: { padding: "8px 10px" } }, "耗时 / TTFT"), h("th", { style: { padding: "8px 10px" } }, "状态"))), h("tbody", null, auditRequests.length === 0 ? h("tr", null, h("td", {
-						colSpan: 6,
-						style: {
-							textAlign: "center",
-							padding: "40px",
-							color: "#71717a"
-						}
-					}, auditLoading ? "加载中..." : "暂无请求审计记录")) : auditRequests.map((r) => {
-						const dateStr = new Date(r.timestamp).toLocaleTimeString();
-						const statusBg = r.status === "success" ? "rgba(16, 185, 129, 0.15)" : r.status === "abort" ? "rgba(100, 116, 139, 0.2)" : "rgba(239, 68, 68, 0.15)";
-						const statusColor = r.status === "success" ? "#34d399" : r.status === "abort" ? "#94a3b8" : "#f87171";
-						const account = pool?.accounts?.find((a) => a.id === r.accountId);
-						const accDisplay = account?.alias || (account?.email ? maskEmail(account.email) : r.accountId);
-						return h("tr", {
-							key: r.requestId,
-							style: { borderBottom: "1px solid #1f222b" }
-						}, h("td", { style: {
-							padding: "8px 10px",
-							color: "#a1a1aa",
-							whiteSpace: "nowrap"
-						} }, dateStr), h("td", { style: {
-							padding: "8px 10px",
-							fontWeight: 600,
-							color: "#f4f4f5"
-						} }, r.model), h("td", { style: {
-							padding: "8px 10px",
-							color: "#cbd5e1"
-						} }, accDisplay), h("td", { style: {
-							padding: "8px 10px",
-							fontFamily: "monospace"
-						} }, `${r.promptTokens} / `, h("span", { style: { color: r.cachedTokens > 0 ? "#34d399" : "inherit" } }, `${r.cachedTokens}`), ` / ${r.outputTokens}`), h("td", { style: {
-							padding: "8px 10px",
-							fontFamily: "monospace"
-						} }, `${r.latencyMs}ms`, typeof r.ttftMs === "number" ? h("span", { style: {
-							color: "#71717a",
-							marginLeft: "4px"
-						} }, `(${r.ttftMs}ms)`) : null), h("td", { style: { padding: "8px 10px" } }, h("span", { style: {
-							padding: "2px 6px",
-							borderRadius: "4px",
-							background: statusBg,
-							color: statusColor,
-							fontSize: "11px",
-							fontWeight: 700
-						} }, r.status)));
-					}))) : h("table", { style: {
-						width: "100%",
-						borderCollapse: "collapse",
-						fontSize: "12px"
-					} }, h("thead", null, h("tr", { style: {
-						borderBottom: "1px solid #27272a",
-						color: "#a1a1aa",
-						textAlign: "left"
-					} }, h("th", { style: { padding: "8px 10px" } }, "更新时间"), h("th", { style: { padding: "8px 10px" } }, "会话 ID"), h("th", { style: { padding: "8px 10px" } }, "账号"), h("th", { style: { padding: "8px 10px" } }, "请求数 (总数 / 成功 / 失败)"), h("th", { style: { padding: "8px 10px" } }, "Token (Prompt / 命中缓存 / 命中率)"), h("th", { style: { padding: "8px 10px" } }, "状态/详情"))), h("tbody", null, auditSessions.length === 0 ? h("tr", null, h("td", {
-						colSpan: 6,
-						style: {
-							textAlign: "center",
-							padding: "40px",
-							color: "#71717a"
-						}
-					}, auditSessionsLoading ? "加载中..." : "暂无会话审计记录")) : auditSessions.map((s, idx) => {
-						const dateStr = s.updatedAt ? new Date(s.updatedAt).toLocaleTimeString() : "-";
-						const account = pool?.accounts?.find((a) => a.id === s.accountId);
-						const accDisplay = account?.alias || (account?.email ? maskEmail(account.email) : s.accountId || "-");
-						const shortId = s.sessionId && s.sessionId.length > 18 ? `${s.sessionId.slice(0, 8)}...${s.sessionId.slice(-6)}` : s.sessionId || "-";
-						const promptTokens = s.totalPromptTokens ?? 0;
-						const cachedTokens = s.totalCachedTokens ?? 0;
-						const cacheRate = typeof s.cacheHitRate === "number" ? Math.max(0, Math.min(100, s.cacheHitRate * 100)) : promptTokens > 0 ? Math.max(0, Math.min(100, cachedTokens / promptTokens * 100)) : 0;
-						const rateColor = cacheRate > 30 ? "#34d399" : cacheRate >= 10 ? "#f59e0b" : "#94a3b8";
-						const totalReqCount = s.totalRequests ?? 0;
-						const successReqCount = s.totalSuccess ?? 0;
-						const failedReqCount = s.totalFailed ?? 0;
-						const isHealthy = failedReqCount === 0;
-						const statusBg = isHealthy ? "rgba(16, 185, 129, 0.15)" : "rgba(239, 68, 68, 0.15)";
-						const statusColor = isHealthy ? "#34d399" : "#f87171";
-						const statusText = isHealthy ? "正常" : `${failedReqCount} 异常`;
-						return h("tr", {
-							key: s.sessionId || idx,
-							style: { borderBottom: "1px solid #1f222b" }
-						}, h("td", { style: {
-							padding: "8px 10px",
-							color: "#a1a1aa",
-							whiteSpace: "nowrap"
-						} }, dateStr), h("td", {
+					}, "取消")) : null, expanded ? (() => {
+						const detail = selectPanelPayload(modelPanels[acc.id], acc);
+						const entries = detail.payload.familyModels.flatMap((g) => g.models.map((m) => ({
+							id: m.id,
+							name: m.name,
+							family: g.family
+						})));
+						return h("div", {
+							id: modelsPanelDomId(acc.id),
+							role: "region",
+							"aria-label": `${displayName} 的模型明细`,
 							style: {
-								padding: "8px 10px",
-								fontFamily: "monospace",
-								fontWeight: 600,
-								color: "#f4f4f5",
-								whiteSpace: "nowrap"
-							},
-							title: s.sessionId
-						}, shortId), h("td", { style: {
-							padding: "8px 10px",
-							color: "#cbd5e1"
-						} }, accDisplay), h("td", { style: {
-							padding: "8px 10px",
-							fontFamily: "monospace"
-						} }, h("span", { style: {
-							fontWeight: 600,
-							color: "#f4f4f5"
-						} }, `${formatNumber(totalReqCount)}`), h("span", { style: {
-							color: "#71717a",
-							margin: "0 4px"
-						} }, "("), h("span", { style: { color: "#34d399" } }, `${formatNumber(successReqCount)}`), h("span", { style: {
-							color: "#71717a",
-							margin: "0 2px"
-						} }, "/"), h("span", { style: { color: failedReqCount > 0 ? "#f87171" : "#71717a" } }, `${formatNumber(failedReqCount)}`), h("span", { style: {
-							color: "#71717a",
-							margin: "0 4px"
-						} }, ")")), h("td", { style: {
-							padding: "8px 10px",
-							fontFamily: "monospace"
-						} }, `${formatCompactTokens(promptTokens)} / `, h("span", { style: { color: cachedTokens > 0 ? "#34d399" : "inherit" } }, `${formatCompactTokens(cachedTokens)}`), h("span", { style: {
-							color: rateColor,
-							marginLeft: "6px",
-							fontSize: "11px",
-							fontWeight: 600
-						} }, `(${cacheRate.toFixed(1)}%)`)), h("td", { style: { padding: "8px 10px" } }, h("span", { style: {
-							padding: "2px 6px",
-							borderRadius: "4px",
-							background: statusBg,
-							color: statusColor,
-							fontSize: "11px",
-							fontWeight: 700
-						} }, statusText)));
-					})))), h("div", { style: {
-						padding: "12px 20px",
-						borderTop: "1px solid #27272a",
-						display: "flex",
-						justifyContent: "space-between",
-						alignItems: "center",
-						background: "#181b22"
-					} }, h("span", { style: {
-						fontSize: "12px",
-						color: "#71717a"
-					} }, auditTab === "requests" ? `第 ${auditPage + 1} 页` : `第 ${auditSessionsPage + 1} 页`), h("div", { style: {
-						display: "flex",
-						gap: "8px"
-					} }, h("button", {
-						type: "button",
-						className: "agy-btn",
-						style: {
-							...S.btnSm,
-							background: "#27272a",
-							borderColor: "#3f3f46",
-							color: "#e4e4e7"
-						},
-						disabled: auditTab === "requests" ? auditPage <= 0 || auditLoading : auditSessionsPage <= 0 || auditSessionsLoading,
-						onClick: () => {
-							if (auditTab === "requests") fetchAuditRequests(auditPage - 1);
-							else fetchAuditSessions(auditSessionsPage - 1);
-						}
-					}, "上一页"), h("button", {
-						type: "button",
-						className: "agy-btn",
-						style: {
-							...S.btnSm,
-							background: "#27272a",
-							borderColor: "#3f3f46",
-							color: "#e4e4e7"
-						},
-						disabled: auditTab === "requests" ? (auditPage + 1) * 20 >= auditTotal || auditLoading : (auditSessionsPage + 1) * 20 >= auditSessionsTotal || auditSessionsLoading,
-						onClick: () => {
-							if (auditTab === "requests") fetchAuditRequests(auditPage + 1);
-							else fetchAuditSessions(auditSessionsPage + 1);
-						}
-					}, "下一页"))))));
-				};
-				if (status === null) return h("div", { style: {
-					...S.container,
-					minHeight: "120px",
-					display: "flex",
-					alignItems: "center",
-					justifyContent: "center"
-				} }, h("style", null, GLOBAL_CSS), h("span", { style: S.muted }, [renderSpinner(), "正在加载 Antigravity 状态..."]));
-				return h("div", { style: S.container }, h("style", null, GLOBAL_CSS), h("div", { style: S.headerCard }, h("div", { style: {
-					display: "flex",
-					alignItems: "center",
-					gap: "8px"
-				} }, agyIcon(16), h("span", { style: {
-					fontWeight: 700,
-					fontSize: "14px",
-					color: "var(--agy-text-primary)"
-				} }, "Antigravity"), h("span", { style: isAuthed ? S.badgeReady : S.badgeUnready }, isAuthed ? "就绪" : "待认证")), h("div", { style: {
-					display: "flex",
-					gap: "6px",
-					alignItems: "center"
-				} }, h("button", {
-					type: "button",
-					className: "agy-btn",
-					style: {
-						...S.btn,
-						gap: "4px"
-					},
-					title: "查看请求与会话审计明细及遥测指标",
-					onClick: () => {
-						setShowAuditDrawer(true);
-						fetchStatsOverview();
-						fetchAuditRequests(0);
-						fetchAuditSessions(0);
-					}
-				}, [uiIcon("activity", 12, "var(--agy-text-btn)"), " 审计明细"]), !addingAccount ? h("button", {
-					type: "button",
-					className: "agy-btn",
-					style: {
-						...S.btnPrimary,
-						gap: "4px"
-					},
-					onClick: () => setAddingAccount(true)
-				}, [uiIcon("plus", 12, "#ffffff"), " 添加账号"]) : null, h("button", {
-					type: "button",
-					className: "agy-btn",
-					style: {
-						...S.btn,
-						gap: "4px"
-					},
-					disabled: isBusy,
-					onClick: () => void refreshQuota()
-				}, loadingAction === "refresh:all" ? [renderSpinner(), "刷新中"] : [uiIcon("refresh", 12, "var(--agy-text-btn)"), " 刷新额度"]))), renderToastBanner(), addAccountSection, renderedAccountCards, renderAuditDrawer());
-			};
-			/** Modal dialog container rendered into document.body */
-			const AgyModalDialog = () => {
-				const [isOpen, setIsOpen] = useState(agyModalStore.open);
-				useEffect(() => {
-					return agyModalStore.subscribe(() => {
-						setIsOpen(agyModalStore.open);
-					});
-				}, []);
-				useEffect(() => {
-					if (!isOpen) return;
-					const onKey = (e) => {
-						if (e.key === "Escape") {
-							e.stopPropagation();
-							agyModalStore.setOpen(false);
-						}
-					};
-					win.addEventListener?.("keydown", onKey, true);
-					return () => win.removeEventListener?.("keydown", onKey, true);
-				}, [isOpen]);
-				if (!isOpen) return null;
-				return h("div", {
-					className: "agy-modal-backdrop",
-					onClick: (e) => {
-						if (e.target === e.currentTarget) agyModalStore.setOpen(false);
-					}
-				}, h("div", {
-					className: "agy-modal-panel",
-					role: "dialog",
-					"aria-modal": true
-				}, h("div", { style: {
+								display: "flex",
+								flexWrap: "wrap",
+								alignItems: "center",
+								gap: "5px",
+								marginTop: "var(--agy-space-2)"
+							}
+						}, entries.length === 0 ? h("span", { style: {
+							...S.muted,
+							fontSize: "var(--agy-font-xs)"
+						} }, "尚未发现该账号的模型，可点「同步」或稍后自动加载。") : entries.map((m) => h("span", {
+							key: `${m.family}:${m.id}`,
+							style: S.badgeTag,
+							title: m.id
+						}, brandIcon(FAMILY_BRAND[m.family] ?? "gemini", 11), " ", m.name)), h("span", { style: {
+							...S.muted,
+							fontSize: "var(--agy-font-xs)",
+							width: "100%"
+						} }, detail.usingFallback ? "来源：最近一次额度同步（模型端点未返回数据时的兜底展示）" : "来源：最近一次模型端点成功发现"));
+					})() : null);
+				});
+				const poolAuthPhase = status?.poolAuth?.phase ?? "idle";
+				const addFlow = accountAddFlowView(addingAccount, poolAuthPhase);
+				const flowActive = addFlow.flowActive;
+				const addAccountSection = addingAccount ? h("div", { style: S.authModal }, h("div", { style: {
 					display: "flex",
 					alignItems: "center",
 					justifyContent: "space-between",
-					padding: "14px 18px",
-					borderBottom: "1px solid var(--agy-border-card)",
-					background: "var(--agy-bg-header)",
-					color: "var(--agy-text-primary)"
-				} }, h("div", { style: {
-					display: "flex",
-					alignItems: "center",
-					gap: "8px"
-				} }, agyIcon(18), h("strong", { style: {
-					fontSize: "14.5px",
-					fontWeight: 700,
-					color: "var(--agy-text-primary)"
-				} }, "Antigravity 管理控制台")), h("button", {
-					type: "button",
-					title: "关闭 (Esc)",
-					style: {
-						background: "var(--agy-bg-btn)",
-						border: "1px solid var(--agy-border-btn)",
-						color: "var(--agy-text-btn)",
-						cursor: "pointer",
-						padding: "4px 8px",
-						borderRadius: "6px",
-						display: "inline-flex",
-						alignItems: "center"
-					},
-					onClick: () => agyModalStore.setOpen(false)
-				}, uiIcon("x", 14, "var(--agy-text-btn)"))), h("div", { style: {
-					overflowY: "auto",
-					padding: "18px",
-					flex: "1",
-					background: "var(--agy-bg-panel)"
-				} }, h(AgySettingsSection, {
-					isModal: true,
-					onClose: () => agyModalStore.setOpen(false)
-				}))));
-			};
-			/** Session Header badge in chat toolbar */
-			const AgySessionStatus = () => {
-				const [status, setStatus] = useState(statusCache);
-				useEffect(() => {
-					let alive = true;
-					let lastJson = "";
-					const tick = async () => {
-						const st = await getStatus();
-						if (!alive || !st) return;
-						const json = JSON.stringify(st);
-						if (json !== lastJson) {
-							lastJson = json;
-							setStatus(st);
-						}
-					};
-					tick();
-					const timer = setInterval(tick, 3e3);
-					return () => {
-						alive = false;
-						clearInterval(timer);
-					};
-				}, []);
-				const accounts = (status?.pool)?.accounts ?? [];
-				const hasCooldown = accounts.some((a) => Object.entries(a.cooldowns).some(([, cd]) => cd && cd.cooldownUntil > Date.now()));
-				const isAuthed = status?.auth?.phase === "ok" || accounts.length > 0;
-				const color = status === null ? "#64748b" : status.dormantReason ? "#f59e0b" : hasCooldown ? "#f59e0b" : isAuthed ? "#10b981" : "#f59e0b";
-				const badge = h("button", {
-					type: "button",
-					title: `Antigravity: ${accounts.length} accounts ready · 点击打开控制台`,
+					marginBottom: "var(--agy-space-2)"
+				} }, h("div", { style: S.panelTitle }, "添加账号"), h("button", {
 					className: "agy-btn",
-					onClick: () => agyModalStore.setOpen(true),
+					style: S.btnSm,
+					onClick: () => void handleCancelAddAccount(),
+					"aria-label": "关闭添加流程"
+				}, uiIcon("x", 12))), addFlow.showBrowserStart ? h("div", { style: {
+					display: "flex",
+					gap: "var(--agy-space-2)",
+					flexWrap: "wrap",
+					alignItems: "center"
+				} }, h("input", {
+					className: "agy-input",
 					style: {
-						background: "var(--agy-bg-header)",
-						border: "1px solid var(--agy-border-card)",
-						borderRadius: "999px",
-						cursor: "pointer",
-						padding: "3px 10px",
-						fontSize: "11.5px",
-						fontWeight: 600,
-						lineHeight: 1.5,
-						color: "var(--agy-text-primary)",
+						...S.input,
+						maxWidth: "280px"
+					},
+					value: aliasInput,
+					placeholder: "可选别名 (留空直接使用 Google 账号名称)",
+					"aria-label": "新账号别名",
+					onChange: (e) => setAliasInput(e.target.value)
+				}), h("button", {
+					className: "agy-btn",
+					style: S.btnPrimary,
+					onClick: () => void handleBeginAddAccount(),
+					disabled: isBusy
+				}, uiIcon("externalLink", 12), " 打开浏览器登录")) : null, flowActive ? h("div", { style: {
+					...S.muted,
+					lineHeight: 1.7
+				} }, poolAuthPhase === "waiting" ? "等待浏览器中完成 Google 授权，成功后将自动激活。" : "正在验证授权并激活账号，请稍候...", h("div", { style: { marginTop: "var(--agy-space-2)" } }, status?.poolAuth?.url ? h("button", {
+					className: "agy-btn",
+					style: {
+						...S.btnSm,
+						color: "var(--agy-accent)",
+						border: "1px solid var(--agy-accent-soft-border)",
+						background: "var(--agy-accent-soft-bg)"
+					},
+					onClick: () => win.open?.(status?.poolAuth?.url ?? "", "_blank")
+				}, uiIcon("externalLink", 12), " 若浏览器未打开，请点击此处手动打开 Google 登录页") : null)) : null, poolAuthPhase === "failed" ? h("div", { style: {
+					...S.noticeBanner,
+					background: "var(--agy-danger-bg)",
+					border: "1px solid var(--agy-danger-border)",
+					color: "var(--agy-danger-text)",
+					marginBottom: "var(--agy-space-2)"
+				} }, status?.poolAuth?.message || "自动激活失败，可手动粘贴授权码完成激活。") : null, h("div", { style: {
+					display: "flex",
+					gap: "var(--agy-space-2)",
+					marginTop: "var(--agy-space-2)",
+					flexWrap: "wrap"
+				} }, h("input", {
+					className: "agy-input",
+					style: S.input,
+					value: authCodeInput,
+					placeholder: "授权码 或 http://localhost:51121/oauth-callback?code=... 完整链接",
+					"aria-label": "手动授权码或回调链接",
+					onChange: (e) => setAuthCodeInput(e.target.value)
+				}), h("button", {
+					className: "agy-btn",
+					style: S.btnSmPrimary,
+					onClick: () => void handleCompleteAddAccount(),
+					disabled: isBusy
+				}, "手动激活"), h("button", {
+					className: "agy-btn",
+					style: S.btnSm,
+					onClick: () => void handleCancelAddAccount(),
+					disabled: isBusy
+				}, "取消"))) : h("div", { style: S.authModal }, h("div", { style: {
+					display: "flex",
+					gap: "var(--agy-space-2)",
+					flexWrap: "wrap",
+					alignItems: "center"
+				} }, h("input", {
+					className: "agy-input",
+					style: {
+						...S.input,
+						maxWidth: "280px"
+					},
+					value: aliasInput,
+					placeholder: "可选别名 (留空直接使用 Google 账号名称)",
+					"aria-label": "新账号别名",
+					onChange: (e) => setAliasInput(e.target.value)
+				}), h("button", {
+					className: "agy-btn",
+					style: S.btnPrimary,
+					onClick: () => void handleBeginAddAccount(),
+					disabled: isBusy
+				}, uiIcon("plus", 12), " 打开浏览器登录")));
+				const renderModelPanel = (acc, idx) => {
+					const panel = modelPanels[acc.id] ?? EMPTY_PANEL;
+					const expanded = !!expandedModels[acc.id];
+					const { payload, usingFallback } = selectPanelPayload(panel, acc);
+					const isAutoAlias = !acc.alias || /^备用.*账号/i.test(acc.alias) || /^主账号/i.test(acc.alias);
+					const displayName = acc.email ? isAutoAlias ? acc.email : acc.alias : acc.alias || acc.id;
+					const ids = payload.familyModels.flatMap((g) => g.models.map((m) => m.id));
+					const ownIdSet = new Set(ids);
+					const others = computeOtherAccountModelIds(modelPanels, accounts, acc.id);
+					const query = (modelQueries[acc.id] ?? "").trim().toLowerCase();
+					const famFilter = familyFilters[acc.id];
+					const groups = payload.familyModels.filter((g) => !famFilter || famFilter.length === 0 || famFilter.includes(g.family)).map((g) => ({
+						...g,
+						models: g.models.filter((m) => !query || m.id.toLowerCase().includes(query) || m.name.toLowerCase().includes(query))
+					})).filter((g) => g.models.length > 0);
+					const filteredCount = groups.reduce((n, g) => n + g.models.length, 0);
+					const presentFamilies = [
+						"google",
+						"anthropic",
+						"openai",
+						"unknown"
+					].filter((f) => payload.familyModels.some((g) => g.family === f && g.models.length > 0));
+					const coverageBadge = h("span", {
+						style: { ...S.badgeTag },
+						title: `该账号已发现 ${ownIdSet.size} 个模型 · 全部账号共发现 ${modelUnionTotal} 个`
+					}, uiIcon("layers", 11), ` 覆盖 ${ownIdSet.size}/${modelUnionTotal}`);
+					const headRow = h("div", { style: {
+						display: "flex",
+						alignItems: "center",
+						justifyContent: "space-between",
+						flexWrap: "wrap",
+						gap: "var(--agy-space-2)"
+					} }, h("div", { style: {
+						display: "flex",
+						alignItems: "center",
+						gap: "var(--agy-space-2)",
+						flexWrap: "wrap",
+						minWidth: 0
+					} }, h("span", { style: {
+						fontSize: "var(--agy-font-lg)",
+						fontWeight: 750,
+						color: "var(--agy-text-primary)"
+					} }, displayName), coverageBadge, typeof panel.fetchedAt === "number" ? h("span", {
+						className: "agy-num",
+						style: {
+							fontSize: "var(--agy-font-xs)",
+							color: "var(--agy-text-tertiary)"
+						}
+					}, `同步于 ${formatClock(panel.fetchedAt)}`) : null), h("div", { style: {
+						display: "flex",
+						alignItems: "center",
+						gap: "5px"
+					} }, panel.status === "loading" ? h("span", { style: {
 						display: "inline-flex",
 						alignItems: "center",
 						gap: "6px",
-						boxShadow: "var(--agy-shadow-card)"
+						fontSize: "var(--agy-font-xs)",
+						color: "var(--agy-text-tertiary)"
+					} }, h("span", {
+						className: "agy-spinner",
+						"aria-hidden": true
+					}), "正在加载模型清单…") : null, h("button", {
+						className: "agy-btn",
+						style: S.btnSm,
+						onClick: () => void refreshModelsPanel(acc),
+						disabled: panel.status === "loading",
+						"aria-label": `刷新 ${displayName} 的模型清单`,
+						title: "重新发现该账号可用的模型与额度（POST refresh）"
+					}, uiIcon("refresh", 11), " 刷新模型清单"), h("button", {
+						className: "agy-btn",
+						style: S.btnSm,
+						onClick: () => toggleExpand(acc.id),
+						"aria-expanded": expanded,
+						"aria-controls": modelsPanelDomId(acc.id)
+					}, uiIcon(expanded ? "chevronUp" : "chevronDown", 11), expanded ? " 收起" : " 展开")));
+					const statusStrips = [];
+					if (panel.status === "error" && panel.error) statusStrips.push(renderStrip("error", `模型端点不可用：${panel.error}（${panel.payload ? "下方为最近一次成功发现的模型数据，失败不会清空" : "下方为最近一次额度同步的兜底模型数据"}）`, () => void loadModelsPanel(acc.id)));
+					if (panel.refreshError) statusStrips.push(renderStrip("warn", `刷新失败：${panel.refreshError} · 已保留旧模型数据`));
+					const controls = expanded ? h("div", { style: {
+						display: "flex",
+						gap: "var(--agy-space-2)",
+						flexWrap: "wrap",
+						alignItems: "center",
+						margin: "var(--agy-space-2) 0"
+					} }, h("span", { style: {
+						...S.input,
+						display: "inline-flex",
+						alignItems: "center",
+						gap: "6px",
+						flex: "1 1 220px",
+						maxWidth: "320px",
+						padding: 0
+					} }, uiIcon("search", 12, "var(--agy-text-tertiary)"), h("input", {
+						className: "agy-input",
+						style: {
+							border: "none",
+							background: "transparent",
+							color: "var(--agy-text-primary)",
+							fontSize: "var(--agy-font-sm)",
+							padding: "7px 4px",
+							width: "100%",
+							outline: "none"
+						},
+						value: modelQueries[acc.id] ?? "",
+						placeholder: "搜索模型名 / modelId",
+						"aria-label": `在 ${displayName} 的模型清单中搜索`,
+						onChange: (e) => setModelQueries((prev) => ({
+							...prev,
+							[acc.id]: e.target.value
+						}))
+					})), h("div", {
+						style: {
+							display: "flex",
+							gap: "4px",
+							flexWrap: "wrap"
+						},
+						role: "group",
+						"aria-label": "模型厂商筛选"
+					}, h("button", {
+						className: "agy-chip",
+						style: {
+							...S.badgeTag,
+							cursor: "pointer",
+							border: "1px solid var(--agy-badge-tag-border)"
+						},
+						"aria-pressed": !famFilter || famFilter.length === 0,
+						onClick: () => setFamilyFilters((prev) => ({
+							...prev,
+							[acc.id]: []
+						}))
+					}, "全部"), presentFamilies.map((f) => h("button", {
+						key: f,
+						className: "agy-chip",
+						style: {
+							...S.badgeTag,
+							cursor: "pointer",
+							border: "1px solid var(--agy-badge-tag-border)"
+						},
+						"aria-pressed": !!famFilter && famFilter.includes(f),
+						onClick: () => setFamilyFilters((prev) => ({
+							...prev,
+							[acc.id]: famFilter && famFilter.includes(f) ? famFilter.filter((x) => x !== f) : [...famFilter ?? [], f]
+						}))
+					}, FAMILY_LABEL[f] ?? f)))) : null;
+					const body = !expanded ? null : panel.status === "loading" && !panel.payload ? h("div", {
+						id: modelsPanelDomId(acc.id),
+						role: "region",
+						"aria-label": `${displayName} 的模型清单`,
+						style: { paddingTop: "var(--agy-space-1)" }
+					}, renderSkeletonRow(70, 16), renderSkeletonRow(85), renderSkeletonRow(55), h("span", { className: "agy-sr-only" }, "正在加载模型清单")) : ownIdSet.size === 0 && !query ? h("div", {
+						id: modelsPanelDomId(acc.id),
+						role: "region",
+						"aria-label": `${displayName} 的模型清单`
+					}, renderEmptyState("尚未发现该账号的模型清单。", h("button", {
+						className: "agy-btn",
+						style: S.btnSmPrimary,
+						onClick: () => void refreshModelsPanel(acc),
+						disabled: panel.status === "loading"
+					}, uiIcon("refresh", 11), " 点击刷新发现模型"))) : filteredCount === 0 ? h("div", {
+						id: modelsPanelDomId(acc.id),
+						role: "region",
+						"aria-label": `${displayName} 的模型清单`
+					}, renderEmptyState("没有匹配当前搜索 / 筛选的模型。", h("button", {
+						className: "agy-btn",
+						style: S.btnSm,
+						onClick: () => {
+							setModelQueries((prev) => ({
+								...prev,
+								[acc.id]: ""
+							}));
+							setFamilyFilters((prev) => ({
+								...prev,
+								[acc.id]: []
+							}));
+						}
+					}, "清空搜索与筛选"))) : h("div", {
+						id: modelsPanelDomId(acc.id),
+						role: "region",
+						"aria-label": `${displayName} 的模型清单`
+					}, usingFallback && ids.length > 0 ? h("div", { style: {
+						fontSize: "var(--agy-font-xs)",
+						color: "var(--agy-text-tertiary)",
+						marginBottom: "var(--agy-space-2)"
+					} }, "来源：最近一次额度同步（模型端点未返回数据时的兜底展示）") : null, h("div", { style: {
+						fontSize: "var(--agy-font-xs)",
+						color: "var(--agy-text-tertiary)",
+						marginBottom: "var(--agy-space-2)"
+					} }, `${filteredCount} / ${ownIdSet.size} 个模型 · 独有 ${ids.filter((id) => !others.has(id)).length} · 共用 ${ids.filter((id) => others.has(id)).length}`), groups.map((g) => h("div", {
+						key: g.family,
+						style: { marginBottom: "var(--agy-space-3)" }
+					}, h("div", { style: {
+						display: "flex",
+						alignItems: "center",
+						gap: "6px",
+						marginBottom: "6px"
+					} }, brandIcon(FAMILY_BRAND[g.family] ?? "gemini", 12), h("span", { style: S.panelCaption }, FAMILY_LABEL[g.family] ?? g.family)), g.models.map((m, rowIdx) => {
+						const pct = typeof m.remainingFraction === "number" ? Math.max(0, Math.min(100, Math.round(m.remainingFraction * 100))) : -1;
+						const isExclusive = !others.has(m.id);
+						return h("div", {
+							key: `${g.family}:${m.id}`,
+							className: "agy-model-row",
+							style: {
+								"--i": Math.min(rowIdx, 12),
+								display: "flex",
+								alignItems: "center",
+								gap: "var(--agy-space-2)",
+								padding: "5px 0",
+								flexWrap: "wrap"
+							}
+						}, h("span", {
+							title: m.id,
+							style: {
+								flex: "1 1 240px",
+								minWidth: "160px",
+								fontSize: "var(--agy-font-sm)",
+								color: "var(--agy-text-primary)",
+								overflow: "hidden",
+								textOverflow: "ellipsis",
+								whiteSpace: "nowrap"
+							}
+						}, m.name), isExclusive ? h("span", {
+							style: {
+								...S.badgePrimary,
+								opacity: .9
+							},
+							title: "其它账号目前尚未发现此模型"
+						}, "本账号独有") : h("span", {
+							style: S.badgeTag,
+							title: "账号池中至少一个其它账号也支持此模型"
+						}, "其它账号也支持"), h("div", {
+							style: {
+								...S.progressBarBg,
+								maxWidth: "180px",
+								minWidth: "90px"
+							},
+							"aria-hidden": true
+						}, h("div", {
+							className: "agy-progress-fill",
+							style: {
+								width: `${pct < 0 ? 0 : pct}%`,
+								height: "100%",
+								borderRadius: "var(--agy-radius-pill)",
+								background: quotaGradientFor(pct, false)
+							}
+						})), h("span", {
+							className: "agy-num",
+							style: {
+								fontSize: "var(--agy-font-xs)",
+								fontWeight: 700,
+								minWidth: "38px",
+								textAlign: "right",
+								color: quotaTextFor(pct, false)
+							}
+						}, pct < 0 ? "—" : `${pct}%`), h(ResetCountdown, {
+							resetTime: m.resetTime,
+							emptyPrefix: "↻ ",
+							emptyText: "未提供",
+							className: "agy-num",
+							style: {
+								fontSize: "var(--agy-font-xs)",
+								color: "var(--agy-text-tertiary)",
+								minWidth: "132px",
+								padding: "2px 6px",
+								borderRadius: "var(--agy-radius-sm)"
+							}
+						}));
+					}))));
+					return h("div", {
+						key: acc.id,
+						className: "agy-card-hover agy-rise",
+						style: {
+							...S.card,
+							"--i": Math.min(idx, 8)
+						}
+					}, headRow, statusStrips.length > 0 ? h("div", null, ...statusStrips) : null, controls, body);
+				};
+				const renderModelsSection = () => {
+					if (accounts.length === 0) return renderEmptyState("还没有账号。添加账号后，这里会展示每个账号支持的模型、剩余额度与跨账号覆盖差异。", h("button", {
+						className: "agy-btn",
+						style: S.btnPrimary,
+						onClick: () => setActiveSection("accounts")
+					}, uiIcon("plus", 12), " 前往添加账号"));
+					return h("div", null, h("div", { style: {
+						display: "flex",
+						alignItems: "center",
+						gap: "var(--agy-space-2)",
+						marginBottom: "var(--agy-space-2)",
+						flexWrap: "wrap"
+					} }, h("span", { style: S.panelCaption }, "账号 × 模型覆盖"), h("span", {
+						className: "agy-num",
+						style: {
+							fontSize: "var(--agy-font-xs)",
+							color: "var(--agy-text-tertiary)"
+						}
+					}, `已发现模型并集 ${modelUnionTotal} 个 · 灰度差异以并集为基准`)), ...accounts.map((acc, idx) => renderModelPanel(acc, idx)));
+				};
+				const renderAuditDrawer = () => {
+					if (!showAuditDrawer) return null;
+					const o = statsOverview;
+					const totalRequests = numOf(o, "totalRequests");
+					const totalSuccess = numOf(o, "totalSuccess");
+					const totalFailed = numOf(o, "totalFailed");
+					const cacheHitRate = numOf(o, "cacheHitRate");
+					const cacheColor = cacheHitRate === null ? "var(--agy-text-primary)" : cacheHitRate > .3 ? "var(--agy-strong-ok)" : cacheHitRate >= .1 ? "var(--agy-strong-warn)" : "var(--agy-strong-neutral)";
+					const summaryCards = o ? h("div", { style: {
+						display: "flex",
+						gap: "var(--agy-space-2)",
+						flexWrap: "wrap",
+						padding: "var(--agy-space-3) var(--agy-space-4) 0"
+					} }, renderStatCard("请求总数", totalRequests === null ? "—" : formatNumber(totalRequests), `成功 ${totalSuccess === null ? "—" : formatNumber(totalSuccess)} · 失败 ${totalFailed === null ? "—" : formatNumber(totalFailed)}`), renderStatCard("缓存命中率 (Cache Hit %)", cacheHitRate === null ? "—" : `${(cacheHitRate * 100).toFixed(1)}%`, `命中 Token ${numOf(o, "totalCachedTokens") === null ? "—" : formatCompactTokens(numOf(o, "totalCachedTokens") ?? 0)}`, cacheColor), renderStatCard("Token 汇总 (P / C / O)", formatCompactTokens(numOf(o, "totalTokens") ?? 0), `P ${formatCompactTokens(numOf(o, "totalPromptTokens") ?? 0)} / C ${formatCompactTokens(numOf(o, "totalCachedTokens") ?? 0)} / O ${formatCompactTokens(numOf(o, "totalOutputTokens") ?? 0)}`), renderStatCard("平均耗时 / TTFT", numOf(o, "avgLatencyMs") === null ? "—" : `${Math.round(numOf(o, "avgLatencyMs") ?? 0)}ms`, `TTFT ${numOf(o, "avgTtftMs") === null ? "—" : `${Math.round(numOf(o, "avgTtftMs") ?? 0)}ms`} · P90 ${numOf(o, "p90LatencyMs") === null ? "—" : `${Math.round(numOf(o, "p90LatencyMs") ?? 0)}ms`}`)) : h("div", { style: {
+						padding: "var(--agy-space-3) var(--agy-space-4) 0",
+						display: "flex",
+						gap: "var(--agy-space-2)",
+						flexWrap: "wrap"
+					} }, [
+						0,
+						1,
+						2,
+						3
+					].map((i) => h("div", {
+						key: i,
+						style: { flex: "1 1 150px" }
+					}, renderSkeletonRow(60, 12), renderSkeletonRow(90, 22))));
+					const requestsView = auditLoading && auditRequests.length === 0 ? h("div", { style: { padding: "0 var(--agy-space-4)" } }, renderSkeletonRow(95, 20), renderSkeletonRow(95, 20), renderSkeletonRow(95, 20)) : auditError ? renderStrip("error", auditError, () => void fetchAuditRequests(20, auditPage * 20)) : auditRequests.length === 0 ? h("div", { style: { padding: "var(--agy-space-4)" } }, renderEmptyState("暂无请求审计记录。")) : h("table", { className: "agy-table" }, h("thead", null, h("tr", null, h("th", null, "时间"), h("th", null, "模型"), h("th", null, "账号"), h("th", null, "Token (P / C / O)"), h("th", null, "耗时 / TTFT"), h("th", null, "状态"))), h("tbody", null, auditRequests.map((r, i) => {
+						const account = accounts.find((a) => a.id === r.accountId);
+						const statusOk = typeof r.status === "string" && !/fail|error|4\d\d|5\d\d/i.test(r.status);
+						return h("tr", { key: r.requestId ?? i }, h("td", { className: "agy-num" }, r.timestamp ?? "—"), h("td", null, r.model ?? "—"), h("td", null, account ? maskEmail(account.email) || account.alias : r.accountId ?? "未知"), h("td", { className: "agy-num" }, `${formatCompactTokens(r.promptTokens ?? 0)} / ${formatCompactTokens(r.cachedTokens ?? 0)} / ${formatCompactTokens(r.outputTokens ?? 0)}`), h("td", { className: "agy-num" }, `${r.latencyMs === void 0 ? "—" : `${Math.round(r.latencyMs)}ms`} · ${r.ttftMs === void 0 ? "—" : `${Math.round(r.ttftMs)}ms`}`), h("td", { style: { color: statusOk ? "var(--agy-strong-ok)" : "var(--agy-strong-danger)" } }, r.status ?? "—"));
+					})));
+					const sessionsView = auditSessionsLoading && auditSessions.length === 0 ? h("div", { style: { padding: "0 var(--agy-space-4)" } }, renderSkeletonRow(95, 20), renderSkeletonRow(95, 20), renderSkeletonRow(95, 20)) : auditError ? renderStrip("error", auditError, () => void fetchAuditSessions(20, auditSessionsPage * 20)) : auditSessions.length === 0 ? h("div", { style: { padding: "var(--agy-space-4)" } }, renderEmptyState("暂无会话审计记录。")) : h("table", { className: "agy-table" }, h("thead", null, h("tr", null, h("th", null, "更新时间"), h("th", null, "会话 ID"), h("th", null, "账号"), h("th", null, "请求数 (总数 / 成功 / 失败)"), h("th", null, "Token (Prompt / 命中缓存 / 命中率)"), h("th", null, "状态/详情"))), h("tbody", null, auditSessions.map((s, i) => {
+						const account = accounts.find((a) => a.id === s.accountId);
+						const shortId = s.sessionId ? `${s.sessionId.slice(0, 8)}…${s.sessionId.slice(-4)}` : "—";
+						return h("tr", { key: s.sessionId ?? i }, h("td", { className: "agy-num" }, s.updatedAt ?? "—"), h("td", { title: s.sessionId }, shortId), h("td", null, account ? maskEmail(account.email) || account.alias : s.accountId ?? "未知"), h("td", { className: "agy-num" }, `${formatNumber(s.totalRequests ?? 0)} / ${formatNumber(s.totalSuccess ?? 0)} / ${formatNumber(s.totalFailed ?? 0)}`), h("td", { className: "agy-num" }, `${formatCompactTokens(s.totalPromptTokens ?? 0)} / ${formatCompactTokens(s.totalCachedTokens ?? 0)} / ${typeof s.cacheHitRate === "number" ? `${(s.cacheHitRate * 100).toFixed(1)}%` : "—"}`), h("td", {
+							title: s.lastError ?? void 0,
+							style: { color: (s.totalFailed ?? 0) > 0 ? "var(--agy-strong-warn)" : "var(--agy-strong-ok)" }
+						}, s.status ?? s.lastError ?? "—"));
+					})));
+					const totalForTab = auditTab === "requests" ? auditTotal : auditSessionsTotal;
+					const pageForTab = auditTab === "requests" ? auditPage : auditSessionsPage;
+					const setPageForTab = (next) => {
+						if (auditTab === "requests") setAuditPage(next);
+						else setAuditSessionsPage(next);
+					};
+					const canPrev = pageForTab > 0;
+					const canNext = (pageForTab + 1) * 20 < totalForTab;
+					return portalToBody(h("div", {
+						className: "agy-drawer-backdrop",
+						onClick: (e) => {
+							if (e.target === e.currentTarget) setShowAuditDrawer(false);
+						}
+					}, h("div", {
+						className: "agy-drawer",
+						role: "dialog",
+						"aria-modal": true,
+						"aria-label": "请求审计与会话统计"
+					}, h("div", { style: {
+						display: "flex",
+						alignItems: "center",
+						justifyContent: "space-between",
+						gap: "var(--agy-space-2)",
+						padding: "var(--agy-space-3) var(--agy-space-4)",
+						borderBottom: "1px solid var(--agy-drawer-border)"
+					} }, h("div", { style: S.panelTitle }, "请求审计与会话统计 (Audit Log)"), h("div", { style: {
+						display: "flex",
+						gap: "5px"
+					} }, h("button", {
+						className: "agy-btn",
+						style: {
+							...S.btnSm,
+							background: "var(--agy-drawer-btn-bg)",
+							color: "var(--agy-drawer-btn-text)",
+							border: "1px solid var(--agy-drawer-btn-border)"
+						},
+						onClick: () => {
+							if (auditTab === "requests") fetchAuditRequests(20, auditPage * 20);
+							else fetchAuditSessions(20, auditSessionsPage * 20);
+						},
+						"aria-label": "刷新审计数据"
+					}, uiIcon("refresh", 12), " 刷新"), h("button", {
+						className: "agy-btn",
+						style: {
+							...S.btnSm,
+							background: "var(--agy-drawer-btn-bg)",
+							color: "var(--agy-drawer-btn-text)",
+							border: "1px solid var(--agy-drawer-btn-border)"
+						},
+						onClick: () => setShowAuditDrawer(false),
+						"aria-label": "关闭审计抽屉"
+					}, uiIcon("x", 12)))), summaryCards, h("div", { style: {
+						padding: "var(--agy-space-3) var(--agy-space-4) 0",
+						display: "flex",
+						gap: "var(--agy-space-2)",
+						alignItems: "center",
+						flexWrap: "wrap"
+					} }, h("div", {
+						style: S.segGroup,
+						role: "tablist",
+						"aria-label": "审计视图切换"
+					}, h("button", {
+						role: "tab",
+						"aria-selected": auditTab === "requests",
+						style: auditTab === "requests" ? S.segBtnActive : S.segBtn,
+						onClick: () => setAuditTab("requests")
+					}, "按请求明细 (Requests)"), h("button", {
+						role: "tab",
+						"aria-selected": auditTab === "sessions",
+						style: auditTab === "sessions" ? S.segBtnActive : S.segBtn,
+						onClick: () => setAuditTab("sessions")
+					}, "按会话统计 (Sessions)")), auditLoading || auditSessionsLoading ? h("span", { style: {
+						display: "inline-flex",
+						alignItems: "center",
+						gap: "6px",
+						fontSize: "var(--agy-font-xs)",
+						color: "var(--agy-table-faint)"
+					} }, h("span", {
+						className: "agy-spinner",
+						"aria-hidden": true
+					}), "加载中…") : null), h("div", { style: {
+						flex: 1,
+						overflow: "auto",
+						padding: "var(--agy-space-2) 0"
+					} }, auditTab === "requests" ? requestsView : sessionsView), h("div", { style: {
+						display: "flex",
+						alignItems: "center",
+						justifyContent: "flex-end",
+						gap: "var(--agy-space-2)",
+						padding: "var(--agy-space-3) var(--agy-space-4)",
+						borderTop: "1px solid var(--agy-drawer-border)"
+					} }, h("span", {
+						className: "agy-num",
+						style: {
+							fontSize: "var(--agy-font-xs)",
+							color: "var(--agy-table-faint)",
+							marginRight: "auto"
+						}
+					}, `共 ${formatNumber(totalForTab)} 条 · 每页 20 条`), h("button", {
+						className: "agy-btn",
+						style: {
+							...S.btnSm,
+							background: "var(--agy-drawer-btn-bg)",
+							color: "var(--agy-drawer-btn-text)",
+							border: "1px solid var(--agy-drawer-btn-border)"
+						},
+						disabled: !canPrev,
+						onClick: () => setPageForTab(pageForTab - 1)
+					}, "上一页"), h("span", {
+						className: "agy-num",
+						style: {
+							fontSize: "var(--agy-font-xs)",
+							color: "var(--agy-table-soft)"
+						}
+					}, `第 ${pageForTab + 1} 页`), h("button", {
+						className: "agy-btn",
+						style: {
+							...S.btnSm,
+							background: "var(--agy-drawer-btn-bg)",
+							color: "var(--agy-drawer-btn-text)",
+							border: "1px solid var(--agy-drawer-btn-border)"
+						},
+						disabled: !canNext,
+						onClick: () => setPageForTab(pageForTab + 1)
+					}, "下一页")))));
+				};
+				const renderOverviewSection = () => {
+					if (accounts.length === 0 && !status) return renderEmptyState("插件状态还在加载中。", void 0);
+					if (accounts.length === 0) return renderEmptyState("账号池为空：还没有可调度的账号。添加账号后，这里会显示额度快照与运行状态。", h("button", {
+						className: "agy-btn",
+						style: S.btnPrimary,
+						onClick: () => setActiveSection("accounts")
+					}, uiIcon("plus", 12), " 添加账号"));
+					const readyAccounts = accounts.filter((a) => a.enabled && !a.authRequired).length;
+					const lastRun = status?.lastRun;
+					const dormant = status?.dormantReason;
+					return h("div", null, dormant ? renderStrip("warn", `插件处于休眠状态：${dormant}`) : null, !pollOk ? renderStrip("warn", `轮询中断：页面展示的是 ${formatClock(lastUpdatedAt)} 拉取的最后一次数据`) : null, h("div", { style: {
+						display: "flex",
+						gap: "var(--agy-space-2)",
+						flexWrap: "wrap",
+						marginBottom: "var(--agy-space-3)"
+					} }, renderStatCard("可调度账号", `${readyAccounts} / ${accounts.length}`, `主用：${status?.pool?.primaryAccountId ?? "自动"}`), renderStatCard("授权状态", isAuthed ? "正常" : "待认证", `auth: ${status?.auth?.phase ?? "—"} · poolAuth: ${poolAuthPhase}`), renderStatCard("默认模型", status?.defaultModel ?? "—", `Effort：${status?.defaultEffort ?? "—"}`), renderStatCard("上游目录模型数", formatNumber(status?.catalog?.count ?? 0), `来源：${status?.catalog?.source ?? "—"}`), renderStatCard("最近一次请求", lastRun?.ok === false ? `失败 ${lastRun?.code ?? ""}` : "成功", lastRun?.model ? `${lastRun.model} · ${lastRun.durationMs ?? "—"}ms` : "—")), h("div", { style: S.panelCaption }, "额度快照"), ...accounts.map((acc, idx) => h("div", {
+						key: acc.id,
+						className: "agy-card-hover agy-rise",
+						style: {
+							...S.card,
+							marginBottom: "var(--agy-space-2)",
+							"--i": Math.min(idx, 8)
+						}
+					}, h("div", { style: {
+						display: "flex",
+						alignItems: "center",
+						justifyContent: "space-between",
+						gap: "var(--agy-space-2)",
+						flexWrap: "wrap"
+					} }, h("span", { style: {
+						fontWeight: 700,
+						color: "var(--agy-text-primary)"
+					} }, acc.email ? acc.alias && !/^备用.*账号/i.test(acc.alias) && !/^主账号/i.test(acc.alias) ? acc.alias : maskEmail(acc.email) : acc.alias || acc.id), h("button", {
+						className: "agy-btn",
+						style: S.btnSm,
+						onClick: () => {
+							setActiveSection("models");
+							ensureModelsLoaded(acc.id);
+						}
+					}, uiIcon("layers", 11), " 查看模型")), h("div", { style: {
+						display: "flex",
+						gap: "var(--agy-space-4)",
+						flexWrap: "wrap",
+						marginTop: "var(--agy-space-1)"
+					} }, renderQuotaBar("Gemini", "google", acc), renderQuotaBar("Claude", "anthropic", acc), renderQuotaBar("GPT-OSS", "openai", acc)))));
+				};
+				const renderUsageSection = () => {
+					return h("div", null, statsError ? renderStrip("error", statsError, () => void fetchStatsOverview()) : null, h("div", { style: {
+						display: "flex",
+						gap: "var(--agy-space-2)",
+						flexWrap: "wrap",
+						marginBottom: "var(--agy-space-3)"
+					} }, statsOverview ? renderStatCard("请求总数", formatNumber(numOf(statsOverview, "totalRequests") ?? 0), `成功 ${formatNumber(numOf(statsOverview, "totalSuccess") ?? 0)} · 失败 ${formatNumber(numOf(statsOverview, "totalFailed") ?? 0)}`) : h("div", { style: {
+						...S.statBox,
+						flex: "1 1 150px"
+					} }, renderSkeletonRow(60, 12), renderSkeletonRow(90, 22)), statsOverview ? renderStatCard("Token 汇总", formatCompactTokens(numOf(statsOverview, "totalTokens") ?? 0), `Prompt ${formatCompactTokens(numOf(statsOverview, "totalPromptTokens") ?? 0)} · 输出 ${formatCompactTokens(numOf(statsOverview, "totalOutputTokens") ?? 0)}`) : h("div", { style: {
+						...S.statBox,
+						flex: "1 1 150px"
+					} }, renderSkeletonRow(60, 12), renderSkeletonRow(90, 22)), statsOverview ? renderStatCard("缓存命中率", `${((numOf(statsOverview, "cacheHitRate") ?? 0) * 100).toFixed(1)}%`, `命中 Token ${formatCompactTokens(numOf(statsOverview, "totalCachedTokens") ?? 0)}`, (numOf(statsOverview, "cacheHitRate") ?? 0) > .3 ? "var(--agy-strong-ok)" : (numOf(statsOverview, "cacheHitRate") ?? 0) >= .1 ? "var(--agy-strong-warn)" : "var(--agy-strong-neutral)") : h("div", { style: {
+						...S.statBox,
+						flex: "1 1 150px"
+					} }, renderSkeletonRow(60, 12), renderSkeletonRow(90, 22)), statsOverview ? renderStatCard("平均耗时 / TTFT", `${Math.round(numOf(statsOverview, "avgLatencyMs") ?? 0)}ms`, `TTFT ${Math.round(numOf(statsOverview, "avgTtftMs") ?? 0)}ms · P90 ${Math.round(numOf(statsOverview, "p90LatencyMs") ?? 0)}ms`) : h("div", { style: {
+						...S.statBox,
+						flex: "1 1 150px"
+					} }, renderSkeletonRow(60, 12), renderSkeletonRow(90, 22))), h("div", { style: {
+						display: "flex",
+						gap: "var(--agy-space-2)",
+						flexWrap: "wrap"
+					} }, h("button", {
+						className: "agy-btn",
+						style: S.btnPrimary,
+						onClick: () => setShowAuditDrawer(true)
+					}, uiIcon("activity", 12), " 打开请求明细与会话统计"), h("button", {
+						className: "agy-btn",
+						style: S.btnSm,
+						onClick: () => void fetchStatsOverview(),
+						"aria-label": "重新加载用量统计"
+					}, uiIcon("refresh", 12), " 重新加载")));
+				};
+				const renderDiagRow = (label, value, mono = true) => h("div", { style: {
+					display: "flex",
+					gap: "var(--agy-space-3)",
+					padding: "8px 0",
+					borderBottom: "1px solid var(--agy-border-divider)",
+					flexWrap: "wrap"
+				} }, h("span", { style: {
+					width: "170px",
+					color: "var(--agy-text-tertiary)",
+					fontSize: "var(--agy-font-sm)",
+					flexShrink: 0
+				} }, label), h("span", {
+					className: mono ? "agy-num" : void 0,
+					style: {
+						color: "var(--agy-text-primary)",
+						fontSize: "var(--agy-font-sm)",
+						wordBreak: "break-all",
+						flex: 1
 					}
-				}, h("span", { style: {
-					display: "inline-block",
-					width: "7px",
-					height: "7px",
-					borderRadius: "50%",
-					background: color
-				} }), `AGY (${accounts.length})`);
-				return h("div", { style: { display: "inline-block" } }, badge, portalToBody(h(AgyModalDialog, null)));
+				}, value));
+				const renderDiagnosticsSection = () => {
+					const catalog = status?.catalog ?? {};
+					const lastRun = status?.lastRun ?? {};
+					const endpointErrors = Array.isArray(catalog.endpointErrors) ? catalog.endpointErrors.length : 0;
+					return h("div", null, !pollOk ? renderStrip("warn", `轮询中断：以下为 ${formatClock(lastUpdatedAt)} 的最后一次成功拉取`) : null, h("div", {
+						className: "agy-rise",
+						style: S.card
+					}, renderDiagRow("插件状态", status ? status.enabled === false ? "已停用" : "运行中" : "未加载", false), renderDiagRow("休眠原因", status?.dormantReason ?? "无", false), renderDiagRow("版本 / 构建校验", status?.distSha256 ? `${String(status.distSha256).slice(0, 16)}…` : status?.version ?? "未上报"), renderDiagRow("上游目录", `${catalog.source ?? "—"} · ${formatNumber(catalog.count ?? 0)} 个模型${endpointErrors > 0 ? ` · ${endpointErrors} 条端点错误` : ""}`, false), renderDiagRow("目录最近错误", catalog.lastError ?? "无", false), renderDiagRow("最近一次运行", lastRun.ok === void 0 ? "无记录" : `${lastRun.ok ? "成功" : `失败 (code ${lastRun.code ?? "—"})`} · ${lastRun.durationMs ?? "—"}ms · ${lastRun.model ?? "—"}`, false), renderDiagRow("授权阶段", `auth: ${status?.auth?.phase ?? "—"} · poolAuth: ${poolAuthPhase}`, false), renderDiagRow("工作区", status?.workspaceRoot ?? "未上报"), renderDiagRow("数据通道", `${base || "同源"}${API_PREFIX} · 3s 状态轮询 / 10s 统计轮询`)), h("div", { style: {
+						display: "flex",
+						gap: "var(--agy-space-2)"
+					} }, h("button", {
+						className: "agy-btn",
+						style: S.btnSmPrimary,
+						onClick: () => void refresh(),
+						disabled: isBusy
+					}, uiIcon("refresh", 12), " 立即刷新状态")));
+				};
+				const renderConfigRow = (key, label, hint) => {
+					const draft = cfgDrafts[key] ?? "";
+					return h("div", {
+						key,
+						style: {
+							display: "flex",
+							gap: "var(--agy-space-2)",
+							alignItems: "center",
+							padding: "10px 0",
+							borderBottom: "1px solid var(--agy-border-divider)",
+							flexWrap: "wrap"
+						}
+					}, h("div", { style: {
+						width: "210px",
+						flexShrink: 0
+					} }, h("div", { style: {
+						fontSize: "var(--agy-font-sm)",
+						fontWeight: 700,
+						color: "var(--agy-text-primary)"
+					} }, label), h("div", { style: {
+						fontSize: "var(--agy-font-xs)",
+						color: "var(--agy-text-tertiary)",
+						marginTop: "2px"
+					} }, hint)), h("input", {
+						className: "agy-input",
+						style: {
+							...S.input,
+							maxWidth: "380px"
+						},
+						value: draft,
+						placeholder: key === "baseUrl" ? "留空则不修改（后端不回显该值）" : hint,
+						"aria-label": label,
+						onChange: (e) => setCfgDrafts((prev) => ({
+							...prev,
+							[key]: e.target.value
+						}))
+					}), h("button", {
+						className: "agy-btn",
+						style: S.btnSmPrimary,
+						disabled: isBusy || key !== "baseUrl" && draft.trim() === "",
+						onClick: () => void setCfg(key, draft.trim())
+					}, "保存"));
+				};
+				const renderConfigSection = () => {
+					return h("div", null, h("div", {
+						className: "agy-rise",
+						style: S.card
+					}, h("div", {
+						style: S.panelCaption,
+						marginBottom: "var(--agy-space-1)"
+					}, "可写配置（POST /config）"), renderConfigRow("defaultModel", "默认模型 (defaultModel)", status?.defaultModel ?? "当前值将在状态轮询后回填"), renderConfigRow("defaultEffort", "默认 Effort (defaultEffort)", status?.defaultEffort ?? "例如 low / medium / high"), renderConfigRow("baseUrl", "上游地址 (baseUrl)", "高级：仅在你明确需要切换上游时填写"), h("div", { style: {
+						display: "flex",
+						gap: "var(--agy-space-2)",
+						alignItems: "center",
+						padding: "10px 0",
+						flexWrap: "wrap"
+					} }, h("div", { style: {
+						width: "210px",
+						flexShrink: 0
+					} }, h("div", { style: {
+						fontSize: "var(--agy-font-sm)",
+						fontWeight: 700,
+						color: "var(--agy-text-primary)"
+					} }, "Ask 工具注册 (askTool)"), h("div", { style: {
+						fontSize: "var(--agy-font-xs)",
+						color: "var(--agy-text-tertiary)",
+						marginTop: "2px"
+					} }, "在 DSH 中注册 agy ask 工具开关")), h("button", {
+						className: "agy-btn",
+						role: "switch",
+						"aria-checked": status?.askTool === true,
+						"aria-label": "切换 Ask 工具注册",
+						style: {
+							...S.btnSm,
+							background: status?.askTool === true ? "var(--agy-accent)" : "var(--agy-bg-btn)",
+							color: status?.askTool === true ? "var(--agy-on-accent)" : "var(--agy-text-btn)",
+							border: `1px solid ${status?.askTool === true ? "var(--agy-border-btn-primary)" : "var(--agy-border-btn)"}`
+						},
+						disabled: isBusy,
+						onClick: () => void setCfg("askTool", !(status?.askTool === true))
+					}, status?.askTool === true ? "已注册" : "未注册"))));
+				};
+				const SECTIONS = [
+					{
+						key: "overview",
+						label: "总览"
+					},
+					{
+						key: "accounts",
+						label: "账号"
+					},
+					{
+						key: "models",
+						label: "模型"
+					},
+					{
+						key: "usage",
+						label: "用量统计"
+					},
+					{
+						key: "diagnostics",
+						label: "诊断"
+					},
+					{
+						key: "config",
+						label: "配置"
+					}
+				];
+				const onNavKeyDown = (ev) => {
+					const idx = SECTIONS.findIndex((s) => s.key === activeSection);
+					let next = -1;
+					if (ev.key === "ArrowRight") next = (idx + 1) % SECTIONS.length;
+					else if (ev.key === "ArrowLeft") next = (idx - 1 + SECTIONS.length) % SECTIONS.length;
+					else if (ev.key === "Home") next = 0;
+					else if (ev.key === "End") next = SECTIONS.length - 1;
+					if (next < 0) return;
+					ev.preventDefault?.();
+					const key = SECTIONS[next].key;
+					setActiveSection(key);
+					tabRefs.current[key]?.focus?.();
+				};
+				const navBar = h("nav", {
+					style: S.navBar,
+					role: "tablist",
+					"aria-label": "Antigravity 设置分区",
+					onKeyDown: onNavKeyDown
+				}, ...SECTIONS.map((s) => h("button", {
+					key: s.key,
+					ref: (node) => {
+						tabRefs.current[s.key] = node;
+					},
+					className: "agy-tab",
+					role: "tab",
+					id: `agy-tab-${s.key}`,
+					"aria-selected": activeSection === s.key,
+					"aria-controls": `agy-panel-${s.key}`,
+					tabIndex: activeSection === s.key ? 0 : -1,
+					style: S.tab,
+					onClick: () => setActiveSection(s.key)
+				}, s.label)));
+				const sectionBody = () => {
+					switch (activeSection) {
+						case "overview": return renderOverviewSection();
+						case "accounts": return h("div", null, addAccountSection, ...renderedAccountCards);
+						case "models": return renderModelsSection();
+						case "usage": return renderUsageSection();
+						case "diagnostics": return renderDiagnosticsSection();
+						case "config": return renderConfigSection();
+					}
+				};
+				if (status === null) return h("div", {
+					className: "agy-root",
+					style: S.container
+				}, h("style", null, THEME_CSS), h("div", { style: S.headerCard }, h("div", { style: {
+					display: "flex",
+					alignItems: "center",
+					gap: "var(--agy-space-2)"
+				} }, agyIcon(18), h("span", { style: S.panelTitle }, "Antigravity")), h("span", { style: {
+					display: "inline-flex",
+					alignItems: "center",
+					gap: "6px",
+					...S.muted
+				} }, h("span", {
+					className: "agy-spinner",
+					"aria-hidden": true
+				}), "正在加载状态")), renderToastBanner(), navBar, renderSkeletonCard(), renderSkeletonCard());
+				const headerCard = h("div", { style: S.headerCard }, h("div", { style: {
+					display: "flex",
+					alignItems: "center",
+					gap: "var(--agy-space-2)",
+					flexWrap: "wrap",
+					minWidth: 0
+				} }, agyIcon(18), h("span", { style: S.panelTitle }, "Antigravity"), h("span", { style: isAuthed ? S.badgeReady : S.badgeUnready }, isAuthed ? "就绪" : "待认证"), h("span", {
+					className: "agy-num",
+					title: pollOk ? "状态轮询正常（3 秒间隔）" : "轮询中断，展示的是最后一次成功拉取的数据",
+					style: {
+						fontSize: "var(--agy-font-xs)",
+						padding: "2px 8px",
+						borderRadius: "var(--agy-radius-pill)",
+						background: pollOk ? "var(--agy-neutral-bg)" : "var(--agy-warn-bg)",
+						border: `1px solid ${pollOk ? "var(--agy-neutral-border)" : "var(--agy-warn-border)"}`,
+						color: pollOk ? "var(--agy-neutral-text)" : "var(--agy-warn-text)"
+					}
+				}, pollOk ? `更新于 ${formatClock(lastUpdatedAt)}` : `轮询中断 · 上次成功 ${formatClock(lastUpdatedAt)}`)), h("div", { style: {
+					display: "flex",
+					gap: "5px",
+					flexWrap: "wrap"
+				} }, h("button", {
+					className: "agy-btn",
+					style: S.btnSm,
+					onClick: () => setShowAuditDrawer(true)
+				}, uiIcon("activity", 12), " 审计明细"), h("button", {
+					className: "agy-btn",
+					style: S.btnSm,
+					onClick: () => void refreshQuota(),
+					disabled: isBusy
+				}, uiIcon("zap", 12), " 刷新额度"), h("button", {
+					className: "agy-btn",
+					style: S.btnSmPrimary,
+					onClick: () => {
+						setActiveSection("accounts");
+						setAddingAccount(true);
+					},
+					disabled: isBusy
+				}, uiIcon("plus", 12), " 添加账号"), h("button", {
+					className: "agy-btn",
+					style: S.btnSm,
+					onClick: () => void refresh(),
+					disabled: isBusy,
+					"aria-label": "刷新插件状态"
+				}, uiIcon("refresh", 12))));
+				return h("div", {
+					className: "agy-root",
+					style: S.container
+				}, h("style", null, THEME_CSS), headerCard, renderToastBanner(), navBar, h("div", {
+					key: activeSection,
+					id: `agy-panel-${activeSection}`,
+					role: "tabpanel",
+					"aria-labelledby": `agy-tab-${activeSection}`,
+					tabIndex: 0
+				}, sectionBody()), renderAuditDrawer());
 			};
-			ctx.slots.inject("conversation.session.header.actions", () => {
-				return ctx.slots.register({
-					name: "conversation.session.header.actions",
-					id: "agy-link-status",
-					order: 10,
-					label: "Antigravity"
-				}, AgySessionStatus);
-			});
 			ctx.slots.inject("settings.section", () => {
 				return ctx.slots.register({
 					name: "settings.section",
