@@ -15,6 +15,7 @@ research/
 .cursor/
 .mcp.json
 .vectrignore
+.vectr/
 .vscode/
 CLAUDE.md
 
