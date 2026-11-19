@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { homedir } from "node:os";
 import { LlmAdapter } from "@deepseek-ai/dsh-llm";
 import { createServer } from "node:http";
+import http2 from "node:http2";
 import { readFile } from "node:fs/promises";
 import { execFile, execFileSync } from "node:child_process";
 import { defineTool } from "@deepseek-ai/dsh-tools";
@@ -959,6 +960,7 @@ var AccountPoolManager = class {
 //#endregion
 //#region src/common/types.ts
 const PROVIDER_ID = "antigravity";
+const GEMINI_APP_PROVIDER_ID = "gemini-app";
 const DEFAULT_ENDPOINT_CANDIDATES = [
 	"https://cloudcode-pa.googleapis.com",
 	"https://daily-cloudcode-pa.googleapis.com",
@@ -1078,6 +1080,11 @@ function defaultConfig() {
 		rateLimitPerMinute: 0,
 		heartbeatEnabled: true,
 		heartbeatIntervalMs: 18e4,
+		geminiAppEnabled: false,
+		geminiAppEndpoint: "robinfrontend-pa.googleapis.com",
+		geminiAppToken: void 0,
+		geminiAppTimeoutMs: 12e4,
+		geminiAppDefaultModel: "gemini-app-default",
 		agyBin: "",
 		permissionMode: "skip",
 		workspaceRoot: "",
@@ -1192,6 +1199,11 @@ function resolveConfig(entry, env = process.env, overrides = readOverrides()) {
 			const n = asNum(get("heartbeatIntervalMs"));
 			return n !== void 0 ? Math.max(3e4, n) : base.heartbeatIntervalMs;
 		})(),
+		geminiAppEnabled: asBool(get("geminiAppEnabled")) ?? base.geminiAppEnabled,
+		geminiAppEndpoint: asString$1(get("geminiAppEndpoint")) ?? base.geminiAppEndpoint,
+		geminiAppToken: asString$1(get("geminiAppToken")) ?? base.geminiAppToken,
+		geminiAppTimeoutMs: asNum(get("geminiAppTimeoutMs")) ?? base.geminiAppTimeoutMs,
+		geminiAppDefaultModel: asString$1(get("geminiAppDefaultModel")) ?? base.geminiAppDefaultModel,
 		agyBin: asString$1(get("agyBin")) ?? base.agyBin,
 		permissionMode: asMode(get("permissionMode")) ?? base.permissionMode,
 		workspaceRoot: asString$1(get("workspaceRoot")) ?? base.workspaceRoot,
@@ -1283,6 +1295,25 @@ function resolveConfig(entry, env = process.env, overrides = readOverrides()) {
 		const n = asNum(envApiMaxPageSize);
 		if (n !== void 0) cfg.apiMaxPageSize = Math.max(1, n);
 	}
+	const envGeminiAppEnabled = env.DSH_GEMINI_APP_ENABLED ?? env.GEMINI_APP_ENABLED;
+	if (envGeminiAppEnabled !== void 0) {
+		const b = asBool(envGeminiAppEnabled);
+		if (b !== void 0) cfg.geminiAppEnabled = b;
+	}
+	const envGeminiAppEndpoint = env.DSH_GEMINI_APP_ENDPOINT ?? env.GEMINI_APP_ENDPOINT;
+	if (envGeminiAppEndpoint) cfg.geminiAppEndpoint = envGeminiAppEndpoint;
+	const envGeminiAppToken = env.DSH_GEMINI_APP_TOKEN ?? env.GEMINI_APP_TOKEN;
+	if (envGeminiAppToken) {
+		cfg.geminiAppToken = envGeminiAppToken;
+		if (envGeminiAppEnabled === void 0) cfg.geminiAppEnabled = true;
+	}
+	const envGeminiAppTimeout = env.DSH_GEMINI_APP_TIMEOUT_MS ?? env.GEMINI_APP_TIMEOUT_MS;
+	if (envGeminiAppTimeout !== void 0) {
+		const n = asNum(envGeminiAppTimeout);
+		if (n !== void 0) cfg.geminiAppTimeoutMs = Math.max(1e3, n);
+	}
+	const envGeminiAppDefaultModel = env.DSH_GEMINI_APP_DEFAULT_MODEL ?? env.GEMINI_APP_DEFAULT_MODEL;
+	if (envGeminiAppDefaultModel) cfg.geminiAppDefaultModel = envGeminiAppDefaultModel;
 	return cfg;
 }
 //#endregion
@@ -30210,6 +30241,1018 @@ var AgyAdapter = class extends LlmAdapter {
 		}
 	}
 };
+const ROBIN_PROCESS_QUERY_METHOD = "/assistant.mobile.robin.RobinService/ProcessQuery";
+const ROBIN_DEFAULT_USER_AGENT = "grpc-java-cronet/1.62.0 (gzip)";
+const ROBIN_API_CLIENT = "gl-android/35";
+const RobinStreamingState = {
+	UNSPECIFIED: 0,
+	IN_PROGRESS: 1,
+	FINISHED: 2,
+	ERROR: 3
+};
+const RobinBardMode = {
+	UNSPECIFIED: 0,
+	STANDARD: 1,
+	ADVANCED: 2
+};
+var ProtobufWriter = class {
+	chunks = [];
+	totalLength = 0;
+	writeTag(fieldNumber, wireType) {
+		const tag = fieldNumber << 3 | wireType & 7;
+		this.writeVarint(tag);
+		return this;
+	}
+	writeVarint(value) {
+		let v = typeof value === "number" ? BigInt(Math.floor(value)) : value;
+		if (v < 0n) v = BigInt.asUintN(64, v);
+		const bytes = [];
+		while (v >= 128n) {
+			bytes.push(Number(v & 127n | 128n));
+			v >>= 7n;
+		}
+		bytes.push(Number(v & 127n));
+		const buf = new Uint8Array(bytes);
+		this.chunks.push(buf);
+		this.totalLength += buf.length;
+		return this;
+	}
+	writeInt32(fieldNumber, value) {
+		if (value === 0) return this;
+		this.writeTag(fieldNumber, 0);
+		this.writeVarint(value);
+		return this;
+	}
+	writeInt64(fieldNumber, value) {
+		if (value === 0 || value === 0n) return this;
+		this.writeTag(fieldNumber, 0);
+		this.writeVarint(value);
+		return this;
+	}
+	writeFixed32(fieldNumber, value) {
+		this.writeTag(fieldNumber, 5);
+		const buf = /* @__PURE__ */ new Uint8Array(4);
+		buf[0] = value & 255;
+		buf[1] = value >>> 8 & 255;
+		buf[2] = value >>> 16 & 255;
+		buf[3] = value >>> 24 & 255;
+		this.chunks.push(buf);
+		this.totalLength += 4;
+		return this;
+	}
+	writeFixed64(fieldNumber, value) {
+		this.writeTag(fieldNumber, 1);
+		const buf = /* @__PURE__ */ new Uint8Array(8);
+		let v = value;
+		for (let i = 0; i < 8; i++) {
+			buf[i] = Number(v & 255n);
+			v >>= 8n;
+		}
+		this.chunks.push(buf);
+		this.totalLength += 8;
+		return this;
+	}
+	writeString(fieldNumber, str) {
+		if (!str || str.length === 0) return this;
+		const encoded = new TextEncoder().encode(str);
+		this.writeTag(fieldNumber, 2);
+		this.writeVarint(encoded.length);
+		this.chunks.push(encoded);
+		this.totalLength += encoded.length;
+		return this;
+	}
+	writeBytes(fieldNumber, bytes) {
+		if (!bytes || bytes.length === 0) return this;
+		this.writeTag(fieldNumber, 2);
+		this.writeVarint(bytes.length);
+		this.chunks.push(bytes);
+		this.totalLength += bytes.length;
+		return this;
+	}
+	writeMessage(fieldNumber, msgBytes) {
+		if (!msgBytes || msgBytes.length === 0) return this;
+		this.writeTag(fieldNumber, 2);
+		this.writeVarint(msgBytes.length);
+		this.chunks.push(msgBytes);
+		this.totalLength += msgBytes.length;
+		return this;
+	}
+	toUint8Array() {
+		const out = new Uint8Array(this.totalLength);
+		let offset = 0;
+		for (const chunk of this.chunks) {
+			out.set(chunk, offset);
+			offset += chunk.length;
+		}
+		return out;
+	}
+};
+var ProtobufReader = class ProtobufReader {
+	buffer;
+	pos = 0;
+	end;
+	view;
+	constructor(buffer, start = 0, length) {
+		this.buffer = buffer;
+		this.pos = start;
+		this.end = length !== void 0 ? start + length : buffer.length;
+		this.view = new DataView(buffer.buffer, buffer.byteOffset, buffer.byteLength);
+	}
+	isAtEnd() {
+		return this.pos >= this.end;
+	}
+	readTag() {
+		if (this.isAtEnd()) return null;
+		const tag = Number(this.readVarint());
+		return {
+			fieldNumber: tag >>> 3,
+			wireType: tag & 7
+		};
+	}
+	readVarint() {
+		let result = 0n;
+		let shift = 0n;
+		while (this.pos < this.end) {
+			const byte = this.buffer[this.pos++];
+			if (byte === void 0) throw new Error("Unexpected end of buffer while reading varint");
+			result |= BigInt(byte & 127) << shift;
+			if ((byte & 128) === 0) return result;
+			shift += 7n;
+			if (shift >= 64n) throw new Error("Protobuf varint exceeds 64 bits");
+		}
+		throw new Error("Unexpected end of buffer while reading varint");
+	}
+	readInt32() {
+		return Number(this.readVarint()) | 0;
+	}
+	readString() {
+		const len = Number(this.readVarint());
+		if (this.pos + len > this.end) throw new Error(`Protobuf string length ${len} exceeds available bytes (${this.end - this.pos})`);
+		const slice = this.buffer.subarray(this.pos, this.pos + len);
+		this.pos += len;
+		return new TextDecoder("utf-8", { fatal: false }).decode(slice);
+	}
+	readBytes() {
+		const len = Number(this.readVarint());
+		if (this.pos + len > this.end) throw new Error(`Protobuf bytes length ${len} exceeds available bytes (${this.end - this.pos})`);
+		const slice = this.buffer.subarray(this.pos, this.pos + len);
+		this.pos += len;
+		return new Uint8Array(slice);
+	}
+	readSubReader() {
+		const len = Number(this.readVarint());
+		if (this.pos + len > this.end) throw new Error(`Protobuf submessage length ${len} exceeds available bytes (${this.end - this.pos})`);
+		const reader = new ProtobufReader(this.buffer, this.pos, len);
+		this.pos += len;
+		return reader;
+	}
+	skipField(wireType) {
+		switch (wireType) {
+			case 0:
+				this.readVarint();
+				break;
+			case 1:
+				if (this.pos + 8 > this.end) throw new Error("Unexpected EOF reading 64-bit field");
+				this.pos += 8;
+				break;
+			case 2: {
+				const len = Number(this.readVarint());
+				if (this.pos + len > this.end) throw new Error("Unexpected EOF skipping length-delimited field");
+				this.pos += len;
+				break;
+			}
+			case 5:
+				if (this.pos + 4 > this.end) throw new Error("Unexpected EOF reading 32-bit field");
+				this.pos += 4;
+				break;
+			case 3:
+				while (true) {
+					const t = this.readTag();
+					if (!t || t.wireType === 4) break;
+					this.skipField(t.wireType);
+				}
+				break;
+			case 4: break;
+			default: throw new Error(`Unsupported wire type: ${wireType}`);
+		}
+	}
+};
+/**
+* Packs payload into a gRPC length-prefixed frame.
+* Header: 1-byte compression flag (0 = uncompressed) + 4-byte big-endian payload length.
+*/
+function encodeGrpcFrame(payload, compressed = false) {
+	const frame = new Uint8Array(5 + payload.length);
+	frame[0] = compressed ? 1 : 0;
+	const len = payload.length;
+	frame[1] = len >>> 24 & 255;
+	frame[2] = len >>> 16 & 255;
+	frame[3] = len >>> 8 & 255;
+	frame[4] = len & 255;
+	frame.set(payload, 5);
+	return frame;
+}
+/**
+* Extracts all complete gRPC length-prefixed frames from buffer.
+* Returns decoded frames and remaining partial buffer.
+*/
+function decodeGrpcFrames(buffer) {
+	const frames = [];
+	let offset = 0;
+	while (offset + 5 <= buffer.length) {
+		const b0 = buffer[offset];
+		const b1 = buffer[offset + 1];
+		const b2 = buffer[offset + 2];
+		const b3 = buffer[offset + 3];
+		const b4 = buffer[offset + 4];
+		if (b0 === void 0 || b1 === void 0 || b2 === void 0 || b3 === void 0 || b4 === void 0) break;
+		const compressed = b0 !== 0;
+		const len = (b1 << 24 >>> 0) + (b2 << 16) + (b3 << 8) + b4;
+		if (offset + 5 + len > buffer.length) break;
+		const frameData = buffer.subarray(offset + 5, offset + 5 + len);
+		if (compressed) throw new Error("Compressed gRPC frames are not supported in uncompressed mode");
+		frames.push(new Uint8Array(frameData));
+		offset += 5 + len;
+	}
+	const rest = buffer.subarray(offset);
+	return {
+		frames,
+		rest: new Uint8Array(rest)
+	};
+}
+function encodeRobinAttachment(att) {
+	const writer = new ProtobufWriter();
+	writer.writeString(1, att.mimeType);
+	writer.writeBytes(2, att.data);
+	if (att.name) writer.writeString(3, att.name);
+	return writer.toUint8Array();
+}
+function encodeUiInteraction(ui) {
+	const writer = new ProtobufWriter();
+	if (ui.eventType) writer.writeString(1, ui.eventType);
+	if (ui.interactionContext) writer.writeString(2, ui.interactionContext);
+	return writer.toUint8Array();
+}
+function encodeSessionInput(input) {
+	const writer = new ProtobufWriter();
+	if (input.textPrompt) writer.writeString(1, input.textPrompt);
+	if (input.attachments && input.attachments.length > 0) for (const att of input.attachments) writer.writeMessage(2, encodeRobinAttachment(att));
+	if (input.uiInteraction) writer.writeMessage(3, encodeUiInteraction(input.uiInteraction));
+	return writer.toUint8Array();
+}
+function encodeDeviceContext(ctx) {
+	const writer = new ProtobufWriter();
+	if (ctx.deviceModel) writer.writeString(1, ctx.deviceModel);
+	if (ctx.agsaVersion) writer.writeString(2, ctx.agsaVersion);
+	if (ctx.locale) writer.writeString(3, ctx.locale);
+	if (ctx.timeZone) writer.writeString(4, ctx.timeZone);
+	return writer.toUint8Array();
+}
+function encodeRobinBardModeConfig(cfg) {
+	const writer = new ProtobufWriter();
+	writer.writeInt32(1, cfg.modeId);
+	if (cfg.bardModeName) writer.writeString(2, cfg.bardModeName);
+	return writer.toUint8Array();
+}
+function encodeProcessQueryRequest(req) {
+	const writer = new ProtobufWriter();
+	if (req.sessionInput) writer.writeMessage(1, encodeSessionInput(req.sessionInput));
+	if (req.deviceContext) writer.writeMessage(2, encodeDeviceContext(req.deviceContext));
+	if (req.modeConfig) writer.writeMessage(3, encodeRobinBardModeConfig(req.modeConfig));
+	return writer.toUint8Array();
+}
+function decodeChatHistoryOutput(reader) {
+	const output = {};
+	while (!reader.isAtEnd()) {
+		const tag = reader.readTag();
+		if (!tag) break;
+		switch (tag.fieldNumber) {
+			case 1:
+				output.deltaText = reader.readString();
+				break;
+			case 2:
+				output.fullText = reader.readString();
+				break;
+			case 3:
+				output.candidateId = reader.readString();
+				break;
+			case 4:
+				output.thoughtsText = reader.readString();
+				break;
+			default: reader.skipField(tag.wireType);
+		}
+	}
+	return output;
+}
+function decodeRobinPunt(reader) {
+	const punt = {};
+	while (!reader.isAtEnd()) {
+		const tag = reader.readTag();
+		if (!tag) break;
+		switch (tag.fieldNumber) {
+			case 1:
+				punt.actionType = reader.readString();
+				break;
+			case 2:
+				punt.payload = reader.readString();
+				break;
+			default: reader.skipField(tag.wireType);
+		}
+	}
+	return punt;
+}
+function decodeRobinError(reader) {
+	let code = 0;
+	let message = "";
+	while (!reader.isAtEnd()) {
+		const tag = reader.readTag();
+		if (!tag) break;
+		switch (tag.fieldNumber) {
+			case 1:
+				code = reader.readInt32();
+				break;
+			case 2:
+				message = reader.readString();
+				break;
+			default: reader.skipField(tag.wireType);
+		}
+	}
+	return {
+		code,
+		message
+	};
+}
+function decodeProcessQueryResponse(data) {
+	const reader = new ProtobufReader(data);
+	const resp = {};
+	while (!reader.isAtEnd()) {
+		const tag = reader.readTag();
+		if (!tag) break;
+		switch (tag.fieldNumber) {
+			case 1:
+				resp.chatHistoryOutput = decodeChatHistoryOutput(reader.readSubReader());
+				break;
+			case 2:
+				resp.streamingState = reader.readInt32();
+				break;
+			case 3:
+				resp.punt = decodeRobinPunt(reader.readSubReader());
+				break;
+			case 4:
+				resp.error = decodeRobinError(reader.readSubReader());
+				break;
+			default: reader.skipField(tag.wireType);
+		}
+	}
+	return resp;
+}
+//#endregion
+//#region packages/core/src/gemini-app/builder.ts
+function extractTextFromBlocks(blocks) {
+	const parts = [];
+	for (const block of blocks) if (block.type === "text") {
+		const txt = typeof block.text === "string" ? block.text : String(block.text ?? "");
+		parts.push(txt);
+	} else if (block.type === "reasoning") {
+		const txt = typeof block.text === "string" ? block.text : String(block.text ?? "");
+		parts.push(`[Thinking: ${txt}]`);
+	} else if (block.type === "tool-call" || block.type === "tool_call") {
+		const args = typeof block.arguments === "string" ? block.arguments : JSON.stringify(block.arguments ?? {});
+		parts.push(`[Action: ${block.name ?? "unknown"}(${args})]`);
+	} else if (block.type === "tool_result" || block.type === "tool-result") {
+		const res = typeof block.result === "string" ? block.result : JSON.stringify(block.result ?? block.content ?? {});
+		parts.push(`[Action Result: ${res}]`);
+	}
+	return parts.join("\n");
+}
+function extractAttachmentsFromBlocks(blocks) {
+	const attachments = [];
+	for (const block of blocks) if (block.type === "image") {
+		const img = block;
+		if (img.offloaded) continue;
+		let data;
+		if (img.data) {
+			if (typeof img.data === "string") {
+				const base64Str = img.data.includes(",") ? img.data.split(",")[1] : img.data;
+				data = new Uint8Array(Buffer.from(base64Str ?? "", "base64"));
+			} else if (img.data instanceof Uint8Array) data = img.data;
+			else if (Buffer.isBuffer(img.data)) data = new Uint8Array(img.data);
+		}
+		if (data && data.length > 0) attachments.push({
+			mimeType: img.mimeType || "image/jpeg",
+			data,
+			name: img.attachment?.id || `image_${attachments.length + 1}`
+		});
+	}
+	return attachments;
+}
+function formatMessagesToPrompt(messages) {
+	const allAttachments = [];
+	const systemLines = [];
+	const conversationLines = [];
+	for (const msg of messages) {
+		let text = "";
+		let atts = [];
+		if (typeof msg.content === "string") text = msg.content;
+		else if (Array.isArray(msg.content)) {
+			text = extractTextFromBlocks(msg.content);
+			atts = extractAttachmentsFromBlocks(msg.content);
+			allAttachments.push(...atts);
+		}
+		if (msg.role === "system" || msg.role === "developer") {
+			if (text.trim()) systemLines.push(text.trim());
+		} else if (msg.role === "user") {
+			if (text.trim()) conversationLines.push(`User: ${text.trim()}`);
+		} else if (msg.role === "assistant") {
+			if (text.trim()) conversationLines.push(`Model: ${text.trim()}`);
+		} else if (msg.role === "tool") {
+			if (text.trim()) conversationLines.push(`Tool Output: ${text.trim()}`);
+		}
+	}
+	if (systemLines.length === 0 && conversationLines.length === 1 && conversationLines[0]?.startsWith("User: ")) return {
+		promptText: conversationLines[0].substring(6),
+		attachments: allAttachments
+	};
+	const sections = [];
+	if (systemLines.length > 0) sections.push(`[System Instructions]\n${systemLines.join("\n\n")}`);
+	if (conversationLines.length > 0) sections.push(conversationLines.join("\n\n"));
+	return {
+		promptText: sections.join("\n\n"),
+		attachments: allAttachments
+	};
+}
+function buildProcessQueryRequest(options, config) {
+	const { promptText, attachments } = formatMessagesToPrompt(options.messages);
+	const sessionInput = {
+		textPrompt: promptText,
+		...attachments.length > 0 ? { attachments } : {}
+	};
+	const isAdvanced = options.model && (options.model.includes("advanced") || options.model.includes("pro")) || false;
+	return {
+		sessionInput,
+		deviceContext: {
+			deviceModel: config?.deviceModel || "OnePlus PJZ110",
+			agsaVersion: config?.agsaVersion || "15.42.34.28.arm64",
+			locale: config?.locale || "zh-CN",
+			timeZone: config?.timeZone || "Asia/Shanghai"
+		},
+		modeConfig: {
+			modeId: isAdvanced ? RobinBardMode.ADVANCED : RobinBardMode.STANDARD,
+			bardModeName: isAdvanced ? "Advanced" : "Standard"
+		}
+	};
+}
+//#endregion
+//#region packages/core/src/gemini-app/auth.ts
+const GEMINI_APP_DIR = join(homedir(), ".dsh", "gemini-app");
+const GEMINI_APP_TOKEN_FILE = join(GEMINI_APP_DIR, "token");
+/**
+* Resolves the OAuth2 bearer token for Gemini App in priority order:
+* 1. Explicitly supplied in config.token
+* 2. Environment variables: DSH_GEMINI_APP_TOKEN or GEMINI_APP_TOKEN
+* 3. Stored token file: ~/.dsh/gemini-app/token
+*/
+async function resolveGeminiAppToken(config) {
+	if (config?.token && config.token.trim()) return config.token.trim();
+	const envToken = process.env.DSH_GEMINI_APP_TOKEN?.trim() || process.env.GEMINI_APP_TOKEN?.trim();
+	if (envToken) return envToken;
+	if (existsSync(GEMINI_APP_TOKEN_FILE)) try {
+		const content = readFileSync(GEMINI_APP_TOKEN_FILE, "utf-8").trim();
+		if (content) return content;
+	} catch (err) {
+		return null;
+	}
+	return null;
+}
+/**
+* Persists an OAuth2 token to ~/.dsh/gemini-app/token.
+*/
+function saveGeminiAppToken(token) {
+	mkdirSync(GEMINI_APP_DIR, { recursive: true });
+	writeFileSync(GEMINI_APP_TOKEN_FILE, token.trim(), {
+		encoding: "utf-8",
+		mode: 384
+	});
+}
+/**
+* Returns human-actionable re-authentication guidance.
+*/
+function formatGeminiAppAuthGuidance() {
+	return "Gemini App authentication token is missing or expired. Please configure a valid Google OAuth bearer token with the assistant scope via:\n  - Setting environment variable DSH_GEMINI_APP_TOKEN=\"ya29...\"\n  - Or saving the token to ~/.dsh/gemini-app/token\n  - Or running /ccl gemini-token <token> in DSH chat";
+}
+//#endregion
+//#region packages/core/src/gemini-app/stream-mapper.ts
+async function* mapRobinResponsesToChunks(responses, signal, onFirstEmit) {
+	let blockIndex = 0;
+	let currentBlock = null;
+	let firstChunkEmitted = false;
+	let accumulatedChars = 0;
+	const notifyFirstEmit = () => {
+		if (!firstChunkEmitted) {
+			firstChunkEmitted = true;
+			if (onFirstEmit) onFirstEmit();
+		}
+	};
+	const closeCurrentBlock = () => {
+		if (!currentBlock) return null;
+		const chunk = {
+			type: "block-end",
+			index: currentBlock.index,
+			block: {
+				type: currentBlock.type,
+				text: currentBlock.text
+			}
+		};
+		currentBlock = null;
+		return chunk;
+	};
+	try {
+		for await (const resp of responses) {
+			if (signal?.aborted) {
+				const end = closeCurrentBlock();
+				if (end) yield end;
+				yield {
+					type: "finish",
+					reason: {
+						kind: "aborted",
+						failure: {
+							message: "Gemini App request was aborted",
+							code: "ABORTED"
+						}
+					}
+				};
+				return;
+			}
+			if (resp.error && resp.error.code !== 0) {
+				const end = closeCurrentBlock();
+				if (end) yield end;
+				notifyFirstEmit();
+				yield {
+					type: "finish",
+					reason: {
+						kind: "error",
+						failure: {
+							code: `ROBIN_ERROR_${resp.error.code}`,
+							message: resp.error.message || `Upstream Robin service reported error code ${resp.error.code}`
+						}
+					}
+				};
+				return;
+			}
+			if (resp.chatHistoryOutput) {
+				const { deltaText, thoughtsText, fullText } = resp.chatHistoryOutput;
+				if (thoughtsText && thoughtsText.length > 0) {
+					notifyFirstEmit();
+					if (currentBlock?.type !== "reasoning") {
+						const end = closeCurrentBlock();
+						if (end) yield end;
+						const idx = blockIndex++;
+						currentBlock = {
+							index: idx,
+							type: "reasoning",
+							text: ""
+						};
+						yield {
+							type: "block-start",
+							index: idx,
+							blockType: "reasoning"
+						};
+					}
+					currentBlock.text += thoughtsText;
+					accumulatedChars += thoughtsText.length;
+					yield {
+						type: "reasoning-delta",
+						index: currentBlock.index,
+						text: thoughtsText
+					};
+				}
+				let textToEmit = deltaText;
+				if (!textToEmit && fullText && currentBlock?.type === "text") {
+					if (fullText.length > currentBlock.text.length) textToEmit = fullText.slice(currentBlock.text.length);
+				}
+				if (textToEmit && textToEmit.length > 0) {
+					notifyFirstEmit();
+					if (currentBlock?.type !== "text") {
+						const end = closeCurrentBlock();
+						if (end) yield end;
+						const idx = blockIndex++;
+						currentBlock = {
+							index: idx,
+							type: "text",
+							text: ""
+						};
+						yield {
+							type: "block-start",
+							index: idx,
+							blockType: "text"
+						};
+					}
+					currentBlock.text += textToEmit;
+					accumulatedChars += textToEmit.length;
+					yield {
+						type: "text-delta",
+						index: currentBlock.index,
+						text: textToEmit
+					};
+				}
+			}
+			if (resp.streamingState === RobinStreamingState.FINISHED) {
+				const end = closeCurrentBlock();
+				if (end) yield end;
+				notifyFirstEmit();
+				yield {
+					type: "usage",
+					usage: {
+						inputTokens: 0,
+						outputTokens: Math.max(1, Math.ceil(accumulatedChars / 4))
+					}
+				};
+				yield {
+					type: "finish",
+					reason: { kind: "stop" }
+				};
+				return;
+			}
+			if (resp.streamingState === RobinStreamingState.ERROR) {
+				const end = closeCurrentBlock();
+				if (end) yield end;
+				notifyFirstEmit();
+				yield {
+					type: "finish",
+					reason: {
+						kind: "error",
+						failure: {
+							code: "ROBIN_STREAM_ERROR",
+							message: "Gemini App stream encountered an unexpected server error state"
+						}
+					}
+				};
+				return;
+			}
+		}
+		if (signal?.aborted) {
+			const end = closeCurrentBlock();
+			if (end) yield end;
+			yield {
+				type: "finish",
+				reason: {
+					kind: "aborted",
+					failure: {
+						message: "Gemini App request was aborted",
+						code: "ABORTED"
+					}
+				}
+			};
+			return;
+		}
+		const end = closeCurrentBlock();
+		if (end) yield end;
+		notifyFirstEmit();
+		yield {
+			type: "usage",
+			usage: {
+				inputTokens: 0,
+				outputTokens: Math.max(1, Math.ceil(accumulatedChars / 4))
+			}
+		};
+		yield {
+			type: "finish",
+			reason: { kind: "stop" }
+		};
+	} catch (err) {
+		const end = closeCurrentBlock();
+		if (end) yield end;
+		notifyFirstEmit();
+		yield {
+			type: "finish",
+			reason: {
+				kind: "error",
+				failure: {
+					code: "ROBIN_MAPPING_EXCEPTION",
+					message: err instanceof Error ? err.message : String(err)
+				}
+			}
+		};
+	}
+}
+/**
+* Parses incoming raw Protobuf frames from gRPC length-prefixed stream and maps them to StreamChunks.
+*/
+async function* parseRobinGrpcFramesToChunks(frames, signal, onFirstEmit) {
+	async function* decodeFrames() {
+		for await (const frame of frames) {
+			if (signal?.aborted) return;
+			try {
+				yield decodeProcessQueryResponse(frame);
+			} catch (err) {
+				throw new Error(`Failed to decode Gemini App Protobuf frame: ${err instanceof Error ? err.message : String(err)}`);
+			}
+		}
+	}
+	yield* mapRobinResponsesToChunks(decodeFrames(), signal, onFirstEmit);
+}
+//#endregion
+//#region packages/core/src/gemini-app/client.ts
+var GeminiAppError = class extends Error {
+	code;
+	httpStatus;
+	grpcStatus;
+	constructor(message, code, httpStatus, grpcStatus) {
+		super(message);
+		this.name = "GeminiAppError";
+		this.code = code;
+		this.httpStatus = httpStatus;
+		this.grpcStatus = grpcStatus;
+	}
+};
+/**
+* Standard HTTP/2 gRPC transport connecting to robinfrontend-pa.googleapis.com.
+*/
+async function defaultHttp2Transport(endpoint, headers, body, signal) {
+	return new Promise((resolve, reject) => {
+		if (signal?.aborted) return reject(new GeminiAppError("Request was aborted before connecting", "ABORTED"));
+		let client = null;
+		try {
+			client = http2.connect(`https://${endpoint}:443`);
+		} catch (err) {
+			return reject(new GeminiAppError(`Failed to establish HTTP/2 connection to ${endpoint}: ${err instanceof Error ? err.message : String(err)}`, "CONNECTION_FAILED"));
+		}
+		client.on("error", (err) => {
+			reject(new GeminiAppError(`HTTP/2 session error with ${endpoint}: ${err.message}`, "SESSION_ERROR"));
+		});
+		const req = client.request({
+			":method": "POST",
+			":path": ROBIN_PROCESS_QUERY_METHOD,
+			":scheme": "https",
+			":authority": endpoint,
+			...headers
+		});
+		let buffer = /* @__PURE__ */ new Uint8Array(0);
+		const frameQueue = [];
+		let notifyFrame = null;
+		let isStreamEnded = false;
+		let streamError = null;
+		const trailers = {};
+		const onAbort = () => {
+			req.close(http2.constants.NGHTTP2_CANCEL);
+			client?.close();
+			streamError = new GeminiAppError("Request was aborted", "ABORTED");
+			if (notifyFrame) notifyFrame();
+		};
+		signal?.addEventListener("abort", onAbort, { once: true });
+		req.on("response", (headers) => {
+			const status = Number(headers[":status"] || 200);
+			if (status !== 200) {
+				let code = "HTTP_ERROR";
+				if (status === 401 || status === 403) code = "AUTH_ERROR";
+				else if (status === 429) code = "RATE_LIMIT";
+				streamError = new GeminiAppError(`Robin gRPC endpoint returned HTTP status ${status}`, code, status);
+				if (notifyFrame) notifyFrame();
+			}
+		});
+		req.on("data", (chunk) => {
+			const chunkBytes = new Uint8Array(chunk);
+			const combined = new Uint8Array(buffer.length + chunkBytes.length);
+			combined.set(buffer, 0);
+			combined.set(chunkBytes, buffer.length);
+			try {
+				const { frames, rest } = decodeGrpcFrames(combined);
+				buffer = rest;
+				for (const frame of frames) frameQueue.push(frame);
+				if (notifyFrame) {
+					const fn = notifyFrame;
+					notifyFrame = null;
+					fn();
+				}
+			} catch (err) {
+				streamError = err instanceof Error ? err : new Error(String(err));
+				if (notifyFrame) notifyFrame();
+			}
+		});
+		req.on("trailers", (hdrs) => {
+			const grpcStatus = hdrs["grpc-status"];
+			const grpcMessage = hdrs["grpc-message"];
+			trailers["grpc-status"] = grpcStatus !== void 0 ? Number(grpcStatus) : void 0;
+			trailers["grpc-message"] = typeof grpcMessage === "string" ? grpcMessage : void 0;
+			if (grpcStatus !== void 0 && Number(grpcStatus) !== 0) {
+				const statusCode = Number(grpcStatus);
+				let code = "GRPC_ERROR";
+				if (statusCode === 16) code = "UNAUTHENTICATED";
+				else if (statusCode === 8) code = "RESOURCE_EXHAUSTED";
+				else if (statusCode === 4) code = "DEADLINE_EXCEEDED";
+				streamError = new GeminiAppError(`gRPC error (status ${statusCode}): ${grpcMessage || "unknown error"}`, code, void 0, statusCode);
+				if (notifyFrame) notifyFrame();
+			}
+		});
+		req.on("end", () => {
+			isStreamEnded = true;
+			client?.close();
+			signal?.removeEventListener("abort", onAbort);
+			if (notifyFrame) {
+				const fn = notifyFrame;
+				notifyFrame = null;
+				fn();
+			}
+		});
+		req.on("error", (err) => {
+			streamError = err;
+			client?.close();
+			signal?.removeEventListener("abort", onAbort);
+			if (notifyFrame) {
+				const fn = notifyFrame;
+				notifyFrame = null;
+				fn();
+			}
+		});
+		req.write(body);
+		req.end();
+		async function* frameGenerator() {
+			while (true) {
+				while (frameQueue.length > 0) yield frameQueue.shift();
+				if (streamError) throw streamError;
+				if (isStreamEnded) break;
+				await new Promise((r) => {
+					notifyFrame = r;
+				});
+			}
+		}
+		resolve({
+			frames: frameGenerator(),
+			getTrailers: () => trailers
+		});
+	});
+}
+var GeminiAppClient = class {
+	config;
+	transport;
+	constructor(config = {}, transport = defaultHttp2Transport) {
+		this.config = config;
+		this.transport = transport;
+	}
+	/**
+	* Primary streaming method: executes ProcessQuery gRPC call and streams StreamChunks.
+	*/
+	async *streamProcessQuery(request, signal, onFirstEmit) {
+		const token = await resolveGeminiAppToken(this.config);
+		if (!token) {
+			yield {
+				type: "finish",
+				reason: {
+					kind: "error",
+					failure: {
+						code: "AUTH_REQUIRED",
+						message: formatGeminiAppAuthGuidance()
+					}
+				}
+			};
+			return;
+		}
+		const endpoint = this.config.endpoint || "robinfrontend-pa.googleapis.com";
+		const grpcFrame = encodeGrpcFrame(encodeProcessQueryRequest(request));
+		const headers = {
+			"content-type": "application/grpc",
+			te: "trailers",
+			authorization: `Bearer ${token}`,
+			"user-agent": ROBIN_DEFAULT_USER_AGENT,
+			"x-goog-api-client": ROBIN_API_CLIENT
+		};
+		let transportResult;
+		try {
+			transportResult = await this.transport(endpoint, headers, grpcFrame, signal);
+		} catch (err) {
+			yield {
+				type: "finish",
+				reason: {
+					kind: signal?.aborted ? "aborted" : "error",
+					failure: {
+						code: err instanceof GeminiAppError ? err.code : "CONNECTION_ERROR",
+						message: err instanceof Error ? err.message : String(err)
+					}
+				}
+			};
+			return;
+		}
+		yield* parseRobinGrpcFramesToChunks(transportResult.frames, signal, onFirstEmit);
+	}
+	/**
+	* Non-streaming convenience method: gathers all stream chunks and returns accumulated text.
+	*/
+	async processQuery(request, signal) {
+		let accumulatedText = "";
+		let lastError = null;
+		for await (const chunk of this.streamProcessQuery(request, signal)) if (chunk.type === "text-delta") accumulatedText += chunk.text;
+		else if (chunk.type === "finish") {
+			const finish = chunk;
+			if (finish.reason?.kind === "error") lastError = new GeminiAppError(finish.reason.failure?.message || "Gemini App request failed", finish.reason.failure?.code || "UNKNOWN_ERROR");
+		}
+		if (lastError) throw lastError;
+		return {
+			text: accumulatedText,
+			response: { chatHistoryOutput: {
+				fullText: accumulatedText,
+				deltaText: ""
+			} }
+		};
+	}
+};
+//#endregion
+//#region src/host/gemini-app-adapter.ts
+const GEMINI_APP_MODELS = [
+	{
+		provider: GEMINI_APP_PROVIDER_ID,
+		id: "gemini-app-default",
+		name: "Gemini App (Default)",
+		inputModalities: ["text", "image"]
+	},
+	{
+		provider: GEMINI_APP_PROVIDER_ID,
+		id: "gemini-app-advanced",
+		name: "Gemini App (Advanced)",
+		inputModalities: ["text", "image"]
+	},
+	{
+		provider: GEMINI_APP_PROVIDER_ID,
+		id: "gemini-app-flash",
+		name: "Gemini App (Flash)",
+		inputModalities: ["text", "image"]
+	}
+];
+var GeminiAppAdapter = class extends LlmAdapter {
+	deps;
+	constructor(deps) {
+		super();
+		this.deps = deps;
+	}
+	providerInfo(provider) {
+		return {
+			id: provider,
+			name: "Google Gemini (App/Robin)"
+		};
+	}
+	async listModels(provider) {
+		return GEMINI_APP_MODELS.map((m) => ({
+			provider,
+			id: m.id,
+			name: m.name,
+			inputModalities: m.inputModalities
+		}));
+	}
+	async resolveModel(provider, model, _signal) {
+		const found = GEMINI_APP_MODELS.find((m) => m.id === model);
+		const isAdvanced = model.includes("advanced");
+		return {
+			provider,
+			id: model,
+			name: found ? found.name : model,
+			context: { contextWindow: isAdvanced ? 2097152 : 1048576 },
+			defaultMaxTokens: 8192,
+			inputModalities: found?.inputModalities ?? ["text", "image"]
+		};
+	}
+	async prepareCall(provider, model, signal) {
+		return {
+			model: await this.resolveModel(provider, model, signal),
+			stream: (options) => this.stream(options)
+		};
+	}
+	async *stream(options) {
+		const cfg = this.deps.getConfig();
+		const timeoutMs = cfg.geminiAppTimeoutMs || 12e4;
+		const clientConfig = {
+			endpoint: cfg.geminiAppEndpoint,
+			token: cfg.geminiAppToken,
+			timeoutMs,
+			defaultModel: cfg.geminiAppDefaultModel
+		};
+		const client = new GeminiAppClient(clientConfig, this.deps.transport);
+		const request = buildProcessQueryRequest(options, clientConfig);
+		this.deps.log?.(`[gemini-app] Dispatching request for model ${options.model || "default"}`);
+		const controller = new AbortController();
+		let timeoutTimer;
+		if (timeoutMs > 0) timeoutTimer = setTimeout(() => {
+			controller.abort(/* @__PURE__ */ new Error(`Gemini App request timed out after ${timeoutMs}ms`));
+		}, timeoutMs);
+		const combinedSignal = options.signal ? AbortSignal.any([options.signal, controller.signal]) : controller.signal;
+		try {
+			for await (const chunk of client.streamProcessQuery(request, combinedSignal)) yield chunk;
+		} catch (err) {
+			const message = err instanceof Error ? err.message : String(err);
+			this.deps.log?.(`[gemini-app] stream error: ${message}`);
+			yield {
+				type: "finish",
+				reason: {
+					kind: "error",
+					failure: {
+						code: "GEMINI_APP_ERROR",
+						message
+					}
+				}
+			};
+		} finally {
+			if (timeoutTimer) clearTimeout(timeoutTimer);
+		}
+	}
+};
 //#endregion
 //#region packages/core/src/account-models.ts
 /**
@@ -30741,6 +31784,7 @@ const HELP = [
 	"- `/ccl auth-code <code>` — finish login by pasting the code (fallback)",
 	"- `/ccl models` — refresh and list discovered models",
 	"- `/ccl effort <low|medium|high|default>` — default reasoning effort",
+	"- `/ccl gemini-token <token>` — configure Google OAuth bearer token for Gemini App (Robin)",
 	"- `/ccl doctor` — write a diagnostic report and return its path",
 	"- `/ccl help` — this text"
 ].join("\n");
@@ -30831,6 +31875,13 @@ async function handle(deps, raw) {
 			return ok("Default effort set to **" + (arg === "default" ? "model default" : arg) + "**.");
 		}
 		if (sub === "doctor") return ok("Diagnostic report written to `" + await deps.runDoctor() + "` — attach it when opening an issue.");
+		if (sub === "gemini-token") {
+			if (!arg) return err("usage: /ccl gemini-token <token>");
+			saveGeminiAppToken(arg);
+			deps.setOverride("geminiAppToken", arg);
+			deps.setOverride("geminiAppEnabled", true);
+			return ok("Gemini App token saved and enabled. Provider route `gemini-app` is now active.");
+		}
 		return ok(HELP);
 	} catch (e) {
 		return err(e instanceof Error ? e.message : String(e));
@@ -30888,6 +31939,7 @@ async function renderStatus(deps) {
 		"- default effort: " + (cfg.defaultEffort !== "" ? cfg.defaultEffort : "model default"),
 		"- catalog: " + cat.source + " (" + cat.models.length + " models)",
 		"- pool accounts: " + accounts.length + " accounts configured",
+		...cfg.geminiAppEnabled ? [`- gemini-app: enabled (endpoint: ${cfg.geminiAppEndpoint}, token: ${cfg.geminiAppToken ? "configured" : "not configured"})`] : [],
 		...reauthNeeded > 0 ? [`- 需要重新授权: ${reauthNeeded} 个账号的 Google 授权 scope 不足，请对这些账号执行 \`${REAUTH_COMMAND}\``] : [],
 		"- last call: " + (last ? (last.ok ? "OK" : "FAIL: " + last.code) + " (" + last.durationMs + "ms, " + last.model + ")" : "(none yet)")
 	].join("\n");
@@ -32697,6 +33749,16 @@ function apply(ctx, entryConfig = {}) {
 		log("registered provider route: antigravity (Direct CloudCode)");
 	} catch (e) {
 		log("adapter registration failed: " + String(e));
+	}
+	if (getConfig().geminiAppEnabled) try {
+		const geminiAdapter = new GeminiAppAdapter({
+			getConfig,
+			log
+		});
+		ctx.llm.registerAdapter([GEMINI_APP_PROVIDER_ID], geminiAdapter);
+		log("registered provider route: gemini-app (Google Gemini App / Robin)");
+	} catch (e) {
+		log("gemini-app adapter registration failed: " + String(e));
 	}
 	const cmdDeps = {
 		cfg: getConfig,

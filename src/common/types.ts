@@ -8,6 +8,7 @@ import { defaultPoolDir } from '../host/pool.ts'
 // The name users see in DSH comes from the adapter's providerInfo() — see
 // src/host/adapter.ts `providerInfo` — not from this id.
 export const PROVIDER_ID = 'antigravity'
+export const GEMINI_APP_PROVIDER_ID = 'gemini-app'
 export const PLUGIN_ID = 'cloudcode-link'
 export const PKG_NAME = 'dsh-cloudcode-link'
 
@@ -74,6 +75,17 @@ export interface PluginConfig {
   heartbeatEnabled: boolean
   /** Interval in ms between keepalive heartbeat pings (min: 30000, default: 180000). */
   heartbeatIntervalMs: number
+
+  /** Enable Google Gemini App (Robin / AGSA) request mode. */
+  geminiAppEnabled: boolean
+  /** gRPC endpoint host for Gemini App (default: robinfrontend-pa.googleapis.com). */
+  geminiAppEndpoint: string
+  /** Explicit OAuth2 bearer token for Gemini App (ya29...). */
+  geminiAppToken?: string
+  /** Watchdog timeout for Gemini App requests in ms (default: 120_000). */
+  geminiAppTimeoutMs: number
+  /** Default model identifier for Gemini App (default: gemini-app-default). */
+  geminiAppDefaultModel: string
 
   // Deprecated configuration options (kept for backwards compatibility, silently ignored):
   /** @deprecated Use direct CloudCode API instead of agy binary */
@@ -159,6 +171,11 @@ export function defaultConfig(): PluginConfig {
     rateLimitPerMinute: 0,
     heartbeatEnabled: true,
     heartbeatIntervalMs: 180_000,
+    geminiAppEnabled: false,
+    geminiAppEndpoint: 'robinfrontend-pa.googleapis.com',
+    geminiAppToken: undefined,
+    geminiAppTimeoutMs: 120_000,
+    geminiAppDefaultModel: 'gemini-app-default',
     agyBin: '',
     permissionMode: 'skip',
     workspaceRoot: '',

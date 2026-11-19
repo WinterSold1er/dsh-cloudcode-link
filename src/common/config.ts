@@ -119,6 +119,11 @@ export function resolveConfig(
       const n = asNum(get('heartbeatIntervalMs'))
       return n !== undefined ? Math.max(30_000, n) : base.heartbeatIntervalMs
     })(),
+    geminiAppEnabled: asBool(get('geminiAppEnabled')) ?? base.geminiAppEnabled,
+    geminiAppEndpoint: asString(get('geminiAppEndpoint')) ?? base.geminiAppEndpoint,
+    geminiAppToken: asString(get('geminiAppToken')) ?? base.geminiAppToken,
+    geminiAppTimeoutMs: asNum(get('geminiAppTimeoutMs')) ?? base.geminiAppTimeoutMs,
+    geminiAppDefaultModel: asString(get('geminiAppDefaultModel')) ?? base.geminiAppDefaultModel,
 
     // Deprecated fields kept for backward compatibility
     agyBin: asString(get('agyBin')) ?? base.agyBin,
@@ -220,6 +225,27 @@ export function resolveConfig(
     const n = asNum(envApiMaxPageSize)
     if (n !== undefined) cfg.apiMaxPageSize = Math.max(1, n)
   }
+
+  // Gemini App (Robin / AGSA) configurations
+  const envGeminiAppEnabled = env.DSH_GEMINI_APP_ENABLED ?? env.GEMINI_APP_ENABLED
+  if (envGeminiAppEnabled !== undefined) {
+    const b = asBool(envGeminiAppEnabled)
+    if (b !== undefined) cfg.geminiAppEnabled = b
+  }
+  const envGeminiAppEndpoint = env.DSH_GEMINI_APP_ENDPOINT ?? env.GEMINI_APP_ENDPOINT
+  if (envGeminiAppEndpoint) cfg.geminiAppEndpoint = envGeminiAppEndpoint
+  const envGeminiAppToken = env.DSH_GEMINI_APP_TOKEN ?? env.GEMINI_APP_TOKEN
+  if (envGeminiAppToken) {
+    cfg.geminiAppToken = envGeminiAppToken
+    if (envGeminiAppEnabled === undefined) cfg.geminiAppEnabled = true
+  }
+  const envGeminiAppTimeout = env.DSH_GEMINI_APP_TIMEOUT_MS ?? env.GEMINI_APP_TIMEOUT_MS
+  if (envGeminiAppTimeout !== undefined) {
+    const n = asNum(envGeminiAppTimeout)
+    if (n !== undefined) cfg.geminiAppTimeoutMs = Math.max(1000, n)
+  }
+  const envGeminiAppDefaultModel = env.DSH_GEMINI_APP_DEFAULT_MODEL ?? env.GEMINI_APP_DEFAULT_MODEL
+  if (envGeminiAppDefaultModel) cfg.geminiAppDefaultModel = envGeminiAppDefaultModel
 
   return cfg
 }

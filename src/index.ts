@@ -8,8 +8,9 @@ import { mkdirSync, writeFileSync, existsSync, readFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { dshHome, overridesPath, readOverrides, resolveConfig, stateDir } from './common/config.ts'
-import { PROVIDER_ID, type PluginConfig } from './common/types.ts'
+import { PROVIDER_ID, GEMINI_APP_PROVIDER_ID, type PluginConfig } from './common/types.ts'
 import { AgyAdapter } from './host/adapter.ts'
+import { GeminiAppAdapter } from './host/gemini-app-adapter.ts'
 import { describePoolAuthHealth, reauthGuidanceResolver } from './host/account-health.ts'
 import { handleAccountModels } from './host/account-models.ts'
 import { defineAgyAskTool } from './host/ask-tool.ts'
@@ -265,6 +266,19 @@ export function apply(ctx: Context, entryConfig: Record<string, unknown> = {}): 
       log('registered provider route: ' + PROVIDER_ID + ' (Direct CloudCode)')
     } catch (e) {
       log('adapter registration failed: ' + String(e))
+    }
+  }
+
+  if (getConfig().geminiAppEnabled) {
+    try {
+      const geminiAdapter = new GeminiAppAdapter({
+        getConfig,
+        log,
+      })
+      ctx.llm.registerAdapter([GEMINI_APP_PROVIDER_ID], geminiAdapter)
+      log('registered provider route: ' + GEMINI_APP_PROVIDER_ID + ' (Google Gemini App / Robin)')
+    } catch (e) {
+      log('gemini-app adapter registration failed: ' + String(e))
     }
   }
 

@@ -8,6 +8,7 @@ import type { AccountPoolManager } from './pool.ts'
 import { describeAccountAuth, REAUTH_COMMAND, scopeLabel } from './account-health.ts'
 import type { PoolAuthFlow } from './pool-auth.ts'
 import type { QuotaService } from './quota.ts'
+import { saveGeminiAppToken } from './gemini-app.ts'
 
 export interface CommandDeps {
   cfg: () => PluginConfig
@@ -34,6 +35,7 @@ const HELP = [
   '- `/ccl auth-code <code>` — finish login by pasting the code (fallback)',
   '- `/ccl models` — refresh and list discovered models',
   '- `/ccl effort <low|medium|high|default>` — default reasoning effort',
+  '- `/ccl gemini-token <token>` — configure Google OAuth bearer token for Gemini App (Robin)',
   '- `/ccl doctor` — write a diagnostic report and return its path',
   '- `/ccl help` — this text',
 ].join('\n')
@@ -146,6 +148,13 @@ async function handle(deps: CommandDeps, raw: string): Promise<CommandResult> {
       const path = await deps.runDoctor()
       return ok('Diagnostic report written to `' + path + '` — attach it when opening an issue.')
     }
+    if (sub === 'gemini-token') {
+      if (!arg) return err('usage: /ccl gemini-token <token>')
+      saveGeminiAppToken(arg)
+      deps.setOverride('geminiAppToken', arg)
+      deps.setOverride('geminiAppEnabled', true)
+      return ok('Gemini App token saved and enabled. Provider route `gemini-app` is now active.')
+    }
     return ok(HELP)
   } catch (e) {
     return err(e instanceof Error ? e.message : String(e))
@@ -216,6 +225,11 @@ export async function renderStatus(deps: CommandDeps): Promise<string> {
     '- default effort: ' + (cfg.defaultEffort !== '' ? cfg.defaultEffort : 'model default'),
     '- catalog: ' + cat.source + ' (' + cat.models.length + ' models)',
     '- pool accounts: ' + accounts.length + ' accounts configured',
+    ...(cfg.geminiAppEnabled
+      ? [
+          `- gemini-app: enabled (endpoint: ${cfg.geminiAppEndpoint}, token: ${cfg.geminiAppToken ? 'configured' : 'not configured'})`,
+        ]
+      : []),
     ...(reauthNeeded > 0
       ? [
           `- 需要重新授权: ${reauthNeeded} 个账号的 Google 授权 scope 不足，请对这些账号执行 \`${REAUTH_COMMAND}\``,
