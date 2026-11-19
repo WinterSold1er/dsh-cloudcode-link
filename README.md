@@ -35,7 +35,7 @@
 > Google Cloud Code PA 服务及 OAuth 登录需要直连 Google 官方服务器（`oauth2.googleapis.com`、`cloudcode-pa.googleapis.com` 等）。
 >
 > 1. **推荐方式**：开启代理工具（Clash / Surge / v2rayA / Sing-box / Loon 等）的 **TUN 虚拟网卡模式**，确保终端与后台 Node.js 进程网络畅通。
-> 2. **GUI 账号独立代理**：进入 DSH「设置 → Antigravity / Cloud Code」管理面板，可为每个账号单独绑定专属 HTTP(S) / SOCKS 代理，实现多账号不同 IP 出口隔离。
+> 2. **GUI 账号独立代理**：进入 DSH「设置 → CloudCode Link」管理面板，可为每个账号单独绑定专属 HTTP(S) / SOCKS 代理，实现多账号不同 IP 出口隔离。
 
 ---
 

@@ -333,7 +333,7 @@ describe('M3: Adapter & Failover', () => {
       assert.equal(finish.reason.kind, 'error')
       const failure = (finish.reason as any).failure
       assert.equal(failure?.code, 'AUTH_REQUIRED')
-      assert.match(failure?.message || '', /No authenticated Antigravity account available/)
+      assert.match(failure?.message || '', /No authenticated CloudCode Link account available/)
     }
   })
 })

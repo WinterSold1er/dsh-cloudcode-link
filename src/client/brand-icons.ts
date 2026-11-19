@@ -31,3 +31,52 @@ export const UI_PATHS = {
   layers: 'M12 2 2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5',
 } as const
 
+/** One drawing primitive of the settings-nav glyph (24-unit canvas). */
+export interface SettingsNavShape {
+  readonly tag: 'ellipse' | 'circle';
+  readonly attrs: Record<string, string | number>;
+}
+
+/**
+ * Paint for the settings-nav glyph. `currentColor` inherits the shell's own nav text
+ * color, which is what keeps an inactive row readable in both DSH themes; the active
+ * row switches to the panel accent token, with `currentColor` as the fallback for the
+ * window where the panel stylesheet has not mounted yet.
+ */
+export function settingsNavPaint(active: boolean): string {
+  return active ? 'var(--agy-accent, currentColor)' : 'currentColor';
+}
+
+/**
+ * Settings-nav glyph for the `settings.section.icon` seat, which the shell renders at
+ * 16px inside its own nav button. Simplified brand mark: one orbit ring with the solid
+ * core drawn on top of it, so the ring reads as passing behind the core. Gradient-free
+ * on purpose — an orb gradient smears at 16px and its <defs> force the whole SVG
+ * subtree to repaint on every re-render. React-free so the geometry is unit-testable.
+ */
+export function settingsNavShapes(active: boolean): SettingsNavShape[] {
+  const paint = settingsNavPaint(active);
+  return [
+    {
+      tag: 'ellipse',
+      attrs: {
+        cx: 12, cy: 12, rx: 10, ry: 6.2, fill: 'none',
+        stroke: paint, 'stroke-width': 2, transform: 'rotate(-20 12 12)',
+      },
+    },
+    { tag: 'circle', attrs: { cx: 12, cy: 12, r: 3.2, fill: paint } },
+  ];
+}
+
+/**
+ * Normalize the props the settings shell hands an icon contribution
+ * (`{ size, active }`). Only a finite positive number is taken as a size — anything
+ * else falls back to the shell's 16px default instead of rendering a broken glyph,
+ * and only a real boolean `true` counts as active.
+ */
+export function settingsNavProps(props: unknown): { size: number; active: boolean } {
+  const given = (typeof props === 'object' && props !== null ? props : {}) as { size?: unknown; active?: unknown };
+  const size = typeof given.size === 'number' && Number.isFinite(given.size) && given.size > 0 ? given.size : 16;
+  return { size, active: given.active === true };
+}
+

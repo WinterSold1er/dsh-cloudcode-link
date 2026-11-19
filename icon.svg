@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 36 36" width="36" height="36" role="img">
+  <defs>
+    <linearGradient id="ccl-orb" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#4c8dff"/>
+      <stop offset="1" stop-color="#a96bff"/>
+    </linearGradient>
+  </defs>
+  <ellipse cx="18" cy="18" rx="15" ry="9.3" fill="none" stroke="url(#ccl-orb)" stroke-width="3" transform="rotate(-20 18 18)"/>
+  <circle cx="18" cy="18" r="4.8" fill="url(#ccl-orb)"/>
+</svg>

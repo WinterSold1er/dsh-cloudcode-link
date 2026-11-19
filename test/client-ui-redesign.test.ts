@@ -16,14 +16,16 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 
 import { accountAddFlowView, applyPollOutcome, seedConfigDrafts } from '../src/client/poll-state.ts';
+import { settingsNavPaint, settingsNavProps, settingsNavShapes } from '../src/client/brand-icons.ts';
 
 const read = (p: string): string => readFileSync(new URL(p, import.meta.url), 'utf8');
 
 const clientSource = read('../src/client/index.ts');
 const themeSource = read('../src/client/theme.ts');
+const brandSource = read('../src/client/brand-icons.ts');
 const modelsSource = read('../src/client/account-models.ts');
 
 const count = (src: string, re: RegExp): number => (src.match(new RegExp(re.source, 'g')) ?? []).length;
@@ -101,6 +103,57 @@ test('B3. add-account modal keeps browser login reachable whenever the flow is n
 	}
 });
 
+// ============ BEHAVIOUR: settings nav glyph (defect: settings row had no own icon) ============
+
+test('B4. nav-glyph props normalize whatever the shell passes; anything unusable falls back to 16px inactive', () => {
+	assert.deepEqual(settingsNavProps({ size: 16, active: true }), { size: 16, active: true });
+	// The shell owns the button and may mount the contribution with no props at all.
+	assert.deepEqual(settingsNavProps(undefined), { size: 16, active: false }, 'a props-less mount must still render a glyph');
+	assert.deepEqual(settingsNavProps(null), { size: 16, active: false });
+	assert.deepEqual(settingsNavProps({}), { size: 16, active: false });
+	assert.deepEqual(settingsNavProps('nonsense'), { size: 16, active: false }, 'a non-object must not be indexed for props');
+	// A size that cannot produce a visible box must fall back rather than draw nothing.
+	for (const size of [0, -4, Number.NaN, Number.POSITIVE_INFINITY, '16']) {
+		assert.deepEqual(settingsNavProps({ size }), { size: 16, active: false }, `size=${String(size)} must fall back to the shell default`);
+	}
+	assert.deepEqual(settingsNavProps({ size: 20, active: 'true' }), { size: 20, active: false }, 'only a real true marks the row active');
+});
+
+test('B5. nav-glyph geometry: ring behind core, token paint only, and legible inside the 24-unit canvas at 16px', () => {
+	const shapes = settingsNavShapes(false);
+	assert.equal(shapes.length, 2, 'the mark is one orbit ring plus one solid core');
+	assert.deepEqual(shapes.map((s) => s.tag), ['ellipse', 'circle'], 'the ring is drawn first so the core covers it — the orbit reads as passing behind the core');
+	const [ring, core] = [shapes[0]!, shapes[1]!];
+	assert.equal(ring.attrs.fill, 'none', 'the ring is a stroke, not a filled blob');
+	assert.equal(ring.attrs.stroke, settingsNavPaint(false));
+	assert.equal(core.attrs.fill, settingsNavPaint(false), 'core and ring share one paint so the mark stays one color');
+	// Token-driven, no literals: the glyph inherits the shell's nav text color.
+	const paints = shapes.flatMap((s) => Object.values(s.attrs)).filter((v) => typeof v === 'string') as string[];
+	assert.deepEqual(paints.filter((v) => /#[0-9a-fA-F]{3,8}\b|\brgba?\(/.test(v)), [], 'the glyph must not carry literal colors');
+	assert.equal(settingsNavPaint(false), 'currentColor', 'inactive inherits the shell nav text color');
+	assert.equal(settingsNavPaint(true), 'var(--agy-accent, currentColor)', 'active uses the panel accent token, with currentColor as the fallback before the panel stylesheet mounts');
+	assert.equal(settingsNavShapes(true)[1]!.attrs.fill, settingsNavPaint(true), 'active paint reaches the core');
+	assert.equal(settingsNavShapes(true)[0]!.attrs.stroke, settingsNavPaint(true), 'active paint reaches the ring');
+
+	const num = (v: string | number | undefined): number => Number(v);
+	const stroke = num(ring.attrs['stroke-width']);
+	const rx = num(ring.attrs.rx), ry = num(ring.attrs.ry), coreR = num(core.attrs.r);
+	const rotate = num(/rotate\((-?[\d.]+)/.exec(String(ring.attrs.transform))?.[1]);
+	assert.ok(stroke > 0 && rx > 0 && ry > 0 && coreR > 0, 'all geometry must be positive');
+	// Derived half-extents of the rotated ring, stroke included, must stay inside the 24-unit canvas.
+	const halfX = Math.hypot(rx * Math.cos(rotate * Math.PI / 180), ry * Math.sin(rotate * Math.PI / 180)) + stroke / 2;
+	const halfY = Math.hypot(rx * Math.sin(rotate * Math.PI / 180), ry * Math.cos(rotate * Math.PI / 180)) + stroke / 2;
+	assert.ok(halfX <= 12 && halfY <= 12, `ring half-extents ${halfX.toFixed(2)}x${halfY.toFixed(2)} must fit the 24-unit viewBox`);
+	assert.ok(ry >= coreR, 'the ring line must not cut through the middle of the core');
+	assert.ok(coreR + stroke <= rx, 'the ring must clear the core along its major axis');
+
+	// Legibility at the shell's 16px: stroke and core must survive the 24→16 scale-down.
+	const scale = 16 / 24;
+	assert.ok(stroke * scale >= 1, `ring stroke renders ${stroke * scale}px at 16px — it must stay at least 1px`);
+	assert.ok(2 * coreR * scale >= 4, `core diameter renders ${2 * coreR * scale}px at 16px — it must stay a visible dot`);
+	assert.ok(2 * halfX * scale >= 10, 'the mark must still fill most of the 16px seat');
+});
+
 // ============ STRUCTURAL: wiring audits (count-/shape-based, sabotage-sensitive) ============
 
 test('S1. STRUCTURAL AUDIT — aria-controls always points at a panel id produced by one helper', () => {
@@ -175,15 +228,23 @@ test('S6. STRUCTURAL AUDIT — coverage diff and fallback source labels are rend
 	assert.equal(count(clientSource, /来源：最近一次额度同步/), 2, 'quota-fallback source is labelled in both panel variants');
 });
 
-test('S7. STRUCTURAL AUDIT — chat-header injection is gone; settings.section is the only entry', () => {
+test('S7. STRUCTURAL AUDIT — chat-header injection is gone; the settings page and its nav-icon seat are the only entries', () => {
 	assert.equal(clientSource.includes('conversation.session.header.actions'), false, 'chat header slot must not be referenced anywhere');
 	assert.equal(clientSource.includes('AgySessionStatus'), false, 'badge component must be deleted');
 	assert.equal(clientSource.includes('AgyModalDialog'), false, 'badge modal component must be deleted');
 	assert.equal(clientSource.includes('agyModalStore'), false, 'badge-only store must be deleted');
-	assert.equal(count(clientSource, /ctx\.slots\.inject\(/), 1, 'exactly one slot injection must remain');
-	assert.equal(clientSource.includes("ctx.slots.inject('settings.section'"), true, 'settings.section injection must exist');
+	assert.equal(count(clientSource, /ctx\.slots\.inject\(/), 2, 'exactly two injections: the settings page and its nav-icon seat — no other UI seat may creep back');
+	assert.equal(clientSource.includes("ctx.slots.inject('settings.section',"), true, 'settings.section injection must exist');
+	assert.equal(clientSource.includes("ctx.slots.inject('settings.section.icon',"), true, 'the optional nav-icon seat must be injected by the same apply() so it shares the page lifecycle');
+	assert.equal(count(clientSource, /ctx\.slots\.register\(/), 2, 'each injection registers exactly once (no duplicate registration on re-apply)');
+	assert.equal(count(clientSource, /name: 'settings.section',/), 1, 'exactly one settings.section registration');
+	assert.equal(count(clientSource, /name: 'settings\.section\.icon',/), 1, 'exactly one nav-icon registration');
 	assert.equal(clientSource.includes("name: 'settings.section'"), true, 'register must target the settings.section slot');
-	assert.equal(clientSource.includes("id: 'agy-link'"), true, 'settings entry id preserved');
+	// The shell addresses the icon seat by the target section's id: both registrations must
+	// read one constant, otherwise the two ids drift and the glyph silently never renders.
+	assert.equal(clientSource.includes("const SETTINGS_SECTION_ID = 'agy-link'"), true, 'settings entry id preserved in a single constant');
+	assert.equal(count(clientSource, /id:\s*SETTINGS_SECTION_ID/), 2, 'section id and icon id must come from the same constant');
+	assert.equal(count(clientSource, /id: 'agy-link'/), 0, 'no loose entry-id literal may survive beside the constant');
 });
 
 test('S8. STRUCTURAL AUDIT — model panel stays wired to the pool/account-models contract endpoint', () => {
@@ -207,4 +268,69 @@ test('S9. STRUCTURAL AUDIT — color literals stay confined to the token-definit
 	assert.deepEqual(outside.match(colorRe) ?? [], [], 'every literal color must live inside the token block');
 	assert.equal(clientSource.includes("h('style', null, THEME_CSS)"), true, 'component must inject the token stylesheet');
 	assert.equal(clientSource.includes('var(--agy-'), true, 'component styles must be token-driven');
+});
+
+test('S10. STRUCTURAL AUDIT — the nav glyph is on the render path (not a declared-but-unused component) and the product name is CloudCode Link', () => {
+	// Declared once, consumed exactly once: an icon component nobody registers is dead code
+	// and the row silently keeps the shell's default gear.
+	assert.equal(count(clientSource, /function AgySettingsNavIcon\(/), 1, 'the nav-icon component must be declared exactly once');
+	assert.equal(count(clientSource, /AgySettingsNavIcon/g), 2, 'declaration + the settings.section.icon registration consume it');
+	const start = clientSource.indexOf('function AgySettingsNavIcon(');
+	const end = clientSource.indexOf('\n}', start);
+	assert.ok(start >= 0 && end > start, 'the nav-icon body must be locatable for the render-path audit');
+	const body = clientSource.slice(start, end);
+	assert.equal(body.includes('settingsNavProps(props)'), true, 'the render path must normalize the shell props through the tested helper');
+	assert.equal(body.includes('settingsNavShapes(active)'), true, 'the render path must draw the tested shape set');
+	assert.equal(body.includes("'aria-hidden': true"), true, 'the mark must not add a second accessible name to the shell-owned row');
+	assert.equal(body.includes("viewBox: '0 0 24 24'"), true, 'the glyph is drawn on the same 24-unit canvas the shape helper measures');
+	assert.equal(body.includes('width: size') && body.includes('height: size'), true, 'the shell-passed size must drive the glyph box');
+	assert.equal(body.includes('url(#'), false, 'the 16px glyph must not carry gradient defs (they smear at that size and force SVG repaint)');
+	// The registration must hand the shell that component, not some other node.
+	const iconRegister = clientSource.slice(clientSource.indexOf("name: 'settings.section.icon'"), clientSource.indexOf('AgySettingsNavIcon,', clientSource.indexOf("name: 'settings.section.icon'")));
+	assert.ok(iconRegister.includes('SETTINGS_SECTION_ID'), 'the icon seat is addressed by the section id constant');
+	assert.ok(clientSource.slice(clientSource.indexOf("name: 'settings.section'")).includes('AgySettingsSection,'), 'the section registration still mounts the settings page');
+
+	// One label constant drives every user-visible product name in the client half.
+	assert.equal(clientSource.includes("const SETTINGS_SECTION_LABEL = 'CloudCode Link'"), true, 'the settings entry is named CloudCode Link');
+	assert.equal(count(clientSource, /SETTINGS_SECTION_LABEL/g), 5, 'nav row label, both panel titles and the tablist aria-label all read the constant');
+	// Rename audit: no leftover product name anywhere in the client half (agy-* tokens and
+	// agy-* ids stay on purpose — they are style/wiring names, not the product name).
+	for (const [file, src] of [
+		['src/client/index.ts', clientSource],
+		['src/client/theme.ts', themeSource],
+		['src/client/brand-icons.ts', brandSource],
+		['src/client/account-models.ts', modelsSource],
+		['src/client/poll-state.ts', read('../src/client/poll-state.ts')],
+	] as const) {
+		assert.deepEqual((src.match(/antigravity/gi) ?? []) as string[], [], `${file} must not spell the product name Antigravity`);
+	}
+});
+
+test('S11. STRUCTURAL AUDIT — package metadata publishes the plugin artwork the Plugins page renders', () => {
+	const pkg = JSON.parse(read('../package.json')) as { exports?: Record<string, unknown>; files?: string[]; icon?: string };
+	const icon = pkg.exports?.['./icon'];
+	assert.equal(typeof icon, 'string', 'exports["./icon"] must exist so the Host resolves plugin artwork without evaluating plugin code');
+	const iconPath = String(icon);
+	assert.ok(iconPath.startsWith('./'), 'the icon export must be a package-relative path');
+	assert.ok(!iconPath.includes('..'), 'the icon must stay inside the package');
+	assert.equal(pkg.exports?.['./package.json'], './package.json', 'the manifest export is what the Host reads for the fallback title/description');
+	const iconUrl = new URL(iconPath.slice(2), new URL('../', import.meta.url));
+	assert.ok(existsSync(iconUrl), `${iconPath} must exist in the package`);
+	const svg = read(`../${iconPath.slice(2)}`);
+	assert.ok(svg.includes('<svg'), `${iconPath} must be an SVG document`);
+	assert.equal(/<script|<style|href="/.test(svg), false, 'plugin artwork must be self-contained: no scripts, stylesheets or external references');
+	assert.ok(svg.includes('viewBox='), 'the artwork must declare its canvas');
+	assert.ok(Buffer.byteLength(svg, 'utf8') <= 256 * 1024, 'the Host rejects plugin icons above 256 KiB');
+	const openTag = /<svg\b[^>]*>/.exec(svg)?.[0] ?? '';
+	const dims = [...openTag.matchAll(/\s(width|height)="(\d+)"/g)].map((m) => Number(m[2]));
+	assert.equal(dims.length, 2, 'the artwork must declare both width and height');
+	assert.equal(dims[0]!, dims[1]!, 'plugin artwork is drawn on a square card seat');
+	assert.ok(dims[0]! >= 24, 'the declared artwork box must be large enough to stay sharp on the plugin card');
+	assert.ok(svg.includes('<circle') && svg.includes('<ellipse') && svg.includes('rotate('), 'the plugin icon uses the same ring-behind-core mark as the nav glyph');
+	// npm only ships what files[] lists; the export is useless in an installed package otherwise.
+	const shipped = (pkg.files ?? []).map((f) => f.replace(/^\.\//, ''));
+	assert.equal(shipped.includes(iconPath.replace(/^\.\//, '')), true, `${iconPath} must be listed in files so installed packages actually carry it`);
+	// The Host prefers a manifest-declared icon and only falls back to the ./icon export;
+	// both must name the same artwork or the plugin card changes depending on the path taken.
+	assert.equal(pkg.icon, iconPath, 'the manifest icon field must name the same artwork as the ./icon export');
 });

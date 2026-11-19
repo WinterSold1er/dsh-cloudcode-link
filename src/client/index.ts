@@ -1,10 +1,10 @@
 // dsh-cloudcode-link client half (browser).
-// Single product entry: the DSH settings page (Gear -> Antigravity). The chat header no
+// Single product entry: the DSH settings page (Gear -> CloudCode Link). The chat header no
 // longer carries any plugin button — status access, account management, model coverage,
 // usage stats, diagnostics and config all live behind the settings.section entry.
 import type { Context } from '@deepseek-ai/cordis';
 import type { AccountPoolData, FamilyQuotaInfo, ManagedAccount } from '../common/pool-types.ts';
-import { BRAND_COLORS, BRAND_PATHS, UI_PATHS } from './brand-icons.ts';
+import { BRAND_COLORS, BRAND_PATHS, UI_PATHS, settingsNavProps, settingsNavShapes } from './brand-icons.ts';
 import { S, THEME_CSS } from './theme.ts';
 import {
 	EMPTY_PANEL,
@@ -67,6 +67,12 @@ export interface ClientContext extends Context {
 		): () => void;
 	};
 }
+
+// Settings identity, declared once: the shell addresses the optional nav-icon seat by the
+// target section's id, so both registrations must read the same constant — a literal on
+// either side could drift and the icon would silently never render.
+const SETTINGS_SECTION_ID = 'agy-link';
+const SETTINGS_SECTION_LABEL = 'CloudCode Link';
 
 interface StatusPayload {
 	bin?: string | null;
@@ -293,7 +299,7 @@ const FAMILY_LABEL: Record<ModelFamilyKey, string> = {
 // (a per-render ++ counter forced every SVG subtree to repaint on each re-render).
 const agyIconGradientIds = new Map<number, string>();
 
-/** Antigravity mark: gradient orb with an orbit ring (product has no public simple-icon). */
+/** CloudCode Link orb mark: gradient core with an orbit ring (product has no public simple-icon). */
 function agyIcon(size = 14): unknown {
 	let gid = agyIconGradientIds.get(size);
 	if (!gid) {
@@ -320,6 +326,27 @@ function agyIcon(size = 14): unknown {
 			transform: 'rotate(-18 12 12)',
 		}),
 	);
+}
+
+/**
+ * Settings-nav glyph for the optional `settings.section.icon` seat. The shell owns the nav
+ * button, the row label and its default gear, and mounts this contribution only when the
+ * registration id equals a section id it renders (hence SETTINGS_SECTION_ID below). The
+ * glyph itself stays gradient-free for legibility at the shell's 16px; its geometry and
+ * prop normalization live in brand-icons.ts, and this component is the render path that
+ * consumes them — the aria-hidden is ours to keep even though the shell already hides the
+ * wrapper span, so the mark never adds a second accessible name to the row.
+ */
+function AgySettingsNavIcon(props?: unknown): unknown {
+	const { size, active } = settingsNavProps(props);
+	return h('svg', {
+		viewBox: '0 0 24 24',
+		width: size,
+		height: size,
+		'aria-hidden': true,
+		focusable: 'false',
+		style: { display: 'block' },
+	}, ...settingsNavShapes(active).map((shape) => h(shape.tag, shape.attrs)));
 }
 
 /**
@@ -1706,7 +1733,7 @@ export function apply(ctx: ClientContext): void {
 			tabRefs.current[key]?.focus?.();
 		};
 
-		const navBar = h('nav', { style: S.navBar, role: 'tablist', 'aria-label': 'Antigravity 设置分区', onKeyDown: onNavKeyDown },
+		const navBar = h('nav', { style: S.navBar, role: 'tablist', 'aria-label': `${SETTINGS_SECTION_LABEL} 设置分区`, onKeyDown: onNavKeyDown },
 			...SECTIONS.map((s) => h('button', {
 				key: s.key,
 				ref: (node: { focus: () => void } | null) => { tabRefs.current[s.key] = node; },
@@ -1736,7 +1763,7 @@ export function apply(ctx: ClientContext): void {
 			return h('div', { className: 'agy-root', style: S.container },
 				h('style', null, THEME_CSS),
 				h('div', { style: S.headerCard },
-					h('div', { style: { display: 'flex', alignItems: 'center', gap: 'var(--agy-space-2)' } }, agyIcon(18), h('span', { style: S.panelTitle }, 'Antigravity')),
+					h('div', { style: { display: 'flex', alignItems: 'center', gap: 'var(--agy-space-2)' } }, agyIcon(18), h('span', { style: S.panelTitle }, SETTINGS_SECTION_LABEL)),
 					h('span', { style: { display: 'inline-flex', alignItems: 'center', gap: '6px', ...S.muted } }, h('span', { className: 'agy-spinner', 'aria-hidden': true }), '正在加载状态'),
 				),
 				renderToastBanner(),
@@ -1749,7 +1776,7 @@ export function apply(ctx: ClientContext): void {
 		const headerCard = h('div', { style: S.headerCard },
 			h('div', { style: { display: 'flex', alignItems: 'center', gap: 'var(--agy-space-2)', flexWrap: 'wrap', minWidth: 0 } },
 				agyIcon(18),
-				h('span', { style: S.panelTitle }, 'Antigravity'),
+				h('span', { style: S.panelTitle }, SETTINGS_SECTION_LABEL),
 				h('span', { style: isAuthed ? S.badgeReady : S.badgeUnready }, isAuthed ? '就绪' : '待认证'),
 				h('span', {
 					className: 'agy-num',
@@ -1789,15 +1816,29 @@ export function apply(ctx: ClientContext): void {
 	};
 
 	// Single product entry (user rule): the settings page only — no chat-UI injection anymore.
+	// The nav glyph is an optional seat of that same row, so it is injected by this same
+	// apply(): each inject factory hands the host the dispose of the registration it made,
+	// unloading the plugin drops the page and its glyph together, and neither registration
+	// can happen twice.
 	ctx.slots.inject('settings.section', () => {
 		const dispose = ctx.slots.register(
 			{
 				name: 'settings.section',
-				id: 'agy-link',
+				id: SETTINGS_SECTION_ID,
 				order: 20,
-				label: 'Antigravity',
+				label: SETTINGS_SECTION_LABEL,
 			},
 			AgySettingsSection,
+		);
+		return dispose;
+	});
+	ctx.slots.inject('settings.section.icon', () => {
+		const dispose = ctx.slots.register(
+			{
+				name: 'settings.section.icon',
+				id: SETTINGS_SECTION_ID,
+			},
+			AgySettingsNavIcon,
 		);
 		return dispose;
 	});

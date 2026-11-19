@@ -1,4 +1,4 @@
-// Model-panel data layer for the Antigravity settings UI.
+// Model-panel data layer for the CloudCode Link settings UI.
 //
 // Data flow (kept honest, never silently synthetic):
 //   1. GET  {api}/pool/account-models?id=<id>  -> AccountModelsPayload (source: 'api')

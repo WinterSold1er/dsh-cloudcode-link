@@ -121,14 +121,14 @@ async function handle(deps: CommandDeps, raw: string): Promise<CommandResult> {
       const st = await flow.submitCode(arg)
       if (st.ok) {
         deps.store?.()?.clear()
-        return ok(st.message ?? 'Logged in to Antigravity.')
+        return ok(st.message ?? 'Logged in to CloudCode Link.')
       }
       return err(st.message ?? 'login failed')
     }
     if (sub === 'models') {
       const cat = await deps.catalog().forceRefresh()
       const lines = [
-        '**Antigravity models** — source: ' + cat.source + (cat.lastError === undefined ? '' : ' — ' + cat.lastError) + ':',
+        '**CloudCode Link models** — source: ' + cat.source + (cat.lastError === undefined ? '' : ' — ' + cat.lastError) + ':',
       ]
       for (const m of cat.models) {
         lines.push('- `' + m.id + '` — ' + m.name + (m.efforts ? ' — efforts: ' + m.efforts.join(' / ') : ''))
@@ -163,7 +163,7 @@ export function renderAccountPool(deps: CommandDeps): string | null {
   const accounts = pool.getAccounts()
   const data = pool.getPoolData()
   const lines = [
-    `**Antigravity Account Pool (${accounts.length} accounts, mode: ${data.mode})**`,
+    `**CloudCode Link Account Pool (${accounts.length} accounts, mode: ${data.mode})**`,
   ]
   for (let i = 0; i < accounts.length; i++) {
     const a = accounts[i]

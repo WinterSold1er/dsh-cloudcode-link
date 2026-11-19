@@ -147,7 +147,7 @@ export function classifyPoolFailure(report: PoolFailureReport): PoolFailureVerdi
   const credentialOnly = allOf('auth') || (failures.length === 0 && familyStatus.reason === 'auth_required')
   if (credentialOnly) {
     return {
-      message: `No authenticated Antigravity account available. Please sign in via /ccl auth.${lastGuidance(failures)}`,
+      message: `No authenticated CloudCode Link account available. Please sign in via /ccl auth.${lastGuidance(failures)}`,
       code: 'AUTH_REQUIRED',
     }
   }
@@ -163,7 +163,7 @@ export function classifyPoolFailure(report: PoolFailureReport): PoolFailureVerdi
   if (modelBlocked) {
     return {
       message:
-        `No Antigravity account in this pool serves model '${wireModel}' (model family '${family}'). ` +
+        `No CloudCode Link account in this pool serves model '${wireModel}' (model family '${family}'). ` +
         `Check /ccl accounts for an account entitled to it, or pick another model.${lastGuidance(failures)}${upstream}`,
       code: 'MODEL_NOT_AVAILABLE',
       status: lastHttpStatus(failures, 403) ?? undefined,
@@ -179,7 +179,7 @@ export function classifyPoolFailure(report: PoolFailureReport): PoolFailureVerdi
     const resetMs = familyStatus.resetInMs
     const resetMsg = resetMs && resetMs > 0 ? ` Resets in ${formatDuration(resetMs)}.` : ''
     return {
-      message: `Antigravity quota exhausted for model family '${family}'.${resetMsg}${upstream}`,
+      message: `CloudCode Link quota exhausted for model family '${family}'.${resetMsg}${upstream}`,
       code: 'RATE_LIMIT',
       status: 429,
     }
@@ -195,7 +195,7 @@ export function classifyPoolFailure(report: PoolFailureReport): PoolFailureVerdi
       .replace(/\s+/g, ' ')
       .trim()
     return {
-      message: `Antigravity upstream hit its ${stageText} for model '${wireModel}'${
+      message: `CloudCode Link upstream hit its ${stageText} for model '${wireModel}'${
         detail ? `: ${detail}` : '.'
       }${upstream}`,
       code: 'UPSTREAM_TIMEOUT',
@@ -212,13 +212,13 @@ export function classifyPoolFailure(report: PoolFailureReport): PoolFailureVerdi
 
   if (failures.length === 0) {
     return {
-      message: 'All available Antigravity accounts are exhausted or in cooldown.',
+      message: 'All available CloudCode Link accounts are exhausted or in cooldown.',
       code: 'ACCOUNTS_EXHAUSTED',
     }
   }
 
   return {
-    message: `All Antigravity accounts failed for model '${wireModel}'.${upstream}`,
+    message: `All CloudCode Link accounts failed for model '${wireModel}'.${upstream}`,
     code: 'API_ERROR',
     status: lastHttpStatus(failures) ?? undefined,
   }
@@ -347,9 +347,11 @@ export class AgyAdapter extends LlmAdapter {
   }
 
   override providerInfo(provider: string): LlmProviderInfo {
+    // Provider display name shown in DSH (Settings → Models row, model picker group).
+    // `provider` stays the internal route id `antigravity` — see src/common/types.ts.
     return {
       id: provider,
-      name: 'Google Antigravity',
+      name: 'CloudCode Link',
     }
   }
 
@@ -1045,7 +1047,7 @@ export class AgyAdapter extends LlmAdapter {
                 kind: 'error',
                 failure: {
                   message:
-                    `Antigravity stream for model '${wireModel}' hit the ` +
+                    `CloudCode Link stream for model '${wireModel}' hit the ` +
                     `${TIMEOUT_PHASE_LABEL[stallPhase]}: ${stallDetail}`,
                   code: 'UPSTREAM_TIMEOUT',
                 },

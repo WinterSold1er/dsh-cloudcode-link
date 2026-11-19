@@ -185,6 +185,7 @@ export function apply(ctx: Context, entryConfig: Record<string, unknown> = {}): 
     async () => quota.discoverAvailableModels(),
     getConfig().fallbackModels,
     getConfig().modelsCacheTtlMs,
+    () => quota.composeAvailableModels(),
   )
 
   // Warm model cache in background if logged in

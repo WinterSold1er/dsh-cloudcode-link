@@ -3,6 +3,10 @@
 import { join } from 'node:path'
 import { defaultPoolDir } from '../host/pool.ts'
 
+// Internal provider route id: the value stays `antigravity` so existing profiles
+// (`provider: antigravity`) and stored session model references keep resolving.
+// The name users see in DSH comes from the adapter's providerInfo() — see
+// src/host/adapter.ts `providerInfo` — not from this id.
 export const PROVIDER_ID = 'antigravity'
 export const PLUGIN_ID = 'cloudcode-link'
 export const PKG_NAME = 'dsh-cloudcode-link'

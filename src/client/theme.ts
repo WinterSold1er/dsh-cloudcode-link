@@ -1,4 +1,4 @@
-// Design system for the Antigravity settings UI (client half).
+// Design system for the CloudCode Link settings UI (client half).
 // Awarwards-grade craft rules enforced here:
 //  - Every literal color lives ONLY inside the token block (agy-tokens markers).
 //    Component CSS and React presets reference var(--agy-*) exclusively.
@@ -11,7 +11,7 @@
 export const THEME_CSS = `
 /* agy-tokens:start */
 :root, body {
-	/* --- brand artwork (Antigravity orb gradient) --- */
+	/* --- brand artwork (CloudCode Link orb gradient) --- */
 	--agy-brand-a: #4c8dff;
 	--agy-brand-b: #a96bff;
 

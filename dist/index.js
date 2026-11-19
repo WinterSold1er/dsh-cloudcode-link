@@ -1433,7 +1433,8 @@ function extractModelList(parsed) {
 				for (const [key, entry] of Object.entries(modelsMap ?? {})) {
 					const slug = typeof key === "string" ? key.trim() : "";
 					if (slug === "" || seen.has(slug)) continue;
-					if (!entry || typeof entry !== "object" || !isQuotaPublishedModel(entry)) continue;
+					if (!entry || typeof entry !== "object") continue;
+					if (!isQuotaPublishedModel(entry) && entry.accountListed !== true) continue;
 					if (isInternalModel(slug)) continue;
 					seen.add(slug);
 					published.push({
@@ -1653,16 +1654,59 @@ function buildFallbackCatalog(defs) {
 		inputModalities: d.inputModalities ?? getInputModalitiesForModel(d.id)
 	}));
 }
+/** Raw model entries for a composed cross-account union, filtered like the live payload path. */
+function rawFromUnionModels(models) {
+	const out = [];
+	for (const [key, entry] of Object.entries(models ?? {})) {
+		const slug = typeof key === "string" ? key.trim() : "";
+		if (slug === "" || isInternalModel(slug)) continue;
+		const record = entry;
+		if (record?.disabled === true || record?.enabled === false || record?.isInternal === true) continue;
+		out.push({
+			slug,
+			label: serverDisplayName(record)
+		});
+	}
+	return out;
+}
+/** True when `slug` is `base` itself or one of its effort / tiered variants. */
+function isVariantOf(base, slug) {
+	if (slug === base) return true;
+	if (!slug.startsWith(base + "-")) return false;
+	const rest = slug.slice(base.length + 1);
+	return rest === "tiered" || rest.startsWith("tiered-") || EFFORT_SUFFIXES.includes(rest);
+}
+/**
+* Move provenance from raw slugs onto folded entries: a base is served by every account that
+* lists the base or any of its variants, so `gemini-4-hydrogen` inherits the owners of
+* `gemini-4-hydrogen-low` / `-xhigh`, while `gemini-4-hydrogen-sonar` stays its own entry.
+*/
+function providersForEntries(entries, providers) {
+	const raw = Object.entries(providers ?? {});
+	const out = {};
+	for (const entry of entries) {
+		const owners = /* @__PURE__ */ new Set();
+		for (const [slug, accounts] of raw) {
+			if (!isVariantOf(entry.id, slug)) continue;
+			for (const accountId of accounts) owners.add(accountId);
+		}
+		out[entry.id] = [...owners];
+	}
+	return out;
+}
 var ModelCatalog = class {
 	current;
 	refreshing = null;
 	discover;
 	fallbackDefs;
 	ttlMs;
-	constructor(discover, fallbackDefs = DEFAULT_FALLBACK_MODELS$1, ttlMs = 3e5) {
+	/** Cheap, network-free source of the cross-account model union (see `recomposeFromUnion`). */
+	unionSource;
+	constructor(discover, fallbackDefs = DEFAULT_FALLBACK_MODELS$1, ttlMs = 3e5, unionSource) {
 		this.discover = discover;
 		this.fallbackDefs = fallbackDefs;
 		this.ttlMs = ttlMs;
+		this.unionSource = unionSource;
 		this.current = {
 			source: "fallback",
 			models: buildFallbackCatalog(fallbackDefs),
@@ -1677,7 +1721,10 @@ var ModelCatalog = class {
 		if (!this.discover) return;
 		if (this.refreshing) return this.refreshing;
 		const age = Date.now() - this.current.discoveredAt;
-		if (this.current.source === "discovered" && age < this.ttlMs) return;
+		if (this.current.source === "discovered" && age < this.ttlMs) {
+			if (this.unionSource) this.recomposeFromUnion();
+			return;
+		}
 		this.refreshing = this.refresh().finally(() => {
 			this.refreshing = null;
 		});
@@ -1687,6 +1734,32 @@ var ModelCatalog = class {
 		if (!this.discover) return this.current;
 		await this.refresh();
 		return this.current;
+	}
+	/**
+	* Re-fold the cross-account union without contacting an endpoint.
+	*
+	* The union is read from the pool (`QuotaService.composeAvailableModels`), so an account that
+	* was just added, refreshed or removed changes the catalog immediately; an account whose probe
+	* is failing keeps contributing its last-known list. `discoveredAt` is deliberately not moved:
+	* local re-synthesis is not new information from upstream and must not postpone the next probe.
+	*/
+	recomposeFromUnion() {
+		const snapshot = this.unionSource?.();
+		if (!snapshot) return;
+		const raw = rawFromUnionModels(snapshot.models);
+		if (raw.length === 0) return;
+		const folded = foldEfforts(raw);
+		const { lastError, accountFailures, endpointErrors } = this.current;
+		this.current = {
+			source: "discovered",
+			models: folded,
+			discoveredAt: this.current.discoveredAt,
+			providers: providersForEntries(folded, snapshot.providers),
+			unionAccounts: snapshot.accounts.length,
+			...lastError !== void 0 ? { lastError } : {},
+			...accountFailures ? { accountFailures } : {},
+			...endpointErrors ? { endpointErrors } : {}
+		};
 	}
 	async refresh() {
 		if (!this.discover) return;
@@ -1713,12 +1786,19 @@ var ModelCatalog = class {
 				const endpointErrors = typeof res === "object" && res && "endpointErrors" in res && Array.isArray(res.endpointErrors) ? res.endpointErrors : void 0;
 				if (raw.length > 0) {
 					const folded = foldEfforts(raw);
+					const response = typeof res === "object" && res && !Array.isArray(res) ? res : void 0;
+					const providers = providersForEntries(folded, response?.modelProviders);
+					const unionAccounts = Array.isArray(response?.catalogAccounts) ? response.catalogAccounts.length : void 0;
+					const allAccountsFailed = typeof response?.discoveredFromAccounts === "number" && response.discoveredFromAccounts === 0 && (accountFailures?.length ?? 0) > 0;
 					this.current = {
 						source: "discovered",
 						models: folded,
 						discoveredAt: Date.now(),
+						...response?.modelProviders ? { providers } : {},
+						...unionAccounts !== void 0 ? { unionAccounts } : {},
 						...accountFailures && accountFailures.length > 0 ? { accountFailures } : {},
-						...endpointErrors && endpointErrors.length > 0 ? { endpointErrors } : {}
+						...endpointErrors && endpointErrors.length > 0 ? { endpointErrors } : {},
+						...allAccountsFailed ? { lastError: `models discovery failed for all ${accountFailures.length} account(s); catalog composed from their last-known model lists` } : {}
 					};
 					return;
 				}
@@ -26697,6 +26777,17 @@ var QuotaService = class {
 	lastQuotaProjectResolution;
 	lastModelsProjectResolution;
 	lastDiscoveryDiagnostics;
+	/**
+	* Last-known model roster per account — the durable half of the catalog.
+	*
+	* Seeded from pool.json `accounts[].quotas[fam].models` (what `updateAccountQuotas` writes on
+	* every quota refresh) and replaced only by an answer that actually carried a model list:
+	* a `fetchAvailableModels` payload with a `models` map, or a quota refresh that wrote one.
+	* A timeout, a network error, an over-budget skip or a credential failure never replaces it,
+	* so an account's exclusive models stay selectable while that account is briefly unreachable.
+	* Only an account that *answered* with a list missing an id stops vouching for that id.
+	*/
+	modelRosters = /* @__PURE__ */ new Map();
 	constructor(pool) {
 		this.pool = pool;
 	}
@@ -26978,38 +27069,191 @@ var QuotaService = class {
 		return null;
 	}
 	/**
-	* Discover the models this installation can actually serve.
-	*
-	* Upstream answers per account: an id can be missing from the primary account's
-	* `fetchAvailableModels` payload yet present in a pooled secondary account. So the
-	* whole usable pool is fetched and the `models` maps are unioned by model id —
-	* same id in several accounts keeps the entry that carries `quotaInfo`, otherwise
-	* the first one seen (primary account first). A single failing account never fails
-	* the discovery; only an all-failed pool returns null (which makes ModelCatalog
-	* keep its previous catalog and record `lastError`).
-	*
-	* Budget: at most `concurrency` accounts in flight, `accountTimeoutMs` per account,
-	* and `totalBudgetMs` overall — accounts started after the budget is exhausted are
-	* skipped rather than delaying the merge.
+	* Accounts the model machinery works on, in deterministic order: primary first (its entries win
+	* id collisions, and if a probe budget runs out the primary is the one already merged), then
+	* pool order. Accounts the user switched off (`enabled: false`) or that need a new credential
+	* (`authRequired`) are excluded: neither can serve a request, so neither may vouch for a model.
 	*/
-	async discoverAvailableModels(options) {
-		if (process.env.ANTIGRAVITY_TOKEN?.trim()) return this.fetchAvailableModels(process.env.ANTIGRAVITY_TOKEN.trim());
+	modelPoolOrder() {
 		const poolData = this.pool.getPoolData();
 		const primaryAcc = poolData.primaryAccountId ? this.pool.getAccount(poolData.primaryAccountId) : void 0;
 		const usable = this.pool.getAccounts().filter((a) => a.enabled && !a.authRequired);
-		if (usable.length === 0) return null;
+		if (usable.length === 0) return [];
 		const ordered = [];
 		if (primaryAcc && primaryAcc.enabled && !primaryAcc.authRequired) ordered.push(primaryAcc);
 		for (const acc of usable) if (!ordered.some((a) => a.id === acc.id)) ordered.push(acc);
+		return ordered;
+	}
+	/** Turn one account's persisted `quotas[fam].models` lists into a roster. */
+	rosterFromPersistedQuotas(account) {
+		const models = {};
+		let at = 0;
+		const quotas = account.quotas ?? {};
+		for (const famKey of Object.keys(quotas)) {
+			const family = quotas[famKey];
+			if (!family) continue;
+			if (typeof family.updatedAt === "number" && family.updatedAt > at) at = family.updatedAt;
+			for (const entry of family.models ?? []) {
+				const modelId = typeof entry?.modelId === "string" ? entry.modelId.trim() : "";
+				if (modelId === "") continue;
+				const quotaInfo = {};
+				if (typeof entry.remainingFraction === "number" && Number.isFinite(entry.remainingFraction)) quotaInfo.remainingFraction = entry.remainingFraction;
+				if (typeof entry.resetTime === "string" && entry.resetTime !== "") quotaInfo.resetTime = entry.resetTime;
+				models[modelId] = {
+					...typeof entry.displayName === "string" && entry.displayName !== "" ? { displayName: entry.displayName } : {},
+					...quotaInfo.remainingFraction !== void 0 ? { quotaInfo } : {}
+				};
+			}
+		}
+		return {
+			at,
+			models
+		};
+	}
+	/** Roster of one account: the in-memory one if we have watched it, else what pool.json says. */
+	accountModelRoster(account) {
+		const known = this.modelRosters.get(account.id);
+		if (known) return known;
+		const seeded = this.rosterFromPersistedQuotas(account);
+		this.modelRosters.set(account.id, seeded);
+		return seeded;
+	}
+	/**
+	* Record what one account was seen serving.
+	*
+	* `models` must come from an answer that actually carried a model list; the replacement is
+	* total on purpose, because that is how an id an account stopped offering leaves the catalog.
+	* Failed probes must call neither this nor a roster-keeping path.
+	*
+	* The list is mirrored into pool.json for every family that already has a quota entry for this
+	* account, so the catalog union, the entitlement filter in `selectAccount` and the next plugin
+	* restart all agree on what this account serves. Families with no quota entry are left alone
+	* (the roster still vouches for the id) — inventing a family quota from a model payload would
+	* put numbers upstream never gave us into the scheduler's input.
+	*/
+	rememberAccountModels(accountId, models, at = Date.now()) {
+		this.modelRosters.set(accountId, {
+			at,
+			models
+		});
+		const account = this.pool.getAccount(accountId);
+		if (!account) return;
+		const refreshed = /* @__PURE__ */ new Map();
+		for (const [rawId, entry] of Object.entries(models)) {
+			const modelId = typeof rawId === "string" ? rawId.trim() : "";
+			if (modelId === "") continue;
+			const family = modelFamilyOf(modelId);
+			if (!family || !account.quotas[family]) continue;
+			const list = refreshed.get(family) ?? [];
+			list.push({
+				modelId,
+				...entry?.displayName ? { displayName: entry.displayName } : {},
+				...typeof entry?.quotaInfo?.remainingFraction === "number" && Number.isFinite(entry.quotaInfo.remainingFraction) ? { remainingFraction: entry.quotaInfo.remainingFraction } : {},
+				...typeof entry?.quotaInfo?.resetTime === "string" && entry.quotaInfo.resetTime !== "" ? { resetTime: entry.quotaInfo.resetTime } : {}
+			});
+			refreshed.set(family, list);
+		}
+		if (refreshed.size === 0) return;
+		const quotas = {};
+		for (const [family, list] of refreshed) quotas[family] = {
+			...account.quotas[family],
+			models: list
+		};
+		this.pool.updateAccountQuotas(accountId, quotas);
+	}
+	/**
+	* Union every usable account's last-known model list.
+	*
+	* Cheap and network-free: it reads the pool plus the rosters this process has watched. Same
+	* collision rule as the discovery merge — an id seen on several accounts keeps the entry that
+	* carries `quotaInfo`, otherwise the first one in `modelPoolOrder`. Ids contributed by nobody
+	* are absent, which is what makes "no account serves this" a routable `MODEL_NOT_AVAILABLE`
+	* instead of a phantom catalog entry.
+	*/
+	composeModelUnion(probed = /* @__PURE__ */ new Set()) {
+		const live = new Set(this.pool.getAccounts().map((a) => a.id));
+		for (const id of this.modelRosters.keys()) if (!live.has(id)) this.modelRosters.delete(id);
+		const models = /* @__PURE__ */ new Map();
+		const providers = /* @__PURE__ */ new Map();
+		const accounts = [];
+		for (const account of this.modelPoolOrder()) {
+			const roster = this.accountModelRoster(account);
+			const ids = Object.keys(roster.models);
+			if (ids.length === 0) continue;
+			accounts.push({
+				accountId: account.id,
+				models: ids.length,
+				origin: probed.has(account.id) ? "probed" : "last-known"
+			});
+			for (const id of ids) {
+				const entry = {
+					...roster.models[id] ?? {},
+					accountListed: true
+				};
+				const prev = models.get(id);
+				if (!prev) {
+					models.set(id, entry);
+					providers.set(id, [account.id]);
+					continue;
+				}
+				const owners = providers.get(id);
+				if (owners && !owners.includes(account.id)) owners.push(account.id);
+				if (prev.quotaInfo === void 0 && entry.quotaInfo !== void 0) models.set(id, entry);
+			}
+		}
+		return {
+			models: Object.fromEntries(models),
+			providers: Object.fromEntries(providers),
+			accounts
+		};
+	}
+	/**
+	* Public half of the union: the catalog's cheap local re-synthesis.
+	*
+	* No endpoint is contacted, no token is read, so the model list can follow pool changes
+	* (account added, quota refreshed, account removed) without waiting for a discovery round.
+	*/
+	composeAvailableModels() {
+		return this.composeModelUnion();
+	}
+	/**
+	* Discover the models this installation can actually serve.
+	*
+	* Upstream answers per account: an id can be missing from the primary account's
+	* `fetchAvailableModels` payload yet present in a pooled secondary account. So the whole
+	* usable pool is fetched and the answer is the **union over every usable account's
+	* last-known model list** — an account that answered contributes what it just reported,
+	* an account that timed out or errored contributes what it was last seen serving
+	* (pool.json `accounts[].quotas[fam].models`). An id therefore leaves the catalog only when
+	* every account that vouched for it has since answered with a list that omits it; a failing
+	* probe can never delete a model.
+	*
+	* Same id in several accounts keeps the entry that carries `quotaInfo`, otherwise the first
+	* one seen (primary account first). `models` also carries `accountListed` provenance and
+	* `modelProviders` maps each id to the accounts that list it.
+	*
+	* Budget: at most `concurrency` accounts in flight, `accountTimeoutMs` per account, and
+	* `totalBudgetMs` overall — accounts started after the budget is exhausted are skipped rather
+	* than delaying the merge, and a skipped account still contributes its last-known list.
+	* An all-failed pool with no persisted list anywhere returns null (which makes ModelCatalog
+	* keep its previous catalog and record `lastError`).
+	*/
+	async discoverAvailableModels(options) {
+		if (process.env.ANTIGRAVITY_TOKEN?.trim()) return this.fetchAvailableModels(process.env.ANTIGRAVITY_TOKEN.trim());
+		const ordered = this.modelPoolOrder();
+		if (ordered.length === 0) return null;
 		const concurrency = Math.max(1, Math.min(options?.concurrency ?? DISCOVER_MAX_CONCURRENCY, ordered.length));
 		const accountTimeoutMs = options?.accountTimeoutMs ?? DISCOVER_ACCOUNT_TIMEOUT_MS;
 		const deadline = Date.now() + (options?.totalBudgetMs ?? DISCOVER_TOTAL_BUDGET_MS);
-		const merged = /* @__PURE__ */ new Map();
 		const accountSorts = /* @__PURE__ */ new Map();
 		let succeeded = 0;
 		let failures = 0;
 		let skippedOverBudget = 0;
 		const failureDetails = [];
+		/** Accounts whose probe answered without a model list; their last-known roster stays in force. */
+		const rosterKept = [];
+		/** Accounts that answered this round; their roster is the fresh one. */
+		const probed = /* @__PURE__ */ new Set();
 		let cursor = 0;
 		const fetchOne = async (acc) => {
 			const accessToken = await this.getValidAccessToken(acc);
@@ -27064,16 +27308,10 @@ var QuotaService = class {
 					const res = outcome.res;
 					succeeded++;
 					if (Array.isArray(res.agentModelSorts) && res.agentModelSorts.length > 0) accountSorts.set(acc.id, res.agentModelSorts);
-					for (const [modelId, entry] of Object.entries(res.models ?? {})) {
-						const prev = merged.get(modelId);
-						if (!prev) {
-							merged.set(modelId, entry ?? {});
-							continue;
-						}
-						const prevHasQuota = prev.quotaInfo !== void 0;
-						const nextHasQuota = entry?.quotaInfo !== void 0;
-						if (!prevHasQuota && nextHasQuota) merged.set(modelId, entry);
-					}
+					if (res.models && typeof res.models === "object" && !Array.isArray(res.models)) {
+						this.rememberAccountModels(acc.id, res.models);
+						probed.add(acc.id);
+					} else rosterKept.push(acc.id);
 				} catch (err) {
 					failures++;
 					failureDetails.push({
@@ -27084,28 +27322,36 @@ var QuotaService = class {
 			}
 		});
 		await Promise.allSettled(workers);
-		if (succeeded === 0 || merged.size === 0) return null;
-		let primarySorts = void 0;
-		for (const acc of ordered) {
-			const sorts = accountSorts.get(acc.id);
-			if (sorts) primarySorts = mergeAgentModelSorts(primarySorts, sorts);
-		}
+		const union = this.composeModelUnion(probed);
 		this.lastDiscoveryDiagnostics = {
 			at: Date.now(),
 			succeeded,
 			failures,
 			skippedOverBudget,
 			accountFailures: failureDetails,
-			endpointErrors: this.lastEndpointErrors
+			endpointErrors: this.lastEndpointErrors,
+			unionAccounts: union.accounts.length,
+			catalogAccounts: union.accounts,
+			...rosterKept.length > 0 ? { rosterKeptAccounts: rosterKept } : {}
 		};
+		if (union.accounts.length === 0) return null;
+		let primarySorts = void 0;
+		for (const acc of ordered) {
+			const sorts = accountSorts.get(acc.id);
+			if (sorts) primarySorts = mergeAgentModelSorts(primarySorts, sorts);
+		}
 		return {
-			models: Object.fromEntries(merged),
+			models: union.models,
 			...primarySorts ? { agentModelSorts: primarySorts } : {},
 			discoveredFromAccounts: succeeded,
 			discoveredAccountFailures: failures,
 			discoveredSkippedOverBudget: skippedOverBudget,
 			accountFailures: failureDetails,
-			endpointErrors: this.lastEndpointErrors
+			endpointErrors: this.lastEndpointErrors,
+			catalogAccounts: union.accounts,
+			unionAccounts: union.accounts.length,
+			modelProviders: union.providers,
+			...rosterKept.length > 0 ? { rosterKeptAccounts: rosterKept } : {}
 		};
 	}
 	async refreshAccountQuota(account, force = false, options) {
@@ -27221,6 +27467,19 @@ var QuotaService = class {
 			for (const fam of Object.keys(familyQuotas)) if (familyQuotas[fam] && !familyQuotas[fam].models && account.quotas[fam]?.models) familyQuotas[fam].models = account.quotas[fam].models;
 		}
 		this.pool.updateAccountQuotas(account.id, familyQuotas, email);
+		const brokenDown = {};
+		for (const famKey of Object.keys(familyQuotas)) for (const entry of familyQuotas[famKey]?.models ?? []) {
+			const modelId = typeof entry?.modelId === "string" ? entry.modelId.trim() : "";
+			if (modelId === "") continue;
+			brokenDown[modelId] = {
+				...entry.displayName ? { displayName: entry.displayName } : {},
+				...typeof entry.remainingFraction === "number" && Number.isFinite(entry.remainingFraction) ? { quotaInfo: {
+					remainingFraction: entry.remainingFraction,
+					...entry.resetTime ? { resetTime: entry.resetTime } : {}
+				} } : {}
+			};
+		}
+		if (Object.keys(brokenDown).length > 0) this.rememberAccountModels(account.id, brokenDown, now);
 		return familyQuotas;
 	}
 	async refreshQuotaSummaryOnly(account) {
@@ -29298,18 +29557,18 @@ function classifyPoolFailure(report) {
 	const upstream = summarizeUpstream(failures);
 	const allOf = (cause) => failures.length > 0 && failures.every((f) => f.cause === cause);
 	if (allOf("auth") || failures.length === 0 && familyStatus.reason === "auth_required") return {
-		message: `No authenticated Antigravity account available. Please sign in via /ccl auth.${lastGuidance(failures)}`,
+		message: `No authenticated CloudCode Link account available. Please sign in via /ccl auth.${lastGuidance(failures)}`,
 		code: "AUTH_REQUIRED"
 	};
 	if (familyStatus.reason === "model_not_available" || allOf("model_unsupported") || failures.some((f) => f.cause === "model_unsupported") && !failures.some((f) => f.cause === "auth") && !failures.some((f) => f.cause === "rate_limit")) return {
-		message: `No Antigravity account in this pool serves model '${wireModel}' (model family '${family}'). Check /ccl accounts for an account entitled to it, or pick another model.${lastGuidance(failures)}${upstream}`,
+		message: `No CloudCode Link account in this pool serves model '${wireModel}' (model family '${family}'). Check /ccl accounts for an account entitled to it, or pick another model.${lastGuidance(failures)}${upstream}`,
 		code: "MODEL_NOT_AVAILABLE",
 		status: lastHttpStatus(failures, 403) ?? void 0
 	};
 	if (allOf("rate_limit") || familyStatus.reason === "rate_limited" || familyStatus.suppressed && familyStatus.reason === "quota_exhausted") {
 		const resetMs = familyStatus.resetInMs;
 		return {
-			message: `Antigravity quota exhausted for model family '${family}'.${resetMs && resetMs > 0 ? ` Resets in ${formatDuration(resetMs)}.` : ""}${upstream}`,
+			message: `CloudCode Link quota exhausted for model family '${family}'.${resetMs && resetMs > 0 ? ` Resets in ${formatDuration(resetMs)}.` : ""}${upstream}`,
 			code: "RATE_LIMIT",
 			status: 429
 		};
@@ -29319,7 +29578,7 @@ function classifyPoolFailure(report) {
 		const stageText = [...new Set(timedOut.map((failure) => failure.phase))].map((phase) => phase ? TIMEOUT_PHASE_LABEL[phase] : "upstream stall").join(" + ");
 		const detail = (timedOut[timedOut.length - 1]?.upstreamError ?? "").replace(/\s+/g, " ").trim();
 		return {
-			message: `Antigravity upstream hit its ${stageText} for model '${wireModel}'${detail ? `: ${detail}` : "."}${upstream}`,
+			message: `CloudCode Link upstream hit its ${stageText} for model '${wireModel}'${detail ? `: ${detail}` : "."}${upstream}`,
 			code: "UPSTREAM_TIMEOUT"
 		};
 	}
@@ -29328,11 +29587,11 @@ function classifyPoolFailure(report) {
 		code: "CONNECT_ERROR"
 	};
 	if (failures.length === 0) return {
-		message: "All available Antigravity accounts are exhausted or in cooldown.",
+		message: "All available CloudCode Link accounts are exhausted or in cooldown.",
 		code: "ACCOUNTS_EXHAUSTED"
 	};
 	return {
-		message: `All Antigravity accounts failed for model '${wireModel}'.${upstream}`,
+		message: `All CloudCode Link accounts failed for model '${wireModel}'.${upstream}`,
 		code: "API_ERROR",
 		status: lastHttpStatus(failures) ?? void 0
 	};
@@ -29404,7 +29663,7 @@ var AgyAdapter = class extends LlmAdapter {
 	providerInfo(provider) {
 		return {
 			id: provider,
-			name: "Google Antigravity"
+			name: "CloudCode Link"
 		};
 	}
 	async listModels(provider) {
@@ -29901,7 +30160,7 @@ var AgyAdapter = class extends LlmAdapter {
 							reason: {
 								kind: "error",
 								failure: {
-									message: `Antigravity stream for model '${wireModel}' hit the ${TIMEOUT_PHASE_LABEL[stallPhase]}: ${stallDetail}`,
+									message: `CloudCode Link stream for model '${wireModel}' hit the ${TIMEOUT_PHASE_LABEL[stallPhase]}: ${stallDetail}`,
 									code: "UPSTREAM_TIMEOUT"
 								}
 							}
@@ -30215,14 +30474,14 @@ async function runAgyOnce(deps, req) {
 				ok: false,
 				text: "",
 				conversationId: null,
-				error: `No signed-in Antigravity account serves ${wireModel}: every account's model list excludes it, and no request was sent. Choose a model your accounts actually serve.`,
+				error: `No signed-in CloudCode Link account serves ${wireModel}: every account's model list excludes it, and no request was sent. Choose a model your accounts actually serve.`,
 				durationMs: Date.now() - startTime
 			};
 			return {
 				ok: false,
 				text: "",
 				conversationId: null,
-				error: "No authenticated Antigravity account available.",
+				error: "No authenticated CloudCode Link account available.",
 				durationMs: Date.now() - startTime
 			};
 		}
@@ -30338,12 +30597,12 @@ function compareNatural(a, b) {
 function defineAgyAskTool(deps) {
 	return defineTool({
 		name: "agy_ask",
-		description: "Delegate a one-shot task to a Google Antigravity model via direct CloudCode API. Returns the final answer text.",
+		description: "Delegate a one-shot task to a CloudCode Link model via the direct Google Cloud Code API. Returns the final answer text.",
 		parameters: {
 			prompt: {
 				type: "string",
 				required: true,
-				description: "The task or question for the Antigravity model."
+				description: "The task or question for the CloudCode Link model."
 			},
 			model: {
 				type: "string",
@@ -30551,13 +30810,13 @@ async function handle(deps, raw) {
 			const st = await flow.submitCode(arg);
 			if (st.ok) {
 				deps.store?.()?.clear();
-				return ok(st.message ?? "Logged in to Antigravity.");
+				return ok(st.message ?? "Logged in to CloudCode Link.");
 			}
 			return err(st.message ?? "login failed");
 		}
 		if (sub === "models") {
 			const cat = await deps.catalog().forceRefresh();
-			const lines = ["**Antigravity models** — source: " + cat.source + (cat.lastError === void 0 ? "" : " — " + cat.lastError) + ":"];
+			const lines = ["**CloudCode Link models** — source: " + cat.source + (cat.lastError === void 0 ? "" : " — " + cat.lastError) + ":"];
 			for (const m of cat.models) lines.push("- `" + m.id + "` — " + m.name + (m.efforts ? " — efforts: " + m.efforts.join(" / ") : ""));
 			return ok(lines.join("\n"));
 		}
@@ -30587,7 +30846,7 @@ function renderAccountPool(deps) {
 	if (!pool) return null;
 	const accounts = pool.getAccounts();
 	const data = pool.getPoolData();
-	const lines = [`**Antigravity Account Pool (${accounts.length} accounts, mode: ${data.mode})**`];
+	const lines = [`**CloudCode Link Account Pool (${accounts.length} accounts, mode: ${data.mode})**`];
 	for (let i = 0; i < accounts.length; i++) {
 		const a = accounts[i];
 		if (!a) continue;
@@ -32382,7 +32641,7 @@ function apply(ctx, entryConfig = {}) {
 		heartbeat.onSubagentEnd(id);
 	});
 	ctx.effect(() => () => heartbeat.dispose());
-	const catalog = new ModelCatalog(async () => quota.discoverAvailableModels(), getConfig().fallbackModels, getConfig().modelsCacheTtlMs);
+	const catalog = new ModelCatalog(async () => quota.discoverAvailableModels(), getConfig().fallbackModels, getConfig().modelsCacheTtlMs, () => quota.composeAvailableModels());
 	catalog.refreshIfNeeded().catch(() => void 0);
 	const auth = new AuthHelper(pool, quota);
 	const poolAuth = new PoolAuthFlow(pool, quota, log);

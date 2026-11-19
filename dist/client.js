@@ -33,12 +33,65 @@ window.__ModuleLoader__.load({
 			search: "M11 19a8 8 0 1 0 0-16 8 8 0 0 0 0 16zM21 21l-4.35-4.35",
 			layers: "M12 2 2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"
 		};
+		/**
+		* Paint for the settings-nav glyph. `currentColor` inherits the shell's own nav text
+		* color, which is what keeps an inactive row readable in both DSH themes; the active
+		* row switches to the panel accent token, with `currentColor` as the fallback for the
+		* window where the panel stylesheet has not mounted yet.
+		*/
+		function settingsNavPaint(active) {
+			return active ? "var(--agy-accent, currentColor)" : "currentColor";
+		}
+		/**
+		* Settings-nav glyph for the `settings.section.icon` seat, which the shell renders at
+		* 16px inside its own nav button. Simplified brand mark: one orbit ring with the solid
+		* core drawn on top of it, so the ring reads as passing behind the core. Gradient-free
+		* on purpose — an orb gradient smears at 16px and its <defs> force the whole SVG
+		* subtree to repaint on every re-render. React-free so the geometry is unit-testable.
+		*/
+		function settingsNavShapes(active) {
+			const paint = settingsNavPaint(active);
+			return [{
+				tag: "ellipse",
+				attrs: {
+					cx: 12,
+					cy: 12,
+					rx: 10,
+					ry: 6.2,
+					fill: "none",
+					stroke: paint,
+					"stroke-width": 2,
+					transform: "rotate(-20 12 12)"
+				}
+			}, {
+				tag: "circle",
+				attrs: {
+					cx: 12,
+					cy: 12,
+					r: 3.2,
+					fill: paint
+				}
+			}];
+		}
+		/**
+		* Normalize the props the settings shell hands an icon contribution
+		* (`{ size, active }`). Only a finite positive number is taken as a size — anything
+		* else falls back to the shell's 16px default instead of rendering a broken glyph,
+		* and only a real boolean `true` counts as active.
+		*/
+		function settingsNavProps(props) {
+			const given = typeof props === "object" && props !== null ? props : {};
+			return {
+				size: typeof given.size === "number" && Number.isFinite(given.size) && given.size > 0 ? given.size : 16,
+				active: given.active === true
+			};
+		}
 		//#endregion
 		//#region src/client/theme.ts
 		const THEME_CSS = `
 /* agy-tokens:start */
 :root, body {
-	/* --- brand artwork (Antigravity orb gradient) --- */
+	/* --- brand artwork (CloudCode Link orb gradient) --- */
 	--agy-brand-a: #4c8dff;
 	--agy-brand-b: #a96bff;
 
@@ -1191,6 +1244,8 @@ body[data-theme="dark"] {
 		};
 		const name = "dsh-cloudcode-link-client";
 		const inject = ["slots"];
+		const SETTINGS_SECTION_ID = "agy-link";
+		const SETTINGS_SECTION_LABEL = "CloudCode Link";
 		const base = win.location?.origin ?? "";
 		const API_PREFIX = "/plugins/cloudcode-link";
 		const LEGACY_API_PREFIX = "/plugins/agy-link";
@@ -1333,7 +1388,7 @@ body[data-theme="dark"] {
 			unknown: "其他"
 		};
 		const agyIconGradientIds = /* @__PURE__ */ new Map();
-		/** Antigravity mark: gradient orb with an orbit ring (product has no public simple-icon). */
+		/** CloudCode Link orb mark: gradient core with an orbit ring (product has no public simple-icon). */
 		function agyIcon(size = 14) {
 			let gid = agyIconGradientIds.get(size);
 			if (!gid) {
@@ -1377,6 +1432,26 @@ body[data-theme="dark"] {
 				"stroke-width": 1.4,
 				transform: "rotate(-18 12 12)"
 			}));
+		}
+		/**
+		* Settings-nav glyph for the optional `settings.section.icon` seat. The shell owns the nav
+		* button, the row label and its default gear, and mounts this contribution only when the
+		* registration id equals a section id it renders (hence SETTINGS_SECTION_ID below). The
+		* glyph itself stays gradient-free for legibility at the shell's 16px; its geometry and
+		* prop normalization live in brand-icons.ts, and this component is the render path that
+		* consumes them — the aria-hidden is ours to keep even though the shell already hides the
+		* wrapper span, so the mark never adds a second accessible name to the row.
+		*/
+		function AgySettingsNavIcon(props) {
+			const { size, active } = settingsNavProps(props);
+			return h("svg", {
+				viewBox: "0 0 24 24",
+				width: size,
+				height: size,
+				"aria-hidden": true,
+				focusable: "false",
+				style: { display: "block" }
+			}, ...settingsNavShapes(active).map((shape) => h(shape.tag, shape.attrs)));
 		}
 		/**
 		* Self-ticking reset countdown. This leaf is the only node that re-renders once per
@@ -2920,7 +2995,7 @@ body[data-theme="dark"] {
 				const navBar = h("nav", {
 					style: S.navBar,
 					role: "tablist",
-					"aria-label": "Antigravity 设置分区",
+					"aria-label": `${SETTINGS_SECTION_LABEL} 设置分区`,
 					onKeyDown: onNavKeyDown
 				}, ...SECTIONS.map((s) => h("button", {
 					key: s.key,
@@ -2953,7 +3028,7 @@ body[data-theme="dark"] {
 					display: "flex",
 					alignItems: "center",
 					gap: "var(--agy-space-2)"
-				} }, agyIcon(18), h("span", { style: S.panelTitle }, "Antigravity")), h("span", { style: {
+				} }, agyIcon(18), h("span", { style: S.panelTitle }, SETTINGS_SECTION_LABEL)), h("span", { style: {
 					display: "inline-flex",
 					alignItems: "center",
 					gap: "6px",
@@ -2968,7 +3043,7 @@ body[data-theme="dark"] {
 					gap: "var(--agy-space-2)",
 					flexWrap: "wrap",
 					minWidth: 0
-				} }, agyIcon(18), h("span", { style: S.panelTitle }, "Antigravity"), h("span", { style: isAuthed ? S.badgeReady : S.badgeUnready }, isAuthed ? "就绪" : "待认证"), h("span", {
+				} }, agyIcon(18), h("span", { style: S.panelTitle }, SETTINGS_SECTION_LABEL), h("span", { style: isAuthed ? S.badgeReady : S.badgeUnready }, isAuthed ? "就绪" : "待认证"), h("span", {
 					className: "agy-num",
 					title: pollOk ? "状态轮询正常（3 秒间隔）" : "轮询中断，展示的是最后一次成功拉取的数据",
 					style: {
@@ -3021,10 +3096,16 @@ body[data-theme="dark"] {
 			ctx.slots.inject("settings.section", () => {
 				return ctx.slots.register({
 					name: "settings.section",
-					id: "agy-link",
+					id: SETTINGS_SECTION_ID,
 					order: 20,
-					label: "Antigravity"
+					label: SETTINGS_SECTION_LABEL
 				}, AgySettingsSection);
+			});
+			ctx.slots.inject("settings.section.icon", () => {
+				return ctx.slots.register({
+					name: "settings.section.icon",
+					id: SETTINGS_SECTION_ID
+				}, AgySettingsNavIcon);
 			});
 		}
 		//#endregion

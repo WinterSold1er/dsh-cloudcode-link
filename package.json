@@ -4,6 +4,7 @@
   "description": "Google Cloud Code PA API models for DeepSeek Harness — stream Gemini/Claude/GPT-OSS subscriptions directly via Cloud Code PA API with thinking, tool activity, token usage, keepalive heartbeat and multi-account pool.",
   "type": "module",
   "license": "MIT",
+  "icon": "./icon.svg",
   "keywords": [
     "dsh-plugin",
     "dsh",
@@ -21,6 +22,7 @@
     },
     "./client": "./dist/client.js",
     "./cordis.patch.yml": "./cordis.patch.yml",
+    "./icon": "./icon.svg",
     "./package.json": "./package.json"
   },
   "dependencies": {
@@ -75,6 +77,7 @@
   "files": [
     "dist",
     "cordis.patch.yml",
+    "icon.svg",
     "README.md",
     "LICENSE",
     "docs"

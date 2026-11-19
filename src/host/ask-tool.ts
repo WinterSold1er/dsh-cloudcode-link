@@ -1,4 +1,4 @@
-// agy_ask — one-shot delegation tool so any DSH model can consult an Antigravity model.
+// agy_ask — one-shot delegation tool so any DSH model can consult a CloudCode Link model.
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { Catalog } from './models.ts'
 import { findEntry } from './models.ts'
@@ -60,12 +60,12 @@ function compareNatural(a: string, b: string): number {
 export function defineAgyAskTool(deps: OneShotDeps & { catalog: () => Catalog }) {
   return defineTool({
     name: 'agy_ask',
-    description: 'Delegate a one-shot task to a Google Antigravity model via direct CloudCode API. Returns the final answer text.',
+    description: 'Delegate a one-shot task to a CloudCode Link model via the direct Google Cloud Code API. Returns the final answer text.',
     parameters: {
       prompt: {
         type: 'string',
         required: true,
-        description: 'The task or question for the Antigravity model.',
+        description: 'The task or question for the CloudCode Link model.',
       },
       model: {
         type: 'string',
