@@ -1237,6 +1237,7 @@ function modelEntitlementOf(account, family, wireModel) {
 		known: true,
 		supported: false
 	};
+	const isRequestedG4 = isGemini4Model(requested);
 	return {
 		base,
 		known: true,
@@ -1244,7 +1245,8 @@ function modelEntitlementOf(account, family, wireModel) {
 			const listed = typeof entry.modelId === "string" ? entry.modelId.trim().toLowerCase() : "";
 			if (!listed || !isServableModelId(listed)) return false;
 			const listedBase = modelBaseOf(listed);
-			return listed === requested || listedBase === base || base === "gemini-4-hydrogen" && listedBase === "gemini-4-argon" || base === "gemini-4-argon" && listedBase === "gemini-4-hydrogen";
+			const hasG4Entitlement = isGemini4Model(listedBase) && listedBase !== "gemini-4-hydrogen-sonar";
+			return listed === requested || listedBase === base || isRequestedG4 && hasG4Entitlement;
 		})
 	};
 }
@@ -2009,7 +2011,7 @@ var AccountPoolManager = class {
 					isFallback: false
 				};
 			}
-			if (this.isModelKnownInPool(wireModel) && isGemini4Model(wireModel) && wireModel !== "gemini-4-hydrogen-sonar") return {
+			if (this.isModelKnownInPool(wireModel) && isGemini4Model(wireModel) && wireModel.trim().toLowerCase() !== "gemini-4-hydrogen-sonar") return {
 				account: preferred,
 				modelToUse: "gemini-4-hydrogen-sonar",
 				isFallback: true
@@ -2034,7 +2036,7 @@ var AccountPoolManager = class {
 					isFallback: false
 				};
 			}
-			if (this.isModelKnownInPool(wireModel) && isGemini4Model(wireModel) && wireModel !== "gemini-4-hydrogen-sonar") return {
+			if (this.isModelKnownInPool(wireModel) && isGemini4Model(wireModel) && wireModel.trim().toLowerCase() !== "gemini-4-hydrogen-sonar") return {
 				account: candidate,
 				modelToUse: "gemini-4-hydrogen-sonar",
 				isFallback: true
