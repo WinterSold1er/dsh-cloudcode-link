@@ -19,6 +19,7 @@ import {
   getThinkingConfig,
   ModelCatalog,
   resolveModelSlug,
+  isGemini4Model,
 } from './models.ts'
 import {
   antigravityRequestEnvelope,
@@ -521,46 +522,68 @@ export class AgyAdapter extends LlmAdapter {
         // 1. Select account (Priority arbitration: Pin > Session Affinity > Sticky Sequential)
         // All three paths ask the pool for an account that is entitled to THIS wire model.
         let account: ManagedAccount | null = null
-        if (this.deps.pool) {
-          // Priority 1: Pin Lock takes absolute precedence if healthy and not tried
-          const pinned = this.deps.pool.getPinnedAccount()
-          if (
-            pinned &&
-            !triedAccountIds.has(pinned.id) &&
-            this.deps.pool.isAccountHealthy(pinned, family, wireModel)
-          ) {
-            account = pinned
-          }
+        let borrowedAccount: ManagedAccount | undefined = undefined
+        let effectiveWireModel = wireModel
 
-          // Priority 2: Session Affinity (if no healthy pinned account or pinned account is in cooldown/tried)
-          if (!account && boundAccountId && !triedAccountIds.has(boundAccountId)) {
-            const boundAcc = this.deps.pool.getAccount(boundAccountId)
-            if (boundAcc && this.deps.pool.isAccountHealthy(boundAcc, family, wireModel)) {
-              account = boundAcc
+        if (this.deps.pool) {
+          if (isGemini4Model(wireModel)) {
+            const pinned = this.deps.pool.getPinnedAccount()
+            const preferredId =
+              pinned && !triedAccountIds.has(pinned.id)
+                ? pinned.id
+                : boundAccountId && !triedAccountIds.has(boundAccountId)
+                  ? boundAccountId
+                  : undefined
+
+            const capable = this.deps.pool.getCapableAccount(wireModel, preferredId)
+            if (capable && !triedAccountIds.has(capable.account.id)) {
+              account = capable.account
+              borrowedAccount = capable.borrowedFrom
+              effectiveWireModel = capable.modelToUse
             }
           }
 
-          // Priority 3: Sticky Sequential / Pool selection.
-          // Only reached when the session has no healthy pinned/bound account
-          // (i.e. a brand-new session or a session whose previous account
-          // just went unhealthy). Before picking, force a live quota refresh so
-          // we prefer the account with the most remaining 5h quota. We deliberately
-          // do NOT refresh when Bound affinity already resolved an account —
-          // that guarantees a session stays pinned to ONE account for cache hits.
           if (!account) {
-            await this.refreshQuotasForSelection(family)
-            account = this.deps.pool.selectAccount(family, wireModel)
-          }
+            // Priority 1: Pin Lock takes absolute precedence if healthy and not tried
+            const pinned = this.deps.pool.getPinnedAccount()
+            if (
+              pinned &&
+              !triedAccountIds.has(pinned.id) &&
+              this.deps.pool.isAccountHealthy(pinned, family, wireModel)
+            ) {
+              account = pinned
+            }
 
-          // Failover candidate: if chosen account was already tried in this turn
-          if (account && triedAccountIds.has(account.id)) {
-            const alt = this.deps.pool
-              .getAccounts()
-              .find(
-                (a) =>
-                  !triedAccountIds.has(a.id) && this.deps.pool!.isAccountHealthy(a, family, wireModel),
-              )
-            account = alt ?? null
+            // Priority 2: Session Affinity (if no healthy pinned account or pinned account is in cooldown/tried)
+            if (!account && boundAccountId && !triedAccountIds.has(boundAccountId)) {
+              const boundAcc = this.deps.pool.getAccount(boundAccountId)
+              if (boundAcc && this.deps.pool.isAccountHealthy(boundAcc, family, wireModel)) {
+                account = boundAcc
+              }
+            }
+
+            // Priority 3: Sticky Sequential / Pool selection.
+            // Only reached when the session has no healthy pinned/bound account
+            // (i.e. a brand-new session or a session whose previous account
+            // just went unhealthy). Before picking, force a live quota refresh so
+            // we prefer the account with the most remaining 5h quota. We deliberately
+            // do NOT refresh when Bound affinity already resolved an account —
+            // that guarantees a session stays pinned to ONE account for cache hits.
+            if (!account) {
+              await this.refreshQuotasForSelection(family)
+              account = this.deps.pool.selectAccount(family, wireModel)
+            }
+
+            // Failover candidate: if chosen account was already tried in this turn
+            if (account && triedAccountIds.has(account.id)) {
+              const alt = this.deps.pool
+                .getAccounts()
+                .find(
+                  (a) =>
+                    !triedAccountIds.has(a.id) && this.deps.pool!.isAccountHealthy(a, family, wireModel),
+                )
+              account = alt ?? null
+            }
           }
         }
 
@@ -585,6 +608,8 @@ export class AgyAdapter extends LlmAdapter {
         }
 
         const accountId = account ? account.id : 'acc_default'
+        const authTargetAccount = borrowedAccount ?? account
+        const authTargetId = authTargetAccount ? authTargetAccount.id : accountId
         triedAccountIds.add(accountId)
         lastAttemptAccountId = accountId
 
@@ -592,7 +617,20 @@ export class AgyAdapter extends LlmAdapter {
         let releaseAccount: (() => void) | null = null
         if (this.deps.pool && account) {
           const cfg = this.deps.getConfig()
-          releaseAccount = await this.deps.pool.acquireAccount(account.id, cfg.maxConcurrent)
+          const releaseBorrower = await this.deps.pool.acquireAccount(account.id, cfg.maxConcurrent)
+          let releaseBorrowed: (() => void) | null = null
+          if (borrowedAccount && borrowedAccount.id !== account.id) {
+            try {
+              releaseBorrowed = await this.deps.pool.acquireAccount(borrowedAccount.id, cfg.maxConcurrent)
+            } catch (err) {
+              releaseBorrower()
+              throw err
+            }
+          }
+          releaseAccount = () => {
+            try { releaseBorrower() } catch {}
+            try { releaseBorrowed?.() } catch {}
+          }
         }
 
         const requestStartTime = Date.now()
@@ -655,25 +693,25 @@ export class AgyAdapter extends LlmAdapter {
           let token: string | null = null
           if (process.env.ANTIGRAVITY_TOKEN?.trim()) {
             token = process.env.ANTIGRAVITY_TOKEN.trim()
-          } else if (this.deps.quota && account) {
-            token = await this.deps.quota.getValidAccessToken(account)
+          } else if (this.deps.quota && authTargetAccount) {
+            token = await this.deps.quota.getValidAccessToken(authTargetAccount)
           } else if (this.deps.pool) {
-            token = this.deps.pool.getMemoryToken(accountId)
+            token = this.deps.pool.getMemoryToken(authTargetId)
           }
 
           if (!token) {
-            if (this.deps.pool && account) {
-              this.deps.pool.markAuthRequired(account.id, 'No valid access token or refresh failed')
+            if (this.deps.pool && authTargetAccount) {
+              this.deps.pool.markAuthRequired(authTargetAccount.id, 'No valid access token or refresh failed')
             }
             failures.push({
               cause: 'auth',
-              accountId,
+              accountId: authTargetId,
               httpStatus: null,
               upstreamError: 'no usable access token (refresh failed or credential revoked)',
             })
             recordTelemetry('error')
             if (!hasEmitted && attempt < maxAttempts && Date.now() < ceilingAt) {
-              this.deps.log?.(`No access token for ${accountId}, switching accounts...`)
+              this.deps.log?.(`No access token for ${authTargetId}, switching accounts...`)
               continue
             }
             yield {
@@ -694,11 +732,12 @@ export class AgyAdapter extends LlmAdapter {
           }
 
           // 5. Ensure project ID
-          const proxyUrl = account?.proxyUrl
+          const targetAccount = borrowedAccount ?? account
+          const proxyUrl = targetAccount?.proxyUrl
           const customEndpoints = this.deps.endpointCandidates
           const projectId = await ensureProject(
             token,
-            account?.alias || account?.id || 'antigravity-default',
+            targetAccount?.alias || targetAccount?.id || 'antigravity-default',
             proxyUrl,
             customEndpoints,
           )
@@ -728,7 +767,7 @@ export class AgyAdapter extends LlmAdapter {
               sessionId: env.sessionId,
               labels: env.labels,
             },
-            model: wireModel,
+            model: effectiveWireModel,
             userAgent: env.userAgent,
             requestType: env.requestType,
           }
@@ -834,37 +873,37 @@ export class AgyAdapter extends LlmAdapter {
 
             if (res.status === 429) {
               const resetHeader = res.headers.get('retry-after') || undefined
-              if (this.deps.pool && account) {
-                this.deps.pool.recordFailure(account.id, family, errText || 'Rate limit 429', resetHeader)
+              if (this.deps.pool && authTargetAccount) {
+                this.deps.pool.recordFailure(authTargetAccount.id, family, errText || 'Rate limit 429', resetHeader)
               }
               failures.push({
                 cause: 'rate_limit',
-                accountId,
+                accountId: authTargetId,
                 httpStatus: 429,
                 upstreamError: errText || '429 Too Many Requests',
               })
               if (canFailover) {
                 recordTelemetry('error')
-                this.deps.log?.(`Rate limited (429) on ${accountId}, switching accounts...`)
+                this.deps.log?.(`Rate limited (429) on ${authTargetId}, switching accounts...`)
                 continue
               }
             } else if (res.status === 401) {
               // 401 IS a credential verdict: this account really does need `/ccl auth` again.
-              if (this.deps.pool && account) {
-                this.deps.pool.markAuthRequired(account.id, `Auth failed (401): ${errText}`)
+              if (this.deps.pool && authTargetAccount) {
+                this.deps.pool.markAuthRequired(authTargetAccount.id, `Auth failed (401): ${errText}`)
               }
               const failure: AttemptFailure = {
                 cause: 'auth',
-                accountId,
+                accountId: authTargetId,
                 httpStatus: 401,
                 upstreamError: errText || '401 Unauthorized',
               }
-              const guidance = this.reauthGuidanceForAttempt(account, failure)
+              const guidance = this.reauthGuidanceForAttempt(authTargetAccount, failure)
               failures.push(guidance ? { ...failure, guidance } : failure)
               if (canFailover) {
                 recordTelemetry('error')
                 this.deps.log?.(
-                  `Auth failed (401) on ${accountId}, switching accounts...${guidance ? ` ${guidance}` : ''}`,
+                  `Auth failed (401) on ${authTargetId}, switching accounts...${guidance ? ` ${guidance}` : ''}`,
                 )
                 continue
               }
@@ -872,28 +911,31 @@ export class AgyAdapter extends LlmAdapter {
               // 403 is NOT a credential verdict: the credential may be perfectly valid but not
               // entitled to this model. Quarantine the MODEL for this account (soft failure) so
               // the rest of the pool stays schedulable and the user is not told to sign in again.
-              if (this.deps.pool && account) {
-                this.deps.pool.recordModelUnsupported(
-                  account.id,
-                  family,
-                  wireModel,
-                  `HTTP 403: ${errText || 'forbidden'}`,
-                )
+              if (this.deps.pool) {
+                const quarantineTarget = borrowedAccount ?? account
+                if (quarantineTarget) {
+                  this.deps.pool.recordModelUnsupported(
+                    quarantineTarget.id,
+                    family,
+                    effectiveWireModel,
+                    `HTTP 403: ${errText || 'forbidden'}`,
+                  )
+                }
               }
               const failure: AttemptFailure = {
                 cause: 'model_unsupported',
-                accountId,
+                accountId: authTargetId,
                 httpStatus: 403,
                 upstreamError: errText || '403 Forbidden',
               }
               // Only the account-health owner can call this 403 a grant gap; without that verdict
               // the adapter stays with the model-unsupported reading it already had.
-              const guidance = this.reauthGuidanceForAttempt(account, failure)
+              const guidance = this.reauthGuidanceForAttempt(authTargetAccount, failure)
               failures.push(guidance ? { ...failure, guidance } : failure)
               if (canFailover) {
                 recordTelemetry('error')
                 this.deps.log?.(
-                  `Account ${accountId} cannot serve '${wireModel}' (403), switching accounts...${
+                  `Account ${authTargetId} cannot serve '${effectiveWireModel}' (403), switching accounts...${
                     guidance ? ` ${guidance}` : ''
                   }`,
                 )
@@ -902,7 +944,7 @@ export class AgyAdapter extends LlmAdapter {
             } else {
               failures.push({
                 cause: 'api',
-                accountId,
+                accountId: authTargetId,
                 httpStatus: res.status,
                 upstreamError: errText || `HTTP ${res.status}`,
               })

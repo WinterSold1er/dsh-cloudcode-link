@@ -155,1168 +155,6 @@ function parseResetDurationMs(text) {
 	if (!Number.isNaN(retrySec) && retrySec > 0 && retrySec < 604800) return retrySec * 1e3;
 }
 //#endregion
-//#region packages/core/src/pool.ts
-function defaultPoolDir(customBase) {
-	if (customBase) return customBase;
-	if (process.env.CLOUDCODE_ACCOUNTS_DIR?.trim()) return process.env.CLOUDCODE_ACCOUNTS_DIR.trim();
-	if (process.env.ANTIGRAVITY_ACCOUNTS_DIR?.trim()) return process.env.ANTIGRAVITY_ACCOUNTS_DIR.trim();
-	return join(homedir(), ".cloudcode", "accounts");
-}
-/**
-* Effort / routing modifiers the backend appends to a wire model id
-* (`gemini-4-hydrogen-high`, `gemini-4-hydrogen-tiered-high`, `gemini-2.5-flash-thinking`).
-* They are stripped from the tail so a requested wire id can be compared with the model ids an
-* account is actually entitled to: an account that serves `gemini-4-hydrogen-medium` can serve a
-* `gemini-4-hydrogen-high` request even when that exact effort string is absent from its list.
-* Longer modifiers come first so `-xhigh` is never half-stripped as `-high`.
-*/
-const MODEL_EFFORT_SUFFIXES = [
-	"xhigh",
-	"high",
-	"medium",
-	"low",
-	"minimal",
-	"none",
-	"off",
-	"auto",
-	"thinking",
-	"tiered"
-];
-/**
-* Suffixes the backend uses to publish a model id it explicitly refuses to serve
-* (`gemini-4-hydrogen-disabled`, carried with `disabled: true` and an "Unavailable" tag in the
-* captured FetchAvailableModels response). `disabled` is the server's own refusal marker.
-*
-* `sonar` is NOT such a marker, contrary to what this comment used to claim. In the same capture
-* `gemini-4-hydrogen-sonar` is published with a live `quotaInfo` (remainingFraction ~1 plus a
-* resetTime), no `disabled` / `beta` / `isInternal` flag and `recommended: true`, in no
-* `agentModelSorts` / `tieredModelIds` group only because agy's picker does not show it — and live
-* requests against it returned HTTP 200 with SSE text and `modelVersion: gemini-4-hydrogen-sonar`
-* on three accounts (free-tier included). So it is a servable model of its own, and a list holding
-* only `...-disabled` entries still says nothing about the base model.
-*/
-const MODEL_UNSERVABLE_SUFFIXES = ["disabled"];
-/** Quarantine window for one (account, family, model base) triple after an upstream 403. */
-const MODEL_UNSUPPORTED_COOLDOWN_MS = 3e5;
-/** Repeated 403s for the same model escalate the quarantine, but never past this bound. */
-const MODEL_UNSUPPORTED_MAX_COOLDOWN_MS = 18e5;
-/**
-* `gemini-4-hydrogen-tiered-high` -> `gemini-4-hydrogen`; unservable markers are NOT stripped.
-* `gemini-4-hydrogen-sonar` keeps its full id on purpose: it has no effort ladder, so it is not a
-* variant of `gemini-4-hydrogen`, and folding it in would make a sonar-only account look entitled
-* to `gemini-4-hydrogen-medium` — a request the upstream answers with 403, which would quarantine
-* the whole hydrogen family for that account.
-*/
-function modelBaseOf(modelId) {
-	let base = modelId.trim().toLowerCase();
-	for (;;) {
-		const modifier = MODEL_EFFORT_SUFFIXES.find((suffix) => base.endsWith(`-${suffix}`) && base.length > suffix.length + 1);
-		if (!modifier) return base;
-		base = base.slice(0, -(modifier.length + 1));
-	}
-}
-/** False for ids the backend marks as not serviceable (`...-disabled`). */
-function isServableModelId(modelId) {
-	const id = modelId.trim().toLowerCase();
-	if (!id) return false;
-	return !MODEL_UNSERVABLE_SUFFIXES.some((marker) => id === marker || id.endsWith(`-${marker}`));
-}
-/**
-* Model-level entitlement of one account.
-*
-* An account whose family quota carries no `models[]` list (never refreshed, or the backend did
-* not send the breakdown) is treated as ENTITLED: missing data must not disqualify the whole pool.
-*/
-function modelEntitlementOf(account, family, wireModel) {
-	const requested = wireModel.trim().toLowerCase();
-	const base = modelBaseOf(requested);
-	const listing = account.quotas[family]?.models;
-	if (!Array.isArray(listing) || listing.length === 0) return {
-		base,
-		known: false,
-		supported: true
-	};
-	if (!isServableModelId(requested)) return {
-		base,
-		known: true,
-		supported: false
-	};
-	return {
-		base,
-		known: true,
-		supported: listing.some((entry) => {
-			const listed = typeof entry.modelId === "string" ? entry.modelId.trim().toLowerCase() : "";
-			if (!listed || !isServableModelId(listed)) return false;
-			return listed === requested || modelBaseOf(listed) === base;
-		})
-	};
-}
-/** Key of the model quarantine map: one account, one family, one effort-stripped model base. */
-function modelQuarantineKey(id, family, wireModel) {
-	return `${id}|${family}|${modelBaseOf(wireModel)}`;
-}
-var Semaphore$1 = class {
-	active = 0;
-	queue = [];
-	max;
-	constructor(max) {
-		this.max = max;
-	}
-	async acquire() {
-		if (this.active < Math.max(1, this.max())) {
-			this.active++;
-			return () => this.releaseOne();
-		}
-		return new Promise((resolve) => {
-			this.queue.push(() => {
-				this.active++;
-				resolve(() => this.releaseOne());
-			});
-		});
-	}
-	releaseOne() {
-		this.active--;
-		const next = this.queue.shift();
-		if (next) next();
-	}
-};
-var AccountPoolManager = class {
-	data;
-	isBrandNew = false;
-	baseDir;
-	file;
-	activeMemoryTokens = /* @__PURE__ */ new Map();
-	accountSemaphores = /* @__PURE__ */ new Map();
-	runtimeActiveAccountIds = /* @__PURE__ */ new Map();
-	/**
-	* Model-scoped soft failures: `id|family|modelBase` -> quarantine state. Populated when the
-	* backend answers 403 for a model an account is not entitled to. Runtime-only on purpose —
-	* entitlement is re-probed from `quotas[family].models` after a quota refresh, and a stale
-	* "this account cannot do X" verdict must never outlive the process that observed it.
-	*/
-	modelQuarantine = /* @__PURE__ */ new Map();
-	writeQueue = Promise.resolve();
-	lowQuotaThreshold = .05;
-	constructor(baseDir = defaultPoolDir(), lowQuotaThreshold = .05) {
-		this.baseDir = baseDir;
-		this.lowQuotaThreshold = typeof lowQuotaThreshold === "number" && Number.isFinite(lowQuotaThreshold) && lowQuotaThreshold >= 0 && lowQuotaThreshold <= 1 ? lowQuotaThreshold : .05;
-		this.file = join(baseDir, "pool.json");
-		try {
-			chmodSync(this.baseDir, 448);
-		} catch {}
-		this.data = this.load();
-		this.bootstrapDefaultAccount();
-		this.normalizeLegacyPrimary();
-		this.normalizeAccountAliases();
-	}
-	getBaseDir() {
-		return this.baseDir;
-	}
-	setLowQuotaThreshold(threshold) {
-		if (typeof threshold === "number" && Number.isFinite(threshold) && threshold >= 0 && threshold <= 1) this.lowQuotaThreshold = threshold;
-	}
-	getLowQuotaThreshold() {
-		return this.lowQuotaThreshold;
-	}
-	load() {
-		if (!existsSync(this.file)) {
-			this.isBrandNew = true;
-			return defaultPoolData();
-		}
-		const raw = readFileSync(this.file, "utf8");
-		try {
-			const parsed = JSON.parse(raw);
-			if (parsed && Array.isArray(parsed.accounts)) {
-				this.isBrandNew = false;
-				return {
-					...defaultPoolData(),
-					...parsed
-				};
-			}
-			throw new Error("Missing or invalid accounts array");
-		} catch (err) {
-			const corruptBackup = `${this.file}.corrupted`;
-			try {
-				if (existsSync(corruptBackup)) rmSync(corruptBackup, { force: true });
-				renameSync(this.file, corruptBackup);
-			} catch {
-				try {
-					renameSync(this.file, `${this.file}.corrupted.${Date.now()}`);
-				} catch {}
-			}
-			this.isBrandNew = true;
-			const empty = defaultPoolData();
-			this.data = empty;
-			return empty;
-		}
-	}
-	persist() {
-		const doWrite = () => {
-			try {
-				const dir = dirname(this.file);
-				mkdirSync(dir, { recursive: true });
-				try {
-					chmodSync(dir, 448);
-				} catch {}
-				const tmp = join(dir, `.pool.json.tmp.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}`);
-				writeFileSync(tmp, JSON.stringify(this.data, null, 2), {
-					encoding: "utf8",
-					mode: 384
-				});
-				try {
-					chmodSync(tmp, 384);
-				} catch {}
-				renameSync(tmp, this.file);
-			} catch {}
-		};
-		this.writeQueue = this.writeQueue.then(doWrite, doWrite);
-		doWrite();
-	}
-	/**
-	* Bootstraps the primary account on first start.
-	*/
-	bootstrapDefaultAccount() {
-		if (!this.isBrandNew) return;
-		if (this.data.accounts.some((a) => a.systemHome)) return;
-		const primary = {
-			id: "acc_primary",
-			alias: "主账号 (系统登录)",
-			dir: "",
-			systemHome: true,
-			enabled: true,
-			createdAt: Date.now(),
-			cooldowns: {},
-			quotas: {}
-		};
-		this.data.accounts.unshift(primary);
-		this.data.primaryAccountId = primary.id;
-		this.persist();
-	}
-	normalizeLegacyPrimary() {
-		const primary = this.data.accounts.find((a) => a.id === "acc_primary");
-		if (!primary) {
-			if (this.data.primaryAccountId && !this.data.accounts.some((a) => a.id === this.data.primaryAccountId)) {
-				this.data.primaryAccountId = this.data.accounts[0]?.id;
-				this.persist();
-			}
-			return;
-		}
-		if (primary.systemHome) return;
-		primary.dir = "";
-		primary.systemHome = true;
-		if (!primary.alias || /^主账号/i.test(primary.alias) || /^备用.*账号/i.test(primary.alias)) primary.alias = primary.email || "主账号 (系统登录)";
-		this.data.primaryAccountId = primary.id;
-		this.persist();
-	}
-	normalizeAccountAliases() {
-		let changed = false;
-		for (const acc of this.data.accounts) if (acc.email && (!acc.alias || /^备用.*账号/i.test(acc.alias) || /^主账号/i.test(acc.alias) || acc.alias === acc.id)) {
-			if (acc.alias !== acc.email) {
-				acc.alias = acc.email;
-				changed = true;
-			}
-		}
-		if (changed) this.persist();
-	}
-	getPoolData() {
-		return this.data;
-	}
-	setMemoryToken(id, token, expiresAt) {
-		this.activeMemoryTokens.set(id, {
-			token,
-			expiresAt: expiresAt ?? Date.now() + 33e5
-		});
-	}
-	getMemoryToken(id) {
-		const entry = this.activeMemoryTokens.get(id);
-		if (!entry) return null;
-		if (entry.expiresAt <= Date.now() + 1e4) {
-			this.activeMemoryTokens.delete(id);
-			return null;
-		}
-		return entry.token;
-	}
-	clearMemoryToken(id) {
-		this.activeMemoryTokens.delete(id);
-	}
-	async acquireAccount(id, maxConcurrent = 1) {
-		let sem = this.accountSemaphores.get(id);
-		if (!sem) {
-			sem = new Semaphore$1(() => maxConcurrent);
-			this.accountSemaphores.set(id, sem);
-		}
-		return sem.acquire();
-	}
-	getAccounts() {
-		return this.data.accounts;
-	}
-	getAccount(id) {
-		return this.data.accounts.find((a) => a.id === id);
-	}
-	createStagingSlot() {
-		const id = `acc_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
-		const dir = join(this.baseDir, `staging_${id}`);
-		const geminiDir = join(dir, ".gemini");
-		const tokenDir = join(geminiDir, "antigravity-cli");
-		mkdirSync(tokenDir, {
-			recursive: true,
-			mode: 448
-		});
-		try {
-			chmodSync(dir, 448);
-			chmodSync(geminiDir, 448);
-			chmodSync(tokenDir, 448);
-		} catch {}
-		return {
-			id,
-			dir
-		};
-	}
-	commitStagingAccount(id, dir, alias, email, proxyUrl) {
-		const finalDir = join(this.baseDir, id);
-		try {
-			if (existsSync(dir)) {
-				renameSync(dir, finalDir);
-				try {
-					chmodSync(finalDir, 448);
-				} catch {}
-			}
-		} catch {}
-		const newAccount = {
-			id,
-			alias: !alias || /^备用.*账号/i.test(alias) || /^主账号/i.test(alias) ? email || id : alias,
-			dir: existsSync(finalDir) ? finalDir : dir,
-			...email ? { email } : {},
-			...proxyUrl ? { proxyUrl } : {},
-			enabled: true,
-			createdAt: Date.now(),
-			cooldowns: {},
-			quotas: {}
-		};
-		this.data.accounts.push(newAccount);
-		this.persist();
-		return newAccount;
-	}
-	cleanupStagingSlot(dir) {
-		try {
-			if (existsSync(dir)) rmSync(dir, {
-				recursive: true,
-				force: true
-			});
-		} catch {}
-	}
-	sweepStaleStaging() {
-		let removed = 0;
-		try {
-			for (const entry of readdirSync(this.baseDir)) {
-				if (!entry.startsWith("staging_")) continue;
-				rmSync(join(this.baseDir, entry), {
-					recursive: true,
-					force: true
-				});
-				removed++;
-			}
-		} catch {}
-		return removed;
-	}
-	sweepOldLogs(maxDays = 7) {
-		const maxAgeMs = Math.max(1, maxDays) * 864e5;
-		const now = Date.now();
-		let removed = 0;
-		const targetLogDirs = [join(homedir(), ".gemini", "antigravity-cli", "log")];
-		for (const acc of this.data.accounts) if (acc.dir) targetLogDirs.push(join(acc.dir, ".gemini", "antigravity-cli", "log"));
-		for (const logDir of targetLogDirs) {
-			if (!existsSync(logDir)) continue;
-			try {
-				const files = readdirSync(logDir);
-				for (const f of files) {
-					if (!f.startsWith("cli-") || !f.endsWith(".log")) continue;
-					const fp = join(logDir, f);
-					try {
-						if (now - statSync(fp).mtimeMs > maxAgeMs) {
-							rmSync(fp, { force: true });
-							removed++;
-						}
-					} catch {}
-				}
-			} catch {}
-		}
-		return removed;
-	}
-	createAccountSlot(alias) {
-		const id = `acc_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
-		const dir = join(this.baseDir, id);
-		const geminiDir = join(dir, ".gemini");
-		const tokenDir = join(geminiDir, "antigravity-cli");
-		mkdirSync(tokenDir, {
-			recursive: true,
-			mode: 448
-		});
-		try {
-			chmodSync(dir, 448);
-			chmodSync(geminiDir, 448);
-			chmodSync(tokenDir, 448);
-		} catch {}
-		const newAccount = {
-			id,
-			alias: !alias || /^备用.*账号/i.test(alias) || /^主账号/i.test(alias) ? id : alias,
-			dir,
-			enabled: true,
-			createdAt: Date.now(),
-			cooldowns: {},
-			quotas: {}
-		};
-		this.data.accounts.push(newAccount);
-		this.persist();
-		return newAccount;
-	}
-	deleteAccount(id) {
-		const idx = this.data.accounts.findIndex((a) => a.id === id);
-		if (idx === -1) return false;
-		const [removed] = this.data.accounts.splice(idx, 1);
-		if (removed) try {
-			if (existsSync(removed.dir)) rmSync(removed.dir, {
-				recursive: true,
-				force: true
-			});
-		} catch {}
-		if (this.data.primaryAccountId === id) this.data.primaryAccountId = this.data.accounts[0]?.id;
-		if (this.data.pinnedAccountId === id) this.data.pinnedAccountId = void 0;
-		for (const [fam, accId] of this.runtimeActiveAccountIds.entries()) if (accId === id) this.runtimeActiveAccountIds.delete(fam);
-		if (this.data.activeAccountIds) {
-			for (const [fam, accId] of Object.entries(this.data.activeAccountIds)) if (accId === id) delete this.data.activeAccountIds[fam];
-		}
-		this.persist();
-		return true;
-	}
-	setAccountProxy(id, proxyUrl) {
-		const acc = this.getAccount(id);
-		if (!acc) return false;
-		acc.proxyUrl = proxyUrl?.trim() ? proxyUrl.trim() : void 0;
-		this.persist();
-		return true;
-	}
-	setAccountAlias(id, alias) {
-		const acc = this.getAccount(id);
-		if (!acc) return false;
-		acc.alias = alias.trim() || acc.email || acc.id;
-		this.persist();
-		return true;
-	}
-	setAccountEnabled(id, enabled) {
-		const acc = this.getAccount(id);
-		if (!acc) return false;
-		acc.enabled = enabled;
-		if (!enabled) {
-			for (const [fam, accId] of this.runtimeActiveAccountIds.entries()) if (accId === id) this.runtimeActiveAccountIds.delete(fam);
-			if (this.data.activeAccountIds) {
-				for (const [fam, accId] of Object.entries(this.data.activeAccountIds)) if (accId === id) delete this.data.activeAccountIds[fam];
-			}
-			if (this.data.pinnedAccountId === id) this.data.pinnedAccountId = void 0;
-			delete acc.pinned;
-		}
-		this.persist();
-		return true;
-	}
-	markAuthRequired(id, reason) {
-		const acc = this.getAccount(id);
-		if (!acc) return;
-		acc.authRequired = true;
-		acc.authError = reason || "Authentication expired or revoked (invalid_grant)";
-		for (const [fam, accId] of this.runtimeActiveAccountIds.entries()) if (accId === id) this.runtimeActiveAccountIds.delete(fam);
-		if (this.data.activeAccountIds) {
-			for (const [fam, accId] of Object.entries(this.data.activeAccountIds)) if (accId === id) delete this.data.activeAccountIds[fam];
-		}
-		this.persist();
-	}
-	resetAccountIdentity(id, newEmail) {
-		const acc = this.getAccount(id);
-		if (!acc) return;
-		acc.email = newEmail;
-		if (!acc.alias || /^备用.*账号/i.test(acc.alias) || /^主账号/i.test(acc.alias) || acc.alias === acc.id) acc.alias = newEmail;
-		acc.cooldowns = {};
-		acc.quotas = {};
-		delete acc.authRequired;
-		delete acc.authError;
-		this.normalizeAccountAliases();
-		this.persist();
-	}
-	clearAuthRequired(id) {
-		const acc = this.getAccount(id);
-		if (!acc) return;
-		delete acc.authRequired;
-		delete acc.authError;
-		this.persist();
-	}
-	setPrimaryAccount(id) {
-		const idx = this.data.accounts.findIndex((a) => a.id === id);
-		if (idx === -1) return false;
-		this.data.primaryAccountId = id;
-		const [acc] = this.data.accounts.splice(idx, 1);
-		if (acc) this.data.accounts.unshift(acc);
-		this.data.activeAccountIds = {
-			google: id,
-			anthropic: id,
-			openai: id
-		};
-		this.runtimeActiveAccountIds.set("google", id);
-		this.runtimeActiveAccountIds.set("anthropic", id);
-		this.runtimeActiveAccountIds.set("openai", id);
-		this.persist();
-		return true;
-	}
-	pinAccount(id) {
-		if (!id) {
-			this.data.pinnedAccountId = void 0;
-			for (const acc of this.data.accounts) delete acc.pinned;
-			this.persist();
-			return true;
-		}
-		const acc = this.getAccount(id);
-		if (!acc || !acc.enabled) return false;
-		this.data.pinnedAccountId = id;
-		for (const a of this.data.accounts) if (a.id === id) a.pinned = true;
-		else delete a.pinned;
-		this.runtimeActiveAccountIds.set("google", id);
-		this.runtimeActiveAccountIds.set("anthropic", id);
-		this.runtimeActiveAccountIds.set("openai", id);
-		this.persist();
-		return true;
-	}
-	getPinnedAccount() {
-		if (this.data.pinnedAccountId) return this.getAccount(this.data.pinnedAccountId) ?? null;
-		return this.data.accounts.find((a) => a.pinned) ?? null;
-	}
-	reorderAccounts(ids) {
-		const map = new Map(this.data.accounts.map((a) => [a.id, a]));
-		const reordered = [];
-		for (const id of ids) {
-			const acc = map.get(id);
-			if (acc) {
-				reordered.push(acc);
-				map.delete(id);
-			}
-		}
-		for (const remaining of map.values()) reordered.push(remaining);
-		this.data.accounts = reordered;
-		this.persist();
-		return true;
-	}
-	setMode(mode) {
-		this.data.mode = mode;
-		this.persist();
-	}
-	updateAccountQuotas(id, quotas, email) {
-		const acc = this.getAccount(id);
-		if (!acc) return;
-		acc.quotas = {
-			...acc.quotas,
-			...quotas
-		};
-		if (email) {
-			acc.email = email;
-			if (!acc.alias || /^备用.*账号/i.test(acc.alias) || /^主账号/i.test(acc.alias) || acc.alias === acc.id) acc.alias = email;
-		}
-		this.normalizeAccountAliases();
-		this.persist();
-	}
-	recordFailure(id, family, reason, serverResetTime) {
-		const acc = this.getAccount(id);
-		if (!acc) return;
-		const failures = (acc.cooldowns[family]?.consecutiveFailures ?? 0) + 1;
-		let cooldownUntil;
-		const parsedDuration = parseResetDurationMs(serverResetTime || reason);
-		if (serverResetTime && !parsedDuration) {
-			const parsed = Date.parse(serverResetTime);
-			if (!Number.isNaN(parsed) && parsed > Date.now()) cooldownUntil = parsed + 1e4;
-			else cooldownUntil = Date.now() + Math.min(this.data.defaultCooldownMs * failures, this.data.maxCooldownMs);
-		} else if (parsedDuration && parsedDuration > 0) cooldownUntil = Date.now() + parsedDuration + 1e4;
-		else cooldownUntil = Date.now() + Math.min(this.data.defaultCooldownMs * failures, this.data.maxCooldownMs);
-		acc.cooldowns[family] = {
-			cooldownUntil,
-			reason,
-			consecutiveFailures: failures
-		};
-		this.persist();
-	}
-	/**
-	* Soft-fail an account for ONE model only (upstream 403 / "no such model for this user").
-	*
-	* This is deliberately NOT `markAuthRequired`: a 403 says "this credential may be fine, but not
-	* for this model". Quarantining the whole account turns a model mismatch into a pool-wide
-	* "sign in again" error, which is what made the pool report
-	* `No authenticated Antigravity account available` while every account was actually signed in.
-	* Repeated refusals for the same model escalate the quarantine within
-	* {@link MODEL_UNSUPPORTED_MAX_COOLDOWN_MS}.
-	*/
-	recordModelUnsupported(id, family, wireModel, reason) {
-		if (!this.getAccount(id)) return;
-		const key = modelQuarantineKey(id, family, wireModel);
-		const consecutiveFailures = (this.modelQuarantine.get(key)?.consecutiveFailures ?? 0) + 1;
-		const cooldownMs = Math.min(MODEL_UNSUPPORTED_COOLDOWN_MS * consecutiveFailures, MODEL_UNSUPPORTED_MAX_COOLDOWN_MS);
-		this.modelQuarantine.set(key, {
-			cooldownUntil: Date.now() + cooldownMs,
-			reason: reason || `Model '${wireModel}' refused by this account`,
-			consecutiveFailures
-		});
-	}
-	/** Current model quarantine for an account, or null when none applies (expired entries cleared). */
-	getModelQuarantine(id, family, wireModel) {
-		const key = modelQuarantineKey(id, family, wireModel);
-		const entry = this.modelQuarantine.get(key);
-		if (!entry) return null;
-		if (entry.cooldownUntil <= Date.now()) {
-			this.modelQuarantine.delete(key);
-			return null;
-		}
-		return entry;
-	}
-	/** Drop model quarantines (all accounts / one account / one family). Used by `/ccl` remediation. */
-	clearModelQuarantine(id, family) {
-		for (const key of [...this.modelQuarantine.keys()]) {
-			const [accId, accFamily] = key.split("|");
-			if (id && accId !== id) continue;
-			if (family && accFamily !== family) continue;
-			this.modelQuarantine.delete(key);
-		}
-	}
-	recordSuccess(id, family) {
-		const acc = this.getAccount(id);
-		if (!acc) return;
-		acc.lastUsedAt = Date.now();
-		if (acc.authRequired) {
-			delete acc.authRequired;
-			delete acc.authError;
-		}
-		if (acc.cooldowns[family]) delete acc.cooldowns[family];
-		this.persist();
-	}
-	clearCooldown(id, family) {
-		if (id) {
-			const acc = this.getAccount(id);
-			if (!acc) return;
-			if (family) delete acc.cooldowns[family];
-			else acc.cooldowns = {};
-		} else for (const acc of this.data.accounts) if (family) delete acc.cooldowns[family];
-		else acc.cooldowns = {};
-		this.persist();
-	}
-	isAccountHealthy(account, family, thresholdOrWireModel, maybeWireModel) {
-		const threshold = typeof thresholdOrWireModel === "number" ? thresholdOrWireModel : this.lowQuotaThreshold;
-		const wireModel = typeof thresholdOrWireModel === "string" ? thresholdOrWireModel : maybeWireModel;
-		if (!account.enabled || account.authRequired) return false;
-		const now = Date.now();
-		const cd = account.cooldowns[family];
-		if (cd && cd.cooldownUntil > now) return false;
-		const quota = account.quotas[family];
-		if (quota && typeof quota.remainingFraction === "number" && quota.remainingFraction <= threshold) {
-			if (quota.resetTime) {
-				const resetMs = Date.parse(quota.resetTime);
-				if (!Number.isNaN(resetMs) && resetMs > now) return false;
-			}
-		}
-		if (quota && typeof quota.weeklyFraction === "number" && quota.weeklyFraction <= .01) {
-			if (quota.weeklyResetTime) {
-				const resetMs = Date.parse(quota.weeklyResetTime);
-				if (!Number.isNaN(resetMs) && resetMs > now) return false;
-			}
-		}
-		if (wireModel?.trim()) {
-			if (!modelEntitlementOf(account, family, wireModel).supported) return false;
-			if (this.getModelQuarantine(account.id, family, wireModel)) return false;
-		}
-		return true;
-	}
-	/**
-	* Pick a schedulable account. When `wireModel` is given, entitlement filtering happens HERE so
-	* every strategy below (pin, round-robin, sticky drain) only ever sees accounts that can serve
-	* the requested model. Without `wireModel` the behaviour is unchanged.
-	*/
-	selectAccount(family, wireModel) {
-		const candidates = this.data.accounts.filter((acc) => this.isAccountHealthy(acc, family, wireModel));
-		if (candidates.length === 0) return null;
-		const pinned = this.getPinnedAccount();
-		if (pinned && candidates.some((c) => c.id === pinned.id)) {
-			this.runtimeActiveAccountIds.set(family, pinned.id);
-			return pinned;
-		}
-		if (this.data.mode === "round-robin" && candidates.length > 1) {
-			const activeId = this.runtimeActiveAccountIds.get(family) ?? this.data.activeAccountIds?.[family];
-			const lastIndex = activeId ? this.data.accounts.findIndex((a) => a.id === activeId) : -1;
-			const total = this.data.accounts.length;
-			const chosen = candidates.slice().sort((a, b) => {
-				const aFrac = a.quotas[family]?.remainingFraction ?? 1;
-				const bFrac = b.quotas[family]?.remainingFraction ?? 1;
-				if (Math.abs(bFrac - aFrac) >= .001) return bFrac - aFrac;
-				const aIndex = this.data.accounts.indexOf(a);
-				const bIndex = this.data.accounts.indexOf(b);
-				return (lastIndex !== -1 ? (aIndex - lastIndex - 1 + total) % total : aIndex) - (lastIndex !== -1 ? (bIndex - lastIndex - 1 + total) % total : bIndex);
-			})[0];
-			this.runtimeActiveAccountIds.set(family, chosen.id);
-			return chosen;
-		}
-		const activeId = this.runtimeActiveAccountIds.get(family) ?? this.data.activeAccountIds?.[family];
-		if (activeId) {
-			const activeCandidate = candidates.find((a) => a.id === activeId);
-			if (activeCandidate) {
-				this.runtimeActiveAccountIds.set(family, activeCandidate.id);
-				return activeCandidate;
-			}
-		}
-		let nextAccount = candidates[0];
-		if (activeId) {
-			const currentIndex = this.data.accounts.findIndex((a) => a.id === activeId);
-			if (currentIndex !== -1) {
-				const total = this.data.accounts.length;
-				for (let i = 1; i < total; i++) {
-					const checkAcc = this.data.accounts[(currentIndex + i) % total];
-					if (candidates.some((c) => c.id === checkAcc.id)) {
-						nextAccount = checkAcc;
-						break;
-					}
-				}
-			}
-		}
-		this.runtimeActiveAccountIds.set(family, nextAccount.id);
-		return nextAccount;
-	}
-	getEarliestResetCountdown(family) {
-		const now = Date.now();
-		let earliest = null;
-		for (const acc of this.data.accounts) {
-			if (!acc.enabled || acc.authRequired) continue;
-			let accReset = null;
-			const cd = acc.cooldowns[family];
-			if (cd && cd.cooldownUntil > now) accReset = Math.max(accReset ?? 0, cd.cooldownUntil);
-			const quota = acc.quotas[family];
-			if (quota && typeof quota.remainingFraction === "number" && quota.remainingFraction <= this.lowQuotaThreshold) {
-				if (quota.resetTime) {
-					const resetMs = Date.parse(quota.resetTime);
-					if (!Number.isNaN(resetMs) && resetMs > now) accReset = Math.max(accReset ?? 0, resetMs);
-				}
-			}
-			if (quota && typeof quota.weeklyFraction === "number" && quota.weeklyFraction <= .01) {
-				if (quota.weeklyResetTime) {
-					const resetMs = Date.parse(quota.weeklyResetTime);
-					if (!Number.isNaN(resetMs) && resetMs > now) accReset = Math.max(accReset ?? 0, resetMs);
-				}
-			}
-			if (accReset !== null) {
-				if (earliest === null || accReset < earliest) earliest = accReset;
-			}
-		}
-		return earliest !== null ? Math.max(0, earliest - now) : null;
-	}
-	/**
-	* Pool verdict for one family. With `wireModel` the verdict is model-aware: when every signed-in
-	* account publishes a model list that excludes the requested model, the reason is
-	* `model_not_available` — NOT `auth_required`, which would send the user to `/ccl auth` for a
-	* problem re-authenticating cannot fix.
-	*/
-	getFamilyStatus(family, wireModel) {
-		const accounts = this.data.accounts;
-		if (accounts.length === 0) return {
-			hasAccount: false,
-			suppressed: false,
-			reason: "no_accounts",
-			resetInMs: null
-		};
-		const enabledAccounts = accounts.filter((a) => a.enabled);
-		if (enabledAccounts.length === 0) return {
-			hasAccount: false,
-			suppressed: false,
-			reason: "disabled",
-			resetInMs: null
-		};
-		const authValidAccounts = enabledAccounts.filter((a) => !a.authRequired);
-		if (authValidAccounts.length === 0) return {
-			hasAccount: false,
-			suppressed: false,
-			reason: "auth_required",
-			resetInMs: null
-		};
-		if (this.selectAccount(family, wireModel)) return {
-			hasAccount: true,
-			suppressed: false,
-			resetInMs: null
-		};
-		if (wireModel?.trim()) {
-			if (authValidAccounts.every((a) => !modelEntitlementOf(a, family, wireModel).supported)) return {
-				hasAccount: true,
-				suppressed: true,
-				reason: "model_not_available",
-				resetInMs: null
-			};
-		}
-		const resetInMs = this.getEarliestResetCountdown(family);
-		return {
-			hasAccount: true,
-			suppressed: true,
-			reason: authValidAccounts.some((a) => a.cooldowns[family] && a.cooldowns[family].cooldownUntil > Date.now()) ? "rate_limited" : "quota_exhausted",
-			resetInMs
-		};
-	}
-};
-//#endregion
-//#region src/common/types.ts
-const PROVIDER_ID = "antigravity";
-const GEMINI_APP_PROVIDER_ID = "gemini-app";
-const DEFAULT_ENDPOINT_CANDIDATES = [
-	"https://cloudcode-pa.googleapis.com",
-	"https://daily-cloudcode-pa.googleapis.com",
-	"https://daily-cloudcode-pa.sandbox.googleapis.com"
-];
-const DEFAULT_FALLBACK_MODELS = [
-	{
-		id: "gemini-3.8-flash",
-		name: "Gemini 3.8 Flash",
-		efforts: [
-			"low",
-			"medium",
-			"high"
-		],
-		inputModalities: ["text", "image"]
-	},
-	{
-		id: "gemini-3.7-flash",
-		name: "Gemini 3.7 Flash",
-		efforts: [
-			"low",
-			"medium",
-			"high"
-		],
-		inputModalities: ["text", "image"]
-	},
-	{
-		id: "gemini-3.6-flash",
-		name: "Gemini 3.6 Flash",
-		efforts: [
-			"low",
-			"medium",
-			"high"
-		],
-		inputModalities: ["text", "image"]
-	},
-	{
-		id: "gemini-3.5-flash",
-		name: "Gemini 3.5 Flash",
-		efforts: [
-			"low",
-			"medium",
-			"high"
-		],
-		inputModalities: ["text", "image"]
-	},
-	{
-		id: "gemini-3.1-pro",
-		name: "Gemini 3.1 Pro",
-		efforts: ["low", "high"],
-		inputModalities: ["text", "image"]
-	},
-	{
-		id: "gemini-3-flash",
-		name: "Gemini 3 Flash",
-		inputModalities: ["text", "image"]
-	},
-	{
-		id: "gemini-2.5-pro",
-		name: "Gemini 2.5 Pro",
-		inputModalities: ["text", "image"]
-	},
-	{
-		id: "gemini-2.5-flash",
-		name: "Gemini 2.5 Flash",
-		inputModalities: ["text", "image"]
-	},
-	{
-		id: "gemini-3.1-flash-lite",
-		name: "Gemini 3.1 Flash Lite",
-		inputModalities: ["text", "image"]
-	},
-	{
-		id: "claude-sonnet-4-6",
-		name: "Claude Sonnet 4.6 (Thinking)",
-		inputModalities: ["text", "image"]
-	},
-	{
-		id: "claude-opus-4-6-thinking",
-		name: "Claude Opus 4.6 (Thinking)",
-		inputModalities: ["text", "image"]
-	},
-	{
-		id: "gpt-oss-120b-medium",
-		name: "GPT-OSS 120B (Medium)",
-		inputModalities: ["text"]
-	}
-];
-function defaultConfig() {
-	return {
-		enabled: true,
-		defaultModel: "",
-		defaultEffort: "",
-		timeoutMs: 6e5,
-		maxConcurrent: 3,
-		contextWindowDefault: 1048576,
-		maxTokensDefault: 65536,
-		quotaPollIntervalMs: 9e5,
-		sessionStartQuotaRefreshMinIntervalMs: 1e4,
-		statsEnabled: true,
-		statsDbPath: join(defaultPoolDir(), "stats.db"),
-		statsBufferCapacity: 2048,
-		statsBatchSize: 100,
-		statsFlushIntervalMs: 2e3,
-		statsRetentionDays: 30,
-		statsRetentionCheckIntervalMs: 36e5,
-		lowQuotaThreshold: .05,
-		apiMaxPageSize: 100,
-		fallbackModels: DEFAULT_FALLBACK_MODELS,
-		askTool: false,
-		disableTelemetry: true,
-		autoFallbackModel: false,
-		baseUrl: "",
-		endpointCandidates: DEFAULT_ENDPOINT_CANDIDATES,
-		modelsCacheTtlMs: 3e5,
-		logRetentionDays: 7,
-		rateLimitPerMinute: 0,
-		heartbeatEnabled: true,
-		heartbeatIntervalMs: 18e4,
-		geminiAppEnabled: false,
-		geminiAppEndpoint: "robinfrontend-pa.googleapis.com",
-		geminiAppToken: void 0,
-		geminiAppTimeoutMs: 12e4,
-		geminiAppDefaultModel: "gemini-app-default",
-		agyBin: "",
-		permissionMode: "skip",
-		workspaceRoot: "",
-		mcpBridge: false,
-		mcpToolAllowlist: "",
-		mediaDir: "",
-		mediaTtlMs: 864e5,
-		mediaMaxBytes: 10485760,
-		mediaMaxImages: 8,
-		forwardSystemPrompt: false,
-		digestMaxChars: 8e3,
-		allowAuxiliary: true,
-		compactionMaxChars: 8e5,
-		extraArgs: []
-	};
-}
-function formatDuration(ms) {
-	if (ms <= 0) return "0s";
-	const totalSecs = Math.ceil(ms / 1e3);
-	const days = Math.floor(totalSecs / 86400);
-	const hours = Math.floor(totalSecs % 86400 / 3600);
-	const mins = Math.floor(totalSecs % 3600 / 60);
-	const secs = totalSecs % 60;
-	if (days > 0) return hours > 0 ? `${days}d ${hours}h` : `${days}d`;
-	if (hours > 0) return mins > 0 ? `${hours}h ${mins}m` : `${hours}h`;
-	if (mins > 0) return secs > 0 ? `${mins}m ${secs}s` : `${mins}m`;
-	return `${secs}s`;
-}
-//#endregion
-//#region src/common/config.ts
-function dshHome() {
-	return process.env.DSH_HOME ?? process.env.DSH_STATE_DIR ?? join(homedir(), ".dsh");
-}
-function stateDir() {
-	const newDir = join(dshHome(), "cloudcode-link");
-	const legacyDir = join(dshHome(), "agy-link");
-	if (!existsSync(newDir) && existsSync(legacyDir)) return legacyDir;
-	return newDir;
-}
-function overridesPath() {
-	return join(stateDir(), "runtime-overrides.json");
-}
-function readJson(file) {
-	try {
-		if (!existsSync(file)) return {};
-		const v = JSON.parse(readFileSync(file, "utf8"));
-		return v && typeof v === "object" ? v : {};
-	} catch {
-		return {};
-	}
-}
-function readOverrides(file = overridesPath()) {
-	return readJson(file);
-}
-function asString$1(v) {
-	return typeof v === "string" ? v : void 0;
-}
-function asBool(v) {
-	if (typeof v === "boolean") return v;
-	if (typeof v === "string") return v === "true" || v === "1";
-}
-function asNum(v) {
-	if (typeof v === "number" && Number.isFinite(v)) return v;
-	if (typeof v === "string" && v.trim() !== "" && Number.isFinite(Number(v))) return Number(v);
-}
-const MODES = [
-	"skip",
-	"plan",
-	"accept-edits"
-];
-function asMode(v) {
-	return typeof v === "string" && MODES.includes(v) ? v : void 0;
-}
-/** Layered config read; cheap enough to call per request (thunk pattern). */
-function resolveConfig(entry, env = process.env, overrides = readOverrides()) {
-	const base = defaultConfig();
-	const layers = [entry ?? {}, overrides];
-	const get = (k) => {
-		for (const l of layers) if (l[k] !== void 0 && l[k] !== null && l[k] !== "") return l[k];
-	};
-	const cfg = {
-		...base,
-		enabled: asBool(get("enabled")) ?? base.enabled,
-		defaultModel: asString$1(get("defaultModel")) ?? base.defaultModel,
-		defaultEffort: asString$1(get("defaultEffort")) ?? base.defaultEffort,
-		timeoutMs: asNum(get("timeoutMs")) ?? base.timeoutMs,
-		maxConcurrent: asNum(get("maxConcurrent")) ?? base.maxConcurrent,
-		contextWindowDefault: asNum(get("contextWindowDefault")) ?? base.contextWindowDefault,
-		maxTokensDefault: asNum(get("maxTokensDefault")) ?? base.maxTokensDefault,
-		quotaPollIntervalMs: asNum(get("quotaPollIntervalMs")) ?? base.quotaPollIntervalMs,
-		sessionStartQuotaRefreshMinIntervalMs: asNum(get("sessionStartQuotaRefreshMinIntervalMs")) ?? base.sessionStartQuotaRefreshMinIntervalMs,
-		statsEnabled: asBool(get("statsEnabled")) ?? base.statsEnabled,
-		statsDbPath: asString$1(get("statsDbPath")) ?? base.statsDbPath,
-		statsBufferCapacity: asNum(get("statsBufferCapacity")) ?? base.statsBufferCapacity,
-		statsBatchSize: asNum(get("statsBatchSize")) ?? base.statsBatchSize,
-		statsFlushIntervalMs: asNum(get("statsFlushIntervalMs")) ?? base.statsFlushIntervalMs,
-		statsRetentionDays: asNum(get("statsRetentionDays")) ?? base.statsRetentionDays,
-		statsRetentionCheckIntervalMs: asNum(get("statsRetentionCheckIntervalMs")) ?? base.statsRetentionCheckIntervalMs,
-		lowQuotaThreshold: asNum(get("lowQuotaThreshold")) ?? base.lowQuotaThreshold,
-		apiMaxPageSize: asNum(get("apiMaxPageSize")) ?? base.apiMaxPageSize,
-		modelsCacheTtlMs: asNum(get("modelsCacheTtlMs")) ?? base.modelsCacheTtlMs,
-		baseUrl: asString$1(get("baseUrl")) ?? base.baseUrl,
-		endpointCandidates: Array.isArray(get("endpointCandidates")) ? get("endpointCandidates").filter((x) => typeof x === "string") : base.endpointCandidates,
-		fallbackModels: Array.isArray(get("fallbackModels")) ? get("fallbackModels").filter((x) => !!x && typeof x === "object" && typeof x.id === "string") : base.fallbackModels,
-		askTool: asBool(get("askTool")) ?? base.askTool,
-		rateLimitPerMinute: asNum(get("rateLimitPerMinute")) ?? base.rateLimitPerMinute,
-		autoFallbackModel: asBool(get("autoFallbackModel")) ?? base.autoFallbackModel,
-		logRetentionDays: asNum(get("logRetentionDays")) ?? base.logRetentionDays,
-		disableTelemetry: asBool(get("disableTelemetry")) ?? base.disableTelemetry,
-		heartbeatEnabled: asBool(get("heartbeatEnabled")) ?? base.heartbeatEnabled,
-		heartbeatIntervalMs: (() => {
-			const n = asNum(get("heartbeatIntervalMs"));
-			return n !== void 0 ? Math.max(3e4, n) : base.heartbeatIntervalMs;
-		})(),
-		geminiAppEnabled: asBool(get("geminiAppEnabled")) ?? base.geminiAppEnabled,
-		geminiAppEndpoint: asString$1(get("geminiAppEndpoint")) ?? base.geminiAppEndpoint,
-		geminiAppToken: asString$1(get("geminiAppToken")) ?? base.geminiAppToken,
-		geminiAppTimeoutMs: asNum(get("geminiAppTimeoutMs")) ?? base.geminiAppTimeoutMs,
-		geminiAppDefaultModel: asString$1(get("geminiAppDefaultModel")) ?? base.geminiAppDefaultModel,
-		agyBin: asString$1(get("agyBin")) ?? base.agyBin,
-		permissionMode: asMode(get("permissionMode")) ?? base.permissionMode,
-		workspaceRoot: asString$1(get("workspaceRoot")) ?? base.workspaceRoot,
-		mcpBridge: asBool(get("mcpBridge")) ?? base.mcpBridge,
-		mcpToolAllowlist: asString$1(get("mcpToolAllowlist")) ?? base.mcpToolAllowlist,
-		mediaDir: asString$1(get("mediaDir")) ?? base.mediaDir,
-		mediaTtlMs: asNum(get("mediaTtlMs")) ?? base.mediaTtlMs,
-		mediaMaxBytes: asNum(get("mediaMaxBytes")) ?? base.mediaMaxBytes,
-		mediaMaxImages: asNum(get("mediaMaxImages")) ?? base.mediaMaxImages,
-		forwardSystemPrompt: asBool(get("forwardSystemPrompt")) ?? base.forwardSystemPrompt,
-		digestMaxChars: asNum(get("digestMaxChars")) ?? base.digestMaxChars,
-		allowAuxiliary: asBool(get("allowAuxiliary")) ?? base.allowAuxiliary,
-		compactionMaxChars: asNum(get("compactionMaxChars")) ?? base.compactionMaxChars,
-		extraArgs: Array.isArray(get("extraArgs")) ? get("extraArgs").filter((x) => typeof x === "string") : base.extraArgs
-	};
-	const envEnabled = env.DSH_CLOUDCODE_ENABLED ?? env.DSH_AGY_ENABLED;
-	if (envEnabled !== void 0) cfg.enabled = asBool(envEnabled) ?? cfg.enabled;
-	if (env.ANTIGRAVITY_BASE_URL) cfg.baseUrl = env.ANTIGRAVITY_BASE_URL;
-	const envDefaultModel = env.DSH_CLOUDCODE_DEFAULT_MODEL ?? env.DSH_AGY_DEFAULT_MODEL;
-	if (envDefaultModel) cfg.defaultModel = envDefaultModel;
-	const envDefaultEffort = env.DSH_CLOUDCODE_DEFAULT_EFFORT ?? env.DSH_AGY_DEFAULT_EFFORT;
-	if (envDefaultEffort) cfg.defaultEffort = envDefaultEffort;
-	const envTimeoutMs = env.DSH_CLOUDCODE_TIMEOUT_MS ?? env.DSH_AGY_TIMEOUT_MS;
-	if (envTimeoutMs !== void 0) {
-		const n = asNum(envTimeoutMs);
-		if (n !== void 0) cfg.timeoutMs = n;
-	}
-	const envMaxConcurrent = env.DSH_CLOUDCODE_MAX_CONCURRENT ?? env.DSH_AGY_MAX_CONCURRENT;
-	if (envMaxConcurrent !== void 0) {
-		const n = asNum(envMaxConcurrent);
-		if (n !== void 0) cfg.maxConcurrent = n;
-	}
-	const envQuotaPoll = env.DSH_CLOUDCODE_QUOTA_POLL_INTERVAL_MS ?? env.DSH_AGY_QUOTA_POLL_INTERVAL_MS;
-	if (envQuotaPoll !== void 0) {
-		const n = asNum(envQuotaPoll);
-		if (n !== void 0) cfg.quotaPollIntervalMs = Math.max(6e4, n);
-	}
-	const envHeartbeatEnabled = env.DSH_CLOUDCODE_HEARTBEAT_ENABLED ?? env.DSH_AGY_HEARTBEAT_ENABLED;
-	if (envHeartbeatEnabled !== void 0) cfg.heartbeatEnabled = asBool(envHeartbeatEnabled) ?? cfg.heartbeatEnabled;
-	const envHeartbeatInterval = env.DSH_CLOUDCODE_HEARTBEAT_INTERVAL_MS ?? env.DSH_AGY_HEARTBEAT_INTERVAL_MS;
-	if (envHeartbeatInterval !== void 0) {
-		const n = asNum(envHeartbeatInterval);
-		if (n !== void 0) cfg.heartbeatIntervalMs = Math.max(3e4, n);
-	}
-	const envStatsDbPath = env.DSH_CLOUDCODE_DB_PATH ?? env.DSH_AGY_DB_PATH;
-	if (envStatsDbPath) cfg.statsDbPath = envStatsDbPath;
-	const envStatsEnabled = env.DSH_CLOUDCODE_STATS_ENABLED ?? env.DSH_AGY_STATS_ENABLED;
-	if (envStatsEnabled !== void 0) {
-		const b = asBool(envStatsEnabled);
-		if (b !== void 0) cfg.statsEnabled = b;
-	}
-	const envStatsBufferCapacity = env.DSH_CLOUDCODE_STATS_BUFFER_CAPACITY;
-	if (envStatsBufferCapacity !== void 0) {
-		const n = asNum(envStatsBufferCapacity);
-		if (n !== void 0) cfg.statsBufferCapacity = Math.max(1, n);
-	}
-	const envStatsBatchSize = env.DSH_CLOUDCODE_STATS_BATCH_SIZE;
-	if (envStatsBatchSize !== void 0) {
-		const n = asNum(envStatsBatchSize);
-		if (n !== void 0) cfg.statsBatchSize = Math.max(1, n);
-	}
-	const envStatsFlushIntervalMs = env.DSH_CLOUDCODE_STATS_FLUSH_INTERVAL_MS;
-	if (envStatsFlushIntervalMs !== void 0) {
-		const n = asNum(envStatsFlushIntervalMs);
-		if (n !== void 0) cfg.statsFlushIntervalMs = Math.max(10, n);
-	}
-	const envStatsRetentionDays = env.DSH_CLOUDCODE_STATS_RETENTION_DAYS;
-	if (envStatsRetentionDays !== void 0) {
-		const n = asNum(envStatsRetentionDays);
-		if (n !== void 0) cfg.statsRetentionDays = Math.max(1, n);
-	}
-	const envStatsRetentionCheckMs = env.DSH_CLOUDCODE_STATS_RETENTION_CHECK_INTERVAL_MS;
-	if (envStatsRetentionCheckMs !== void 0) {
-		const n = asNum(envStatsRetentionCheckMs);
-		if (n !== void 0) cfg.statsRetentionCheckIntervalMs = Math.max(1e3, n);
-	}
-	const envLowQuotaThreshold = env.DSH_CLOUDCODE_LOW_QUOTA_THRESHOLD;
-	if (envLowQuotaThreshold !== void 0) {
-		const n = asNum(envLowQuotaThreshold);
-		if (n !== void 0) cfg.lowQuotaThreshold = Math.max(0, Math.min(1, n));
-	}
-	const envSessionRefreshMin = env.DSH_CLOUDCODE_SESSION_START_QUOTA_REFRESH_MIN_INTERVAL_MS;
-	if (envSessionRefreshMin !== void 0) {
-		const n = asNum(envSessionRefreshMin);
-		if (n !== void 0) cfg.sessionStartQuotaRefreshMinIntervalMs = Math.max(1e3, n);
-	}
-	const envApiMaxPageSize = env.DSH_CLOUDCODE_API_MAX_PAGE_SIZE;
-	if (envApiMaxPageSize !== void 0) {
-		const n = asNum(envApiMaxPageSize);
-		if (n !== void 0) cfg.apiMaxPageSize = Math.max(1, n);
-	}
-	const envGeminiAppEnabled = env.DSH_GEMINI_APP_ENABLED ?? env.GEMINI_APP_ENABLED;
-	if (envGeminiAppEnabled !== void 0) {
-		const b = asBool(envGeminiAppEnabled);
-		if (b !== void 0) cfg.geminiAppEnabled = b;
-	}
-	const envGeminiAppEndpoint = env.DSH_GEMINI_APP_ENDPOINT ?? env.GEMINI_APP_ENDPOINT;
-	if (envGeminiAppEndpoint) cfg.geminiAppEndpoint = envGeminiAppEndpoint;
-	const envGeminiAppToken = env.DSH_GEMINI_APP_TOKEN ?? env.GEMINI_APP_TOKEN;
-	if (envGeminiAppToken) {
-		cfg.geminiAppToken = envGeminiAppToken;
-		if (envGeminiAppEnabled === void 0) cfg.geminiAppEnabled = true;
-	}
-	const envGeminiAppTimeout = env.DSH_GEMINI_APP_TIMEOUT_MS ?? env.GEMINI_APP_TIMEOUT_MS;
-	if (envGeminiAppTimeout !== void 0) {
-		const n = asNum(envGeminiAppTimeout);
-		if (n !== void 0) cfg.geminiAppTimeoutMs = Math.max(1e3, n);
-	}
-	const envGeminiAppDefaultModel = env.DSH_GEMINI_APP_DEFAULT_MODEL ?? env.GEMINI_APP_DEFAULT_MODEL;
-	if (envGeminiAppDefaultModel) cfg.geminiAppDefaultModel = envGeminiAppDefaultModel;
-	return cfg;
-}
-//#endregion
 //#region packages/core/src/models.ts
 /**
 * Names for ids the server ships without any `displayName`. Their shape follows the labels the
@@ -1350,7 +188,16 @@ function prettifyModelSlug(slug) {
 */
 function isInternalModel(slug) {
 	const s = slug.trim().toLowerCase();
-	return /^chat_\d+$/i.test(s) || /^tab[_-]/i.test(s) || /_preview$/i.test(s) || /-preview$/i.test(s) || /-disabled(?:-|$)/i.test(s) || /-tiered-/i.test(s);
+	return /^chat_\d+$/i.test(s) || /^tab[_-]/i.test(s) || /_preview$/i.test(s) || /-preview$/i.test(s) || s.includes("-disabled") || s.endsWith("disabled") || /-disabled(?:-|$)/i.test(s) || s.endsWith("-disabled") || s.includes("-disabled-") || /-tiered-/i.test(s);
+}
+/** Check if a model belongs to the Gemini 4 generation (argon, hydrogen, neon, carbon). */
+function isGemini4Model(modelId) {
+	const s = modelId.trim().toLowerCase();
+	return s.startsWith("gemini-4") || s.includes("hydrogen") || s.includes("argon") || s.includes("neon") || s.includes("carbon");
+}
+/** Determine if a model requires routing to daily endpoints first (Gemini 4 models). */
+function isDailyEndpointModel(modelId) {
+	return isGemini4Model(modelId);
 }
 /** Parse `agy models` stdout: JSON shapes first, then two-column text. */
 function parseModelsOutput(stdout) {
@@ -2256,7 +1103,7 @@ function getAntigravityRequestModelId(modelId, effort) {
 	const r = ANTIGRAVITY_ROUTING[resolvedId] ?? ANTIGRAVITY_ROUTING[modelId];
 	if (!r) {
 		const isWireModel = resolvedId.endsWith("-low") || resolvedId.endsWith("-medium") || resolvedId.endsWith("-high") || resolvedId.endsWith("-xhigh") || resolvedId.endsWith("-tiered") || resolvedId.endsWith("-extra-low") || resolvedId.endsWith("-thinking");
-		if (/^gemini-(?:[3-9]|\d{2,})(?:[.-]|$)/i.test(resolvedId) && !isWireModel) {
+		if ((isGemini4Model(resolvedId) || /^gemini-(?:[3-9]|\d{2,})(?:[.-]|$)/i.test(resolvedId)) && !isWireModel) {
 			if (effort && effort !== "off" && [
 				"low",
 				"medium",
@@ -2301,6 +1148,1290 @@ function getThinkingConfig(modelId, effort) {
 			thinkingBudget: effort === "high" || effort === "xhigh" ? 10001 : 1001
 		};
 	}
+}
+//#endregion
+//#region packages/core/src/pool.ts
+function defaultPoolDir(customBase) {
+	if (customBase) return customBase;
+	if (process.env.CLOUDCODE_ACCOUNTS_DIR?.trim()) return process.env.CLOUDCODE_ACCOUNTS_DIR.trim();
+	if (process.env.ANTIGRAVITY_ACCOUNTS_DIR?.trim()) return process.env.ANTIGRAVITY_ACCOUNTS_DIR.trim();
+	return join(homedir(), ".cloudcode", "accounts");
+}
+/**
+* Effort / routing modifiers the backend appends to a wire model id
+* (`gemini-4-hydrogen-high`, `gemini-4-hydrogen-tiered-high`, `gemini-2.5-flash-thinking`).
+* They are stripped from the tail so a requested wire id can be compared with the model ids an
+* account is actually entitled to: an account that serves `gemini-4-hydrogen-medium` can serve a
+* `gemini-4-hydrogen-high` request even when that exact effort string is absent from its list.
+* Longer modifiers come first so `-xhigh` is never half-stripped as `-high`.
+*/
+const MODEL_EFFORT_SUFFIXES = [
+	"xhigh",
+	"high",
+	"medium",
+	"low",
+	"minimal",
+	"none",
+	"off",
+	"auto",
+	"thinking",
+	"tiered"
+];
+/**
+* Suffixes the backend uses to publish a model id it explicitly refuses to serve
+* (`gemini-4-hydrogen-disabled`, carried with `disabled: true` and an "Unavailable" tag in the
+* captured FetchAvailableModels response). `disabled` is the server's own refusal marker.
+*
+* `sonar` is NOT such a marker, contrary to what this comment used to claim. In the same capture
+* `gemini-4-hydrogen-sonar` is published with a live `quotaInfo` (remainingFraction ~1 plus a
+* resetTime), no `disabled` / `beta` / `isInternal` flag and `recommended: true`, in no
+* `agentModelSorts` / `tieredModelIds` group only because agy's picker does not show it — and live
+* requests against it returned HTTP 200 with SSE text and `modelVersion: gemini-4-hydrogen-sonar`
+* on three accounts (free-tier included). So it is a servable model of its own, and a list holding
+* only `...-disabled` entries still says nothing about the base model.
+*/
+const MODEL_UNSERVABLE_SUFFIXES = ["disabled"];
+/** Quarantine window for one (account, family, model base) triple after an upstream 403. */
+const MODEL_UNSUPPORTED_COOLDOWN_MS = 3e5;
+/** Repeated 403s for the same model escalate the quarantine, but never past this bound. */
+const MODEL_UNSUPPORTED_MAX_COOLDOWN_MS = 18e5;
+/**
+* `gemini-4-hydrogen-tiered-high` -> `gemini-4-hydrogen`; unservable markers are NOT stripped.
+* `gemini-4-hydrogen-sonar` keeps its full id on purpose: it has no effort ladder, so it is not a
+* variant of `gemini-4-hydrogen`, and folding it in would make a sonar-only account look entitled
+* to `gemini-4-hydrogen-medium` — a request the upstream answers with 403, which would quarantine
+* the whole hydrogen family for that account.
+*/
+function modelBaseOf(modelId) {
+	let base = modelId.trim().toLowerCase();
+	for (;;) {
+		const modifier = MODEL_EFFORT_SUFFIXES.find((suffix) => base.endsWith(`-${suffix}`) && base.length > suffix.length + 1);
+		if (!modifier) return base;
+		base = base.slice(0, -(modifier.length + 1));
+	}
+}
+/** False for ids the backend marks as not serviceable (`...-disabled`). */
+function isServableModelId(modelId) {
+	const id = modelId.trim().toLowerCase();
+	if (!id) return false;
+	if (id === "disabled" || id.endsWith("-disabled") || id.includes("-disabled")) return false;
+	return !MODEL_UNSERVABLE_SUFFIXES.some((marker) => id === marker || id.endsWith(`-${marker}`) || id.includes(`-${marker}-`));
+}
+/**
+* Model-level entitlement of one account.
+*
+* An account whose family quota carries no `models[]` list (never refreshed, or the backend did
+* not send the breakdown) is treated as ENTITLED: missing data must not disqualify the whole pool.
+*/
+function modelEntitlementOf(account, family, wireModel) {
+	const requested = wireModel.trim().toLowerCase();
+	const base = modelBaseOf(requested);
+	const listing = account.quotas[family]?.models;
+	if (!Array.isArray(listing) || listing.length === 0) return {
+		base,
+		known: false,
+		supported: true
+	};
+	if (!isServableModelId(requested)) return {
+		base,
+		known: true,
+		supported: false
+	};
+	return {
+		base,
+		known: true,
+		supported: listing.some((entry) => {
+			const listed = typeof entry.modelId === "string" ? entry.modelId.trim().toLowerCase() : "";
+			if (!listed || !isServableModelId(listed)) return false;
+			const listedBase = modelBaseOf(listed);
+			return listed === requested || listedBase === base || base === "gemini-4-hydrogen" && listedBase === "gemini-4-argon" || base === "gemini-4-argon" && listedBase === "gemini-4-hydrogen";
+		})
+	};
+}
+/** Key of the model quarantine map: one account, one family, one effort-stripped model base. */
+function modelQuarantineKey(id, family, wireModel) {
+	return `${id}|${family}|${modelBaseOf(wireModel)}`;
+}
+var Semaphore$1 = class {
+	active = 0;
+	queue = [];
+	max;
+	constructor(max) {
+		this.max = max;
+	}
+	async acquire() {
+		if (this.active < Math.max(1, this.max())) {
+			this.active++;
+			return () => this.releaseOne();
+		}
+		return new Promise((resolve) => {
+			this.queue.push(() => {
+				this.active++;
+				resolve(() => this.releaseOne());
+			});
+		});
+	}
+	releaseOne() {
+		this.active--;
+		const next = this.queue.shift();
+		if (next) next();
+	}
+};
+/** Check if a specific account natively has entitlement for wireModel. */
+function hasModelCapability(account, wireModel) {
+	if (!wireModel || !wireModel.trim()) return false;
+	const trimmed = wireModel.trim();
+	if (!isServableModelId(trimmed)) return false;
+	const family = modelFamilyOf(trimmed);
+	const listing = account.quotas[family]?.models;
+	if (!Array.isArray(listing) || listing.length === 0) return false;
+	return modelEntitlementOf(account, family, trimmed).supported;
+}
+var AccountPoolManager = class {
+	data;
+	isBrandNew = false;
+	baseDir;
+	file;
+	activeMemoryTokens = /* @__PURE__ */ new Map();
+	accountSemaphores = /* @__PURE__ */ new Map();
+	runtimeActiveAccountIds = /* @__PURE__ */ new Map();
+	/**
+	* Model-scoped soft failures: `id|family|modelBase` -> quarantine state. Populated when the
+	* backend answers 403 for a model an account is not entitled to. Runtime-only on purpose —
+	* entitlement is re-probed from `quotas[family].models` after a quota refresh, and a stale
+	* "this account cannot do X" verdict must never outlive the process that observed it.
+	*/
+	modelQuarantine = /* @__PURE__ */ new Map();
+	writeQueue = Promise.resolve();
+	lowQuotaThreshold = .05;
+	constructor(baseDir = defaultPoolDir(), lowQuotaThreshold = .05) {
+		this.baseDir = baseDir;
+		this.lowQuotaThreshold = typeof lowQuotaThreshold === "number" && Number.isFinite(lowQuotaThreshold) && lowQuotaThreshold >= 0 && lowQuotaThreshold <= 1 ? lowQuotaThreshold : .05;
+		this.file = join(baseDir, "pool.json");
+		try {
+			chmodSync(this.baseDir, 448);
+		} catch {}
+		this.data = this.load();
+		this.bootstrapDefaultAccount();
+		this.normalizeLegacyPrimary();
+		this.normalizeAccountAliases();
+	}
+	getBaseDir() {
+		return this.baseDir;
+	}
+	setLowQuotaThreshold(threshold) {
+		if (typeof threshold === "number" && Number.isFinite(threshold) && threshold >= 0 && threshold <= 1) this.lowQuotaThreshold = threshold;
+	}
+	getLowQuotaThreshold() {
+		return this.lowQuotaThreshold;
+	}
+	load() {
+		if (!existsSync(this.file)) {
+			this.isBrandNew = true;
+			return defaultPoolData();
+		}
+		const raw = readFileSync(this.file, "utf8");
+		try {
+			const parsed = JSON.parse(raw);
+			if (parsed && Array.isArray(parsed.accounts)) {
+				this.isBrandNew = false;
+				return {
+					...defaultPoolData(),
+					...parsed
+				};
+			}
+			throw new Error("Missing or invalid accounts array");
+		} catch (err) {
+			const corruptBackup = `${this.file}.corrupted`;
+			try {
+				if (existsSync(corruptBackup)) rmSync(corruptBackup, { force: true });
+				renameSync(this.file, corruptBackup);
+			} catch {
+				try {
+					renameSync(this.file, `${this.file}.corrupted.${Date.now()}`);
+				} catch {}
+			}
+			this.isBrandNew = true;
+			const empty = defaultPoolData();
+			this.data = empty;
+			return empty;
+		}
+	}
+	persist() {
+		const doWrite = () => {
+			try {
+				const dir = dirname(this.file);
+				mkdirSync(dir, { recursive: true });
+				try {
+					chmodSync(dir, 448);
+				} catch {}
+				const tmp = join(dir, `.pool.json.tmp.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}`);
+				writeFileSync(tmp, JSON.stringify(this.data, null, 2), {
+					encoding: "utf8",
+					mode: 384
+				});
+				try {
+					chmodSync(tmp, 384);
+				} catch {}
+				renameSync(tmp, this.file);
+			} catch {}
+		};
+		this.writeQueue = this.writeQueue.then(doWrite, doWrite);
+		doWrite();
+	}
+	/**
+	* Bootstraps the primary account on first start.
+	*/
+	bootstrapDefaultAccount() {
+		if (!this.isBrandNew) return;
+		if (this.data.accounts.some((a) => a.systemHome)) return;
+		const primary = {
+			id: "acc_primary",
+			alias: "主账号 (系统登录)",
+			dir: "",
+			systemHome: true,
+			enabled: true,
+			createdAt: Date.now(),
+			cooldowns: {},
+			quotas: {}
+		};
+		this.data.accounts.unshift(primary);
+		this.data.primaryAccountId = primary.id;
+		this.persist();
+	}
+	normalizeLegacyPrimary() {
+		const primary = this.data.accounts.find((a) => a.id === "acc_primary");
+		if (!primary) {
+			if (this.data.primaryAccountId && !this.data.accounts.some((a) => a.id === this.data.primaryAccountId)) {
+				this.data.primaryAccountId = this.data.accounts[0]?.id;
+				this.persist();
+			}
+			return;
+		}
+		if (primary.systemHome) return;
+		primary.dir = "";
+		primary.systemHome = true;
+		if (!primary.alias || /^主账号/i.test(primary.alias) || /^备用.*账号/i.test(primary.alias)) primary.alias = primary.email || "主账号 (系统登录)";
+		this.data.primaryAccountId = primary.id;
+		this.persist();
+	}
+	normalizeAccountAliases() {
+		let changed = false;
+		for (const acc of this.data.accounts) if (acc.email && (!acc.alias || /^备用.*账号/i.test(acc.alias) || /^主账号/i.test(acc.alias) || acc.alias === acc.id)) {
+			if (acc.alias !== acc.email) {
+				acc.alias = acc.email;
+				changed = true;
+			}
+		}
+		if (changed) this.persist();
+	}
+	getPoolData() {
+		return this.data;
+	}
+	setMemoryToken(id, token, expiresAt) {
+		this.activeMemoryTokens.set(id, {
+			token,
+			expiresAt: expiresAt ?? Date.now() + 33e5
+		});
+	}
+	getMemoryToken(id) {
+		const entry = this.activeMemoryTokens.get(id);
+		if (!entry) return null;
+		if (entry.expiresAt <= Date.now() + 1e4) {
+			this.activeMemoryTokens.delete(id);
+			return null;
+		}
+		return entry.token;
+	}
+	clearMemoryToken(id) {
+		this.activeMemoryTokens.delete(id);
+	}
+	async acquireAccount(id, maxConcurrent = 1) {
+		let sem = this.accountSemaphores.get(id);
+		if (!sem) {
+			sem = new Semaphore$1(() => maxConcurrent);
+			this.accountSemaphores.set(id, sem);
+		}
+		return sem.acquire();
+	}
+	getAccounts() {
+		return this.data.accounts;
+	}
+	getAccount(id) {
+		return this.data.accounts.find((a) => a.id === id);
+	}
+	createStagingSlot() {
+		const id = `acc_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+		const dir = join(this.baseDir, `staging_${id}`);
+		const geminiDir = join(dir, ".gemini");
+		const tokenDir = join(geminiDir, "antigravity-cli");
+		mkdirSync(tokenDir, {
+			recursive: true,
+			mode: 448
+		});
+		try {
+			chmodSync(dir, 448);
+			chmodSync(geminiDir, 448);
+			chmodSync(tokenDir, 448);
+		} catch {}
+		return {
+			id,
+			dir
+		};
+	}
+	commitStagingAccount(id, dir, alias, email, proxyUrl) {
+		const finalDir = join(this.baseDir, id);
+		try {
+			if (existsSync(dir)) {
+				renameSync(dir, finalDir);
+				try {
+					chmodSync(finalDir, 448);
+				} catch {}
+			}
+		} catch {}
+		const newAccount = {
+			id,
+			alias: !alias || /^备用.*账号/i.test(alias) || /^主账号/i.test(alias) ? email || id : alias,
+			dir: existsSync(finalDir) ? finalDir : dir,
+			...email ? { email } : {},
+			...proxyUrl ? { proxyUrl } : {},
+			enabled: true,
+			createdAt: Date.now(),
+			cooldowns: {},
+			quotas: {}
+		};
+		this.data.accounts.push(newAccount);
+		this.persist();
+		return newAccount;
+	}
+	cleanupStagingSlot(dir) {
+		try {
+			if (existsSync(dir)) rmSync(dir, {
+				recursive: true,
+				force: true
+			});
+		} catch {}
+	}
+	sweepStaleStaging() {
+		let removed = 0;
+		try {
+			for (const entry of readdirSync(this.baseDir)) {
+				if (!entry.startsWith("staging_")) continue;
+				rmSync(join(this.baseDir, entry), {
+					recursive: true,
+					force: true
+				});
+				removed++;
+			}
+		} catch {}
+		return removed;
+	}
+	sweepOldLogs(maxDays = 7) {
+		const maxAgeMs = Math.max(1, maxDays) * 864e5;
+		const now = Date.now();
+		let removed = 0;
+		const targetLogDirs = [join(homedir(), ".gemini", "antigravity-cli", "log")];
+		for (const acc of this.data.accounts) if (acc.dir) targetLogDirs.push(join(acc.dir, ".gemini", "antigravity-cli", "log"));
+		for (const logDir of targetLogDirs) {
+			if (!existsSync(logDir)) continue;
+			try {
+				const files = readdirSync(logDir);
+				for (const f of files) {
+					if (!f.startsWith("cli-") || !f.endsWith(".log")) continue;
+					const fp = join(logDir, f);
+					try {
+						if (now - statSync(fp).mtimeMs > maxAgeMs) {
+							rmSync(fp, { force: true });
+							removed++;
+						}
+					} catch {}
+				}
+			} catch {}
+		}
+		return removed;
+	}
+	createAccountSlot(alias) {
+		const id = `acc_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+		const dir = join(this.baseDir, id);
+		const geminiDir = join(dir, ".gemini");
+		const tokenDir = join(geminiDir, "antigravity-cli");
+		mkdirSync(tokenDir, {
+			recursive: true,
+			mode: 448
+		});
+		try {
+			chmodSync(dir, 448);
+			chmodSync(geminiDir, 448);
+			chmodSync(tokenDir, 448);
+		} catch {}
+		const newAccount = {
+			id,
+			alias: !alias || /^备用.*账号/i.test(alias) || /^主账号/i.test(alias) ? id : alias,
+			dir,
+			enabled: true,
+			createdAt: Date.now(),
+			cooldowns: {},
+			quotas: {}
+		};
+		this.data.accounts.push(newAccount);
+		this.persist();
+		return newAccount;
+	}
+	deleteAccount(id) {
+		const idx = this.data.accounts.findIndex((a) => a.id === id);
+		if (idx === -1) return false;
+		const [removed] = this.data.accounts.splice(idx, 1);
+		if (removed) try {
+			if (existsSync(removed.dir)) rmSync(removed.dir, {
+				recursive: true,
+				force: true
+			});
+		} catch {}
+		if (this.data.primaryAccountId === id) this.data.primaryAccountId = this.data.accounts[0]?.id;
+		if (this.data.pinnedAccountId === id) this.data.pinnedAccountId = void 0;
+		for (const [fam, accId] of this.runtimeActiveAccountIds.entries()) if (accId === id) this.runtimeActiveAccountIds.delete(fam);
+		if (this.data.activeAccountIds) {
+			for (const [fam, accId] of Object.entries(this.data.activeAccountIds)) if (accId === id) delete this.data.activeAccountIds[fam];
+		}
+		this.persist();
+		return true;
+	}
+	setAccountProxy(id, proxyUrl) {
+		const acc = this.getAccount(id);
+		if (!acc) return false;
+		acc.proxyUrl = proxyUrl?.trim() ? proxyUrl.trim() : void 0;
+		this.persist();
+		return true;
+	}
+	setAccountAlias(id, alias) {
+		const acc = this.getAccount(id);
+		if (!acc) return false;
+		acc.alias = alias.trim() || acc.email || acc.id;
+		this.persist();
+		return true;
+	}
+	setAccountEnabled(id, enabled) {
+		const acc = this.getAccount(id);
+		if (!acc) return false;
+		acc.enabled = enabled;
+		if (!enabled) {
+			for (const [fam, accId] of this.runtimeActiveAccountIds.entries()) if (accId === id) this.runtimeActiveAccountIds.delete(fam);
+			if (this.data.activeAccountIds) {
+				for (const [fam, accId] of Object.entries(this.data.activeAccountIds)) if (accId === id) delete this.data.activeAccountIds[fam];
+			}
+			if (this.data.pinnedAccountId === id) this.data.pinnedAccountId = void 0;
+			delete acc.pinned;
+		}
+		this.persist();
+		return true;
+	}
+	markAuthRequired(id, reason) {
+		const acc = this.getAccount(id);
+		if (!acc) return;
+		acc.authRequired = true;
+		acc.authError = reason || "Authentication expired or revoked (invalid_grant)";
+		for (const [fam, accId] of this.runtimeActiveAccountIds.entries()) if (accId === id) this.runtimeActiveAccountIds.delete(fam);
+		if (this.data.activeAccountIds) {
+			for (const [fam, accId] of Object.entries(this.data.activeAccountIds)) if (accId === id) delete this.data.activeAccountIds[fam];
+		}
+		this.persist();
+	}
+	resetAccountIdentity(id, newEmail) {
+		const acc = this.getAccount(id);
+		if (!acc) return;
+		acc.email = newEmail;
+		if (!acc.alias || /^备用.*账号/i.test(acc.alias) || /^主账号/i.test(acc.alias) || acc.alias === acc.id) acc.alias = newEmail;
+		acc.cooldowns = {};
+		acc.quotas = {};
+		delete acc.authRequired;
+		delete acc.authError;
+		this.normalizeAccountAliases();
+		this.persist();
+	}
+	clearAuthRequired(id) {
+		const acc = this.getAccount(id);
+		if (!acc) return;
+		delete acc.authRequired;
+		delete acc.authError;
+		this.persist();
+	}
+	setPrimaryAccount(id) {
+		const idx = this.data.accounts.findIndex((a) => a.id === id);
+		if (idx === -1) return false;
+		this.data.primaryAccountId = id;
+		const [acc] = this.data.accounts.splice(idx, 1);
+		if (acc) this.data.accounts.unshift(acc);
+		this.data.activeAccountIds = {
+			google: id,
+			anthropic: id,
+			openai: id
+		};
+		this.runtimeActiveAccountIds.set("google", id);
+		this.runtimeActiveAccountIds.set("anthropic", id);
+		this.runtimeActiveAccountIds.set("openai", id);
+		this.persist();
+		return true;
+	}
+	pinAccount(id) {
+		if (!id) {
+			this.data.pinnedAccountId = void 0;
+			for (const acc of this.data.accounts) delete acc.pinned;
+			this.persist();
+			return true;
+		}
+		const acc = this.getAccount(id);
+		if (!acc || !acc.enabled) return false;
+		this.data.pinnedAccountId = id;
+		for (const a of this.data.accounts) if (a.id === id) a.pinned = true;
+		else delete a.pinned;
+		this.runtimeActiveAccountIds.set("google", id);
+		this.runtimeActiveAccountIds.set("anthropic", id);
+		this.runtimeActiveAccountIds.set("openai", id);
+		this.persist();
+		return true;
+	}
+	getPinnedAccount() {
+		if (this.data.pinnedAccountId) return this.getAccount(this.data.pinnedAccountId) ?? null;
+		return this.data.accounts.find((a) => a.pinned) ?? null;
+	}
+	reorderAccounts(ids) {
+		const map = new Map(this.data.accounts.map((a) => [a.id, a]));
+		const reordered = [];
+		for (const id of ids) {
+			const acc = map.get(id);
+			if (acc) {
+				reordered.push(acc);
+				map.delete(id);
+			}
+		}
+		for (const remaining of map.values()) reordered.push(remaining);
+		this.data.accounts = reordered;
+		this.persist();
+		return true;
+	}
+	setMode(mode) {
+		this.data.mode = mode;
+		this.persist();
+	}
+	updateAccountQuotas(id, quotas, email) {
+		const acc = this.getAccount(id);
+		if (!acc) return;
+		acc.quotas = {
+			...acc.quotas,
+			...quotas
+		};
+		if (email) {
+			acc.email = email;
+			if (!acc.alias || /^备用.*账号/i.test(acc.alias) || /^主账号/i.test(acc.alias) || acc.alias === acc.id) acc.alias = email;
+		}
+		this.normalizeAccountAliases();
+		this.persist();
+	}
+	recordFailure(id, family, reason, serverResetTime) {
+		const acc = this.getAccount(id);
+		if (!acc) return;
+		const failures = (acc.cooldowns[family]?.consecutiveFailures ?? 0) + 1;
+		let cooldownUntil;
+		const parsedDuration = parseResetDurationMs(serverResetTime || reason);
+		if (serverResetTime && !parsedDuration) {
+			const parsed = Date.parse(serverResetTime);
+			if (!Number.isNaN(parsed) && parsed > Date.now()) cooldownUntil = parsed + 1e4;
+			else cooldownUntil = Date.now() + Math.min(this.data.defaultCooldownMs * failures, this.data.maxCooldownMs);
+		} else if (parsedDuration && parsedDuration > 0) cooldownUntil = Date.now() + parsedDuration + 1e4;
+		else cooldownUntil = Date.now() + Math.min(this.data.defaultCooldownMs * failures, this.data.maxCooldownMs);
+		acc.cooldowns[family] = {
+			cooldownUntil,
+			reason,
+			consecutiveFailures: failures
+		};
+		this.persist();
+	}
+	/**
+	* Soft-fail an account for ONE model only (upstream 403 / "no such model for this user").
+	*
+	* This is deliberately NOT `markAuthRequired`: a 403 says "this credential may be fine, but not
+	* for this model". Quarantining the whole account turns a model mismatch into a pool-wide
+	* "sign in again" error, which is what made the pool report
+	* `No authenticated Antigravity account available` while every account was actually signed in.
+	* Repeated refusals for the same model escalate the quarantine within
+	* {@link MODEL_UNSUPPORTED_MAX_COOLDOWN_MS}.
+	*/
+	recordModelUnsupported(id, family, wireModel, reason) {
+		if (!this.getAccount(id)) return;
+		const key = modelQuarantineKey(id, family, wireModel);
+		const consecutiveFailures = (this.modelQuarantine.get(key)?.consecutiveFailures ?? 0) + 1;
+		const cooldownMs = Math.min(MODEL_UNSUPPORTED_COOLDOWN_MS * consecutiveFailures, MODEL_UNSUPPORTED_MAX_COOLDOWN_MS);
+		this.modelQuarantine.set(key, {
+			cooldownUntil: Date.now() + cooldownMs,
+			reason: reason || `Model '${wireModel}' refused by this account`,
+			consecutiveFailures
+		});
+	}
+	/** Current model quarantine for an account, or null when none applies (expired entries cleared). */
+	getModelQuarantine(id, family, wireModel) {
+		const key = modelQuarantineKey(id, family, wireModel);
+		const entry = this.modelQuarantine.get(key);
+		if (!entry) return null;
+		if (entry.cooldownUntil <= Date.now()) {
+			this.modelQuarantine.delete(key);
+			return null;
+		}
+		return entry;
+	}
+	/** Drop model quarantines (all accounts / one account / one family). Used by `/ccl` remediation. */
+	clearModelQuarantine(id, family) {
+		for (const key of [...this.modelQuarantine.keys()]) {
+			const [accId, accFamily] = key.split("|");
+			if (id && accId !== id) continue;
+			if (family && accFamily !== family) continue;
+			this.modelQuarantine.delete(key);
+		}
+	}
+	recordSuccess(id, family) {
+		const acc = this.getAccount(id);
+		if (!acc) return;
+		acc.lastUsedAt = Date.now();
+		if (acc.authRequired) {
+			delete acc.authRequired;
+			delete acc.authError;
+		}
+		if (acc.cooldowns[family]) delete acc.cooldowns[family];
+		this.persist();
+	}
+	clearCooldown(id, family) {
+		if (id) {
+			const acc = this.getAccount(id);
+			if (!acc) return;
+			if (family) delete acc.cooldowns[family];
+			else acc.cooldowns = {};
+		} else for (const acc of this.data.accounts) if (family) delete acc.cooldowns[family];
+		else acc.cooldowns = {};
+		this.persist();
+	}
+	isAccountHealthy(account, family, thresholdOrWireModel, maybeWireModel) {
+		const threshold = typeof thresholdOrWireModel === "number" ? thresholdOrWireModel : this.lowQuotaThreshold;
+		const wireModel = typeof thresholdOrWireModel === "string" ? thresholdOrWireModel : maybeWireModel;
+		if (!account.enabled || account.authRequired) return false;
+		const now = Date.now();
+		const cd = account.cooldowns[family];
+		if (cd && cd.cooldownUntil > now) return false;
+		const quota = account.quotas[family];
+		if (quota && typeof quota.remainingFraction === "number" && quota.remainingFraction <= threshold) {
+			if (quota.resetTime) {
+				const resetMs = Date.parse(quota.resetTime);
+				if (!Number.isNaN(resetMs) && resetMs > now) return false;
+			}
+		}
+		if (quota && typeof quota.weeklyFraction === "number" && quota.weeklyFraction <= .01) {
+			if (quota.weeklyResetTime) {
+				const resetMs = Date.parse(quota.weeklyResetTime);
+				if (!Number.isNaN(resetMs) && resetMs > now) return false;
+			}
+		}
+		if (wireModel?.trim()) {
+			if (!modelEntitlementOf(account, family, wireModel).supported) return false;
+			if (this.getModelQuarantine(account.id, family, wireModel)) return false;
+		}
+		return true;
+	}
+	/**
+	* Pick a schedulable account. When `wireModel` is given, entitlement filtering happens HERE so
+	* every strategy below (pin, round-robin, sticky drain) only ever sees accounts that can serve
+	* the requested model. Without `wireModel` the behaviour is unchanged.
+	*/
+	selectAccount(family, wireModel) {
+		const candidates = this.data.accounts.filter((acc) => this.isAccountHealthy(acc, family, wireModel));
+		if (candidates.length === 0) return null;
+		const pinned = this.getPinnedAccount();
+		if (pinned && candidates.some((c) => c.id === pinned.id)) {
+			this.runtimeActiveAccountIds.set(family, pinned.id);
+			return pinned;
+		}
+		if (this.data.mode === "round-robin" && candidates.length > 1) {
+			const activeId = this.runtimeActiveAccountIds.get(family) ?? this.data.activeAccountIds?.[family];
+			const lastIndex = activeId ? this.data.accounts.findIndex((a) => a.id === activeId) : -1;
+			const total = this.data.accounts.length;
+			const chosen = candidates.slice().sort((a, b) => {
+				const aFrac = a.quotas[family]?.remainingFraction ?? 1;
+				const bFrac = b.quotas[family]?.remainingFraction ?? 1;
+				if (Math.abs(bFrac - aFrac) >= .001) return bFrac - aFrac;
+				const aIndex = this.data.accounts.indexOf(a);
+				const bIndex = this.data.accounts.indexOf(b);
+				return (lastIndex !== -1 ? (aIndex - lastIndex - 1 + total) % total : aIndex) - (lastIndex !== -1 ? (bIndex - lastIndex - 1 + total) % total : bIndex);
+			})[0];
+			this.runtimeActiveAccountIds.set(family, chosen.id);
+			return chosen;
+		}
+		const activeId = this.runtimeActiveAccountIds.get(family) ?? this.data.activeAccountIds?.[family];
+		if (activeId) {
+			const activeCandidate = candidates.find((a) => a.id === activeId);
+			if (activeCandidate) {
+				this.runtimeActiveAccountIds.set(family, activeCandidate.id);
+				return activeCandidate;
+			}
+		}
+		let nextAccount = candidates[0];
+		if (activeId) {
+			const currentIndex = this.data.accounts.findIndex((a) => a.id === activeId);
+			if (currentIndex !== -1) {
+				const total = this.data.accounts.length;
+				for (let i = 1; i < total; i++) {
+					const checkAcc = this.data.accounts[(currentIndex + i) % total];
+					if (candidates.some((c) => c.id === checkAcc.id)) {
+						nextAccount = checkAcc;
+						break;
+					}
+				}
+			}
+		}
+		this.runtimeActiveAccountIds.set(family, nextAccount.id);
+		return nextAccount;
+	}
+	getEarliestResetCountdown(family) {
+		const now = Date.now();
+		let earliest = null;
+		for (const acc of this.data.accounts) {
+			if (!acc.enabled || acc.authRequired) continue;
+			let accReset = null;
+			const cd = acc.cooldowns[family];
+			if (cd && cd.cooldownUntil > now) accReset = Math.max(accReset ?? 0, cd.cooldownUntil);
+			const quota = acc.quotas[family];
+			if (quota && typeof quota.remainingFraction === "number" && quota.remainingFraction <= this.lowQuotaThreshold) {
+				if (quota.resetTime) {
+					const resetMs = Date.parse(quota.resetTime);
+					if (!Number.isNaN(resetMs) && resetMs > now) accReset = Math.max(accReset ?? 0, resetMs);
+				}
+			}
+			if (quota && typeof quota.weeklyFraction === "number" && quota.weeklyFraction <= .01) {
+				if (quota.weeklyResetTime) {
+					const resetMs = Date.parse(quota.weeklyResetTime);
+					if (!Number.isNaN(resetMs) && resetMs > now) accReset = Math.max(accReset ?? 0, resetMs);
+				}
+			}
+			if (accReset !== null) {
+				if (earliest === null || accReset < earliest) earliest = accReset;
+			}
+		}
+		return earliest !== null ? Math.max(0, earliest - now) : null;
+	}
+	/**
+	* Pool verdict for one family. With `wireModel` the verdict is model-aware: when every signed-in
+	* account publishes a model list that excludes the requested model, the reason is
+	* `model_not_available` — NOT `auth_required`, which would send the user to `/ccl auth` for a
+	* problem re-authenticating cannot fix.
+	*/
+	getFamilyStatus(family, wireModel) {
+		const accounts = this.data.accounts;
+		if (accounts.length === 0) return {
+			hasAccount: false,
+			suppressed: false,
+			reason: "no_accounts",
+			resetInMs: null
+		};
+		const enabledAccounts = accounts.filter((a) => a.enabled);
+		if (enabledAccounts.length === 0) return {
+			hasAccount: false,
+			suppressed: false,
+			reason: "disabled",
+			resetInMs: null
+		};
+		const authValidAccounts = enabledAccounts.filter((a) => !a.authRequired);
+		if (authValidAccounts.length === 0) return {
+			hasAccount: false,
+			suppressed: false,
+			reason: "auth_required",
+			resetInMs: null
+		};
+		if (this.selectAccount(family, wireModel)) return {
+			hasAccount: true,
+			suppressed: false,
+			resetInMs: null
+		};
+		if (wireModel?.trim()) {
+			if (authValidAccounts.every((a) => !modelEntitlementOf(a, family, wireModel).supported)) return {
+				hasAccount: true,
+				suppressed: true,
+				reason: "model_not_available",
+				resetInMs: null
+			};
+		}
+		const resetInMs = this.getEarliestResetCountdown(family);
+		return {
+			hasAccount: true,
+			suppressed: true,
+			reason: authValidAccounts.some((a) => a.cooldowns[family] && a.cooldowns[family].cooldownUntil > Date.now()) ? "rate_limited" : "quota_exhausted",
+			resetInMs
+		};
+	}
+	/** Check if a specific account natively has entitlement for wireModel. */
+	hasModelCapability(account, wireModel) {
+		return hasModelCapability(account, wireModel);
+	}
+	/** Check if any account in the pool (even if in cooldown) has entitlement for wireModel. */
+	isModelKnownInPool(wireModel) {
+		modelFamilyOf(wireModel);
+		return this.data.accounts.some((acc) => acc.enabled && this.hasModelCapability(acc, wireModel));
+	}
+	/**
+	* Dynamically find a healthy account in the pool that natively supports wireModel.
+	* Never hardcodes account IDs or emails; dynamically probes pool account quotas.
+	*/
+	findCapableAccount(family, wireModel) {
+		const candidates = this.data.accounts.filter((acc) => this.isAccountHealthy(acc, family) && this.hasModelCapability(acc, wireModel) && !this.getModelQuarantine(acc.id, family, wireModel));
+		if (candidates.length === 0) return null;
+		return candidates.slice().sort((a, b) => {
+			const aFrac = a.quotas[family]?.remainingFraction ?? 1;
+			return (b.quotas[family]?.remainingFraction ?? 1) - aFrac;
+		})[0] ?? null;
+	}
+	/**
+	* Resolve an account capable of serving wireModel, leveraging capability lending if necessary.
+	* If preferredAccountId is healthy but lacks native entitlement (e.g. regular account requesting
+	* high-tier Gemini 4), transparently borrows a privileged account's credentials while keeping
+	* session affinity. If no privileged account is available, falls back to gemini-4-hydrogen-sonar.
+	*/
+	getCapableAccount(wireModel, preferredAccountId) {
+		const family = modelFamilyOf(wireModel);
+		const preferred = preferredAccountId ? this.getAccount(preferredAccountId) ?? null : this.getPinnedAccount();
+		if (preferred && this.isAccountHealthy(preferred, family) && this.hasModelCapability(preferred, wireModel)) return {
+			account: preferred,
+			modelToUse: wireModel,
+			isFallback: false
+		};
+		if (preferred && this.isAccountHealthy(preferred, family)) {
+			const capable = this.findCapableAccount(family, wireModel);
+			if (capable && capable.id !== preferred.id) {
+				console.log("[G4-Lend] Borrowing account " + capable.id + " (" + capable.email + ") for " + preferred.id + " (" + preferred.email + ") to serve " + wireModel);
+				return {
+					account: preferred,
+					borrowedFrom: capable,
+					modelToUse: wireModel,
+					isFallback: false
+				};
+			}
+			if (this.isModelKnownInPool(wireModel) && isGemini4Model(wireModel) && wireModel !== "gemini-4-hydrogen-sonar") return {
+				account: preferred,
+				modelToUse: "gemini-4-hydrogen-sonar",
+				isFallback: true
+			};
+			return null;
+		}
+		const nativeAccount = this.selectAccount(family, wireModel);
+		if (nativeAccount) return {
+			account: nativeAccount,
+			modelToUse: wireModel,
+			isFallback: false
+		};
+		const candidate = this.selectAccount(family);
+		if (candidate) {
+			const capable = this.findCapableAccount(family, wireModel);
+			if (capable && capable.id !== candidate.id) {
+				console.log("[G4-Lend] Borrowing account " + capable.id + " (" + capable.email + ") for " + candidate.id + " (" + candidate.email + ") to serve " + wireModel);
+				return {
+					account: candidate,
+					borrowedFrom: capable,
+					modelToUse: wireModel,
+					isFallback: false
+				};
+			}
+			if (this.isModelKnownInPool(wireModel) && isGemini4Model(wireModel) && wireModel !== "gemini-4-hydrogen-sonar") return {
+				account: candidate,
+				modelToUse: "gemini-4-hydrogen-sonar",
+				isFallback: true
+			};
+			return null;
+		}
+		return null;
+	}
+	/**
+	* Broadcast model catalog union across all pool accounts.
+	* If any account has Gemini 4 capability (or G4 is enabled), Gemini 4 models are broadcast
+	* to all accounts in the pool.
+	*/
+	getBroadcastedCatalogModels(family) {
+		const allModels = /* @__PURE__ */ new Set();
+		for (const acc of this.data.accounts) {
+			if (!acc.enabled || acc.authRequired) continue;
+			const listing = acc.quotas[family]?.models;
+			if (Array.isArray(listing)) for (const m of listing) {
+				const modelId = typeof m === "string" ? m : m?.modelId;
+				if (typeof modelId === "string" && isServableModelId(modelId)) allModels.add(modelId.trim());
+			}
+		}
+		let hasG4 = Array.from(allModels).some(isGemini4Model);
+		if (!hasG4) for (const acc of this.data.accounts) {
+			if (!acc.enabled || acc.authRequired) continue;
+			if (this.hasModelCapability(acc, "gemini-4-hydrogen") || this.hasModelCapability(acc, "gemini-4-argon") || this.hasModelCapability(acc, "gemini-4-hydrogen-sonar")) {
+				hasG4 = true;
+				break;
+			}
+		}
+		if (hasG4) {
+			allModels.add("gemini-4-hydrogen");
+			allModels.add("gemini-4-hydrogen-sonar");
+			allModels.add("gemini-4-argon");
+		}
+		return Array.from(allModels);
+	}
+};
+//#endregion
+//#region src/common/types.ts
+const PROVIDER_ID = "antigravity";
+const GEMINI_APP_PROVIDER_ID = "gemini-app";
+const DEFAULT_ENDPOINT_CANDIDATES = [
+	"https://cloudcode-pa.googleapis.com",
+	"https://daily-cloudcode-pa.googleapis.com",
+	"https://daily-cloudcode-pa.sandbox.googleapis.com"
+];
+const DEFAULT_FALLBACK_MODELS = [
+	{
+		id: "gemini-3.8-flash",
+		name: "Gemini 3.8 Flash",
+		efforts: [
+			"low",
+			"medium",
+			"high"
+		],
+		inputModalities: ["text", "image"]
+	},
+	{
+		id: "gemini-3.7-flash",
+		name: "Gemini 3.7 Flash",
+		efforts: [
+			"low",
+			"medium",
+			"high"
+		],
+		inputModalities: ["text", "image"]
+	},
+	{
+		id: "gemini-3.6-flash",
+		name: "Gemini 3.6 Flash",
+		efforts: [
+			"low",
+			"medium",
+			"high"
+		],
+		inputModalities: ["text", "image"]
+	},
+	{
+		id: "gemini-3.5-flash",
+		name: "Gemini 3.5 Flash",
+		efforts: [
+			"low",
+			"medium",
+			"high"
+		],
+		inputModalities: ["text", "image"]
+	},
+	{
+		id: "gemini-3.1-pro",
+		name: "Gemini 3.1 Pro",
+		efforts: ["low", "high"],
+		inputModalities: ["text", "image"]
+	},
+	{
+		id: "gemini-3-flash",
+		name: "Gemini 3 Flash",
+		inputModalities: ["text", "image"]
+	},
+	{
+		id: "gemini-2.5-pro",
+		name: "Gemini 2.5 Pro",
+		inputModalities: ["text", "image"]
+	},
+	{
+		id: "gemini-2.5-flash",
+		name: "Gemini 2.5 Flash",
+		inputModalities: ["text", "image"]
+	},
+	{
+		id: "gemini-3.1-flash-lite",
+		name: "Gemini 3.1 Flash Lite",
+		inputModalities: ["text", "image"]
+	},
+	{
+		id: "claude-sonnet-4-6",
+		name: "Claude Sonnet 4.6 (Thinking)",
+		inputModalities: ["text", "image"]
+	},
+	{
+		id: "claude-opus-4-6-thinking",
+		name: "Claude Opus 4.6 (Thinking)",
+		inputModalities: ["text", "image"]
+	},
+	{
+		id: "gpt-oss-120b-medium",
+		name: "GPT-OSS 120B (Medium)",
+		inputModalities: ["text"]
+	}
+];
+function defaultConfig() {
+	return {
+		enabled: true,
+		defaultModel: "",
+		defaultEffort: "",
+		timeoutMs: 6e5,
+		maxConcurrent: 3,
+		contextWindowDefault: 1048576,
+		maxTokensDefault: 65536,
+		quotaPollIntervalMs: 9e5,
+		sessionStartQuotaRefreshMinIntervalMs: 1e4,
+		statsEnabled: true,
+		statsDbPath: join(defaultPoolDir(), "stats.db"),
+		statsBufferCapacity: 2048,
+		statsBatchSize: 100,
+		statsFlushIntervalMs: 2e3,
+		statsRetentionDays: 30,
+		statsRetentionCheckIntervalMs: 36e5,
+		lowQuotaThreshold: .05,
+		apiMaxPageSize: 100,
+		fallbackModels: DEFAULT_FALLBACK_MODELS,
+		askTool: false,
+		disableTelemetry: true,
+		autoFallbackModel: false,
+		baseUrl: "",
+		endpointCandidates: DEFAULT_ENDPOINT_CANDIDATES,
+		modelsCacheTtlMs: 3e5,
+		logRetentionDays: 7,
+		rateLimitPerMinute: 0,
+		heartbeatEnabled: true,
+		heartbeatIntervalMs: 18e4,
+		geminiAppEnabled: false,
+		geminiAppEndpoint: "robinfrontend-pa.googleapis.com",
+		geminiAppToken: void 0,
+		geminiAppTimeoutMs: 12e4,
+		geminiAppDefaultModel: "gemini-app-default",
+		agyBin: "",
+		permissionMode: "skip",
+		workspaceRoot: "",
+		mcpBridge: false,
+		mcpToolAllowlist: "",
+		mediaDir: "",
+		mediaTtlMs: 864e5,
+		mediaMaxBytes: 10485760,
+		mediaMaxImages: 8,
+		forwardSystemPrompt: false,
+		digestMaxChars: 8e3,
+		allowAuxiliary: true,
+		compactionMaxChars: 8e5,
+		extraArgs: []
+	};
+}
+function formatDuration(ms) {
+	if (ms <= 0) return "0s";
+	const totalSecs = Math.ceil(ms / 1e3);
+	const days = Math.floor(totalSecs / 86400);
+	const hours = Math.floor(totalSecs % 86400 / 3600);
+	const mins = Math.floor(totalSecs % 3600 / 60);
+	const secs = totalSecs % 60;
+	if (days > 0) return hours > 0 ? `${days}d ${hours}h` : `${days}d`;
+	if (hours > 0) return mins > 0 ? `${hours}h ${mins}m` : `${hours}h`;
+	if (mins > 0) return secs > 0 ? `${mins}m ${secs}s` : `${mins}m`;
+	return `${secs}s`;
+}
+//#endregion
+//#region src/common/config.ts
+function dshHome() {
+	return process.env.DSH_HOME ?? process.env.DSH_STATE_DIR ?? join(homedir(), ".dsh");
+}
+function stateDir() {
+	const newDir = join(dshHome(), "cloudcode-link");
+	const legacyDir = join(dshHome(), "agy-link");
+	if (!existsSync(newDir) && existsSync(legacyDir)) return legacyDir;
+	return newDir;
+}
+function overridesPath() {
+	return join(stateDir(), "runtime-overrides.json");
+}
+function readJson(file) {
+	try {
+		if (!existsSync(file)) return {};
+		const v = JSON.parse(readFileSync(file, "utf8"));
+		return v && typeof v === "object" ? v : {};
+	} catch {
+		return {};
+	}
+}
+function readOverrides(file = overridesPath()) {
+	return readJson(file);
+}
+function asString$1(v) {
+	return typeof v === "string" ? v : void 0;
+}
+function asBool(v) {
+	if (typeof v === "boolean") return v;
+	if (typeof v === "string") return v === "true" || v === "1";
+}
+function asNum(v) {
+	if (typeof v === "number" && Number.isFinite(v)) return v;
+	if (typeof v === "string" && v.trim() !== "" && Number.isFinite(Number(v))) return Number(v);
+}
+const MODES = [
+	"skip",
+	"plan",
+	"accept-edits"
+];
+function asMode(v) {
+	return typeof v === "string" && MODES.includes(v) ? v : void 0;
+}
+/** Layered config read; cheap enough to call per request (thunk pattern). */
+function resolveConfig(entry, env = process.env, overrides = readOverrides()) {
+	const base = defaultConfig();
+	const layers = [entry ?? {}, overrides];
+	const get = (k) => {
+		for (const l of layers) if (l[k] !== void 0 && l[k] !== null && l[k] !== "") return l[k];
+	};
+	const cfg = {
+		...base,
+		enabled: asBool(get("enabled")) ?? base.enabled,
+		defaultModel: asString$1(get("defaultModel")) ?? base.defaultModel,
+		defaultEffort: asString$1(get("defaultEffort")) ?? base.defaultEffort,
+		timeoutMs: asNum(get("timeoutMs")) ?? base.timeoutMs,
+		maxConcurrent: asNum(get("maxConcurrent")) ?? base.maxConcurrent,
+		contextWindowDefault: asNum(get("contextWindowDefault")) ?? base.contextWindowDefault,
+		maxTokensDefault: asNum(get("maxTokensDefault")) ?? base.maxTokensDefault,
+		quotaPollIntervalMs: asNum(get("quotaPollIntervalMs")) ?? base.quotaPollIntervalMs,
+		sessionStartQuotaRefreshMinIntervalMs: asNum(get("sessionStartQuotaRefreshMinIntervalMs")) ?? base.sessionStartQuotaRefreshMinIntervalMs,
+		statsEnabled: asBool(get("statsEnabled")) ?? base.statsEnabled,
+		statsDbPath: asString$1(get("statsDbPath")) ?? base.statsDbPath,
+		statsBufferCapacity: asNum(get("statsBufferCapacity")) ?? base.statsBufferCapacity,
+		statsBatchSize: asNum(get("statsBatchSize")) ?? base.statsBatchSize,
+		statsFlushIntervalMs: asNum(get("statsFlushIntervalMs")) ?? base.statsFlushIntervalMs,
+		statsRetentionDays: asNum(get("statsRetentionDays")) ?? base.statsRetentionDays,
+		statsRetentionCheckIntervalMs: asNum(get("statsRetentionCheckIntervalMs")) ?? base.statsRetentionCheckIntervalMs,
+		lowQuotaThreshold: asNum(get("lowQuotaThreshold")) ?? base.lowQuotaThreshold,
+		apiMaxPageSize: asNum(get("apiMaxPageSize")) ?? base.apiMaxPageSize,
+		modelsCacheTtlMs: asNum(get("modelsCacheTtlMs")) ?? base.modelsCacheTtlMs,
+		baseUrl: asString$1(get("baseUrl")) ?? base.baseUrl,
+		endpointCandidates: Array.isArray(get("endpointCandidates")) ? get("endpointCandidates").filter((x) => typeof x === "string") : base.endpointCandidates,
+		fallbackModels: Array.isArray(get("fallbackModels")) ? get("fallbackModels").filter((x) => !!x && typeof x === "object" && typeof x.id === "string") : base.fallbackModels,
+		askTool: asBool(get("askTool")) ?? base.askTool,
+		rateLimitPerMinute: asNum(get("rateLimitPerMinute")) ?? base.rateLimitPerMinute,
+		autoFallbackModel: asBool(get("autoFallbackModel")) ?? base.autoFallbackModel,
+		logRetentionDays: asNum(get("logRetentionDays")) ?? base.logRetentionDays,
+		disableTelemetry: asBool(get("disableTelemetry")) ?? base.disableTelemetry,
+		heartbeatEnabled: asBool(get("heartbeatEnabled")) ?? base.heartbeatEnabled,
+		heartbeatIntervalMs: (() => {
+			const n = asNum(get("heartbeatIntervalMs"));
+			return n !== void 0 ? Math.max(3e4, n) : base.heartbeatIntervalMs;
+		})(),
+		geminiAppEnabled: asBool(get("geminiAppEnabled")) ?? base.geminiAppEnabled,
+		geminiAppEndpoint: asString$1(get("geminiAppEndpoint")) ?? base.geminiAppEndpoint,
+		geminiAppToken: asString$1(get("geminiAppToken")) ?? base.geminiAppToken,
+		geminiAppTimeoutMs: asNum(get("geminiAppTimeoutMs")) ?? base.geminiAppTimeoutMs,
+		geminiAppDefaultModel: asString$1(get("geminiAppDefaultModel")) ?? base.geminiAppDefaultModel,
+		agyBin: asString$1(get("agyBin")) ?? base.agyBin,
+		permissionMode: asMode(get("permissionMode")) ?? base.permissionMode,
+		workspaceRoot: asString$1(get("workspaceRoot")) ?? base.workspaceRoot,
+		mcpBridge: asBool(get("mcpBridge")) ?? base.mcpBridge,
+		mcpToolAllowlist: asString$1(get("mcpToolAllowlist")) ?? base.mcpToolAllowlist,
+		mediaDir: asString$1(get("mediaDir")) ?? base.mediaDir,
+		mediaTtlMs: asNum(get("mediaTtlMs")) ?? base.mediaTtlMs,
+		mediaMaxBytes: asNum(get("mediaMaxBytes")) ?? base.mediaMaxBytes,
+		mediaMaxImages: asNum(get("mediaMaxImages")) ?? base.mediaMaxImages,
+		forwardSystemPrompt: asBool(get("forwardSystemPrompt")) ?? base.forwardSystemPrompt,
+		digestMaxChars: asNum(get("digestMaxChars")) ?? base.digestMaxChars,
+		allowAuxiliary: asBool(get("allowAuxiliary")) ?? base.allowAuxiliary,
+		compactionMaxChars: asNum(get("compactionMaxChars")) ?? base.compactionMaxChars,
+		extraArgs: Array.isArray(get("extraArgs")) ? get("extraArgs").filter((x) => typeof x === "string") : base.extraArgs
+	};
+	const envEnabled = env.DSH_CLOUDCODE_ENABLED ?? env.DSH_AGY_ENABLED;
+	if (envEnabled !== void 0) cfg.enabled = asBool(envEnabled) ?? cfg.enabled;
+	if (env.ANTIGRAVITY_BASE_URL) cfg.baseUrl = env.ANTIGRAVITY_BASE_URL;
+	const envDefaultModel = env.DSH_CLOUDCODE_DEFAULT_MODEL ?? env.DSH_AGY_DEFAULT_MODEL;
+	if (envDefaultModel) cfg.defaultModel = envDefaultModel;
+	const envDefaultEffort = env.DSH_CLOUDCODE_DEFAULT_EFFORT ?? env.DSH_AGY_DEFAULT_EFFORT;
+	if (envDefaultEffort) cfg.defaultEffort = envDefaultEffort;
+	const envTimeoutMs = env.DSH_CLOUDCODE_TIMEOUT_MS ?? env.DSH_AGY_TIMEOUT_MS;
+	if (envTimeoutMs !== void 0) {
+		const n = asNum(envTimeoutMs);
+		if (n !== void 0) cfg.timeoutMs = n;
+	}
+	const envMaxConcurrent = env.DSH_CLOUDCODE_MAX_CONCURRENT ?? env.DSH_AGY_MAX_CONCURRENT;
+	if (envMaxConcurrent !== void 0) {
+		const n = asNum(envMaxConcurrent);
+		if (n !== void 0) cfg.maxConcurrent = n;
+	}
+	const envQuotaPoll = env.DSH_CLOUDCODE_QUOTA_POLL_INTERVAL_MS ?? env.DSH_AGY_QUOTA_POLL_INTERVAL_MS;
+	if (envQuotaPoll !== void 0) {
+		const n = asNum(envQuotaPoll);
+		if (n !== void 0) cfg.quotaPollIntervalMs = Math.max(6e4, n);
+	}
+	const envHeartbeatEnabled = env.DSH_CLOUDCODE_HEARTBEAT_ENABLED ?? env.DSH_AGY_HEARTBEAT_ENABLED;
+	if (envHeartbeatEnabled !== void 0) cfg.heartbeatEnabled = asBool(envHeartbeatEnabled) ?? cfg.heartbeatEnabled;
+	const envHeartbeatInterval = env.DSH_CLOUDCODE_HEARTBEAT_INTERVAL_MS ?? env.DSH_AGY_HEARTBEAT_INTERVAL_MS;
+	if (envHeartbeatInterval !== void 0) {
+		const n = asNum(envHeartbeatInterval);
+		if (n !== void 0) cfg.heartbeatIntervalMs = Math.max(3e4, n);
+	}
+	const envStatsDbPath = env.DSH_CLOUDCODE_DB_PATH ?? env.DSH_AGY_DB_PATH;
+	if (envStatsDbPath) cfg.statsDbPath = envStatsDbPath;
+	const envStatsEnabled = env.DSH_CLOUDCODE_STATS_ENABLED ?? env.DSH_AGY_STATS_ENABLED;
+	if (envStatsEnabled !== void 0) {
+		const b = asBool(envStatsEnabled);
+		if (b !== void 0) cfg.statsEnabled = b;
+	}
+	const envStatsBufferCapacity = env.DSH_CLOUDCODE_STATS_BUFFER_CAPACITY;
+	if (envStatsBufferCapacity !== void 0) {
+		const n = asNum(envStatsBufferCapacity);
+		if (n !== void 0) cfg.statsBufferCapacity = Math.max(1, n);
+	}
+	const envStatsBatchSize = env.DSH_CLOUDCODE_STATS_BATCH_SIZE;
+	if (envStatsBatchSize !== void 0) {
+		const n = asNum(envStatsBatchSize);
+		if (n !== void 0) cfg.statsBatchSize = Math.max(1, n);
+	}
+	const envStatsFlushIntervalMs = env.DSH_CLOUDCODE_STATS_FLUSH_INTERVAL_MS;
+	if (envStatsFlushIntervalMs !== void 0) {
+		const n = asNum(envStatsFlushIntervalMs);
+		if (n !== void 0) cfg.statsFlushIntervalMs = Math.max(10, n);
+	}
+	const envStatsRetentionDays = env.DSH_CLOUDCODE_STATS_RETENTION_DAYS;
+	if (envStatsRetentionDays !== void 0) {
+		const n = asNum(envStatsRetentionDays);
+		if (n !== void 0) cfg.statsRetentionDays = Math.max(1, n);
+	}
+	const envStatsRetentionCheckMs = env.DSH_CLOUDCODE_STATS_RETENTION_CHECK_INTERVAL_MS;
+	if (envStatsRetentionCheckMs !== void 0) {
+		const n = asNum(envStatsRetentionCheckMs);
+		if (n !== void 0) cfg.statsRetentionCheckIntervalMs = Math.max(1e3, n);
+	}
+	const envLowQuotaThreshold = env.DSH_CLOUDCODE_LOW_QUOTA_THRESHOLD;
+	if (envLowQuotaThreshold !== void 0) {
+		const n = asNum(envLowQuotaThreshold);
+		if (n !== void 0) cfg.lowQuotaThreshold = Math.max(0, Math.min(1, n));
+	}
+	const envSessionRefreshMin = env.DSH_CLOUDCODE_SESSION_START_QUOTA_REFRESH_MIN_INTERVAL_MS;
+	if (envSessionRefreshMin !== void 0) {
+		const n = asNum(envSessionRefreshMin);
+		if (n !== void 0) cfg.sessionStartQuotaRefreshMinIntervalMs = Math.max(1e3, n);
+	}
+	const envApiMaxPageSize = env.DSH_CLOUDCODE_API_MAX_PAGE_SIZE;
+	if (envApiMaxPageSize !== void 0) {
+		const n = asNum(envApiMaxPageSize);
+		if (n !== void 0) cfg.apiMaxPageSize = Math.max(1, n);
+	}
+	const envGeminiAppEnabled = env.DSH_GEMINI_APP_ENABLED ?? env.GEMINI_APP_ENABLED;
+	if (envGeminiAppEnabled !== void 0) {
+		const b = asBool(envGeminiAppEnabled);
+		if (b !== void 0) cfg.geminiAppEnabled = b;
+	}
+	const envGeminiAppEndpoint = env.DSH_GEMINI_APP_ENDPOINT ?? env.GEMINI_APP_ENDPOINT;
+	if (envGeminiAppEndpoint) cfg.geminiAppEndpoint = envGeminiAppEndpoint;
+	const envGeminiAppToken = env.DSH_GEMINI_APP_TOKEN ?? env.GEMINI_APP_TOKEN;
+	if (envGeminiAppToken) {
+		cfg.geminiAppToken = envGeminiAppToken;
+		if (envGeminiAppEnabled === void 0) cfg.geminiAppEnabled = true;
+	}
+	const envGeminiAppTimeout = env.DSH_GEMINI_APP_TIMEOUT_MS ?? env.GEMINI_APP_TIMEOUT_MS;
+	if (envGeminiAppTimeout !== void 0) {
+		const n = asNum(envGeminiAppTimeout);
+		if (n !== void 0) cfg.geminiAppTimeoutMs = Math.max(1e3, n);
+	}
+	const envGeminiAppDefaultModel = env.DSH_GEMINI_APP_DEFAULT_MODEL ?? env.GEMINI_APP_DEFAULT_MODEL;
+	if (envGeminiAppDefaultModel) cfg.geminiAppDefaultModel = envGeminiAppDefaultModel;
+	return cfg;
 }
 //#endregion
 //#region packages/core/node_modules/.pnpm/undici@8.10.2/node_modules/undici/lib/core/symbols.js
@@ -27716,9 +27847,12 @@ function require$$basename(p) {
 	const i = Math.max(p.lastIndexOf("/"), p.lastIndexOf("\\"));
 	return i >= 0 ? p.slice(i + 1) : p;
 }
+//#endregion
+//#region packages/core/src/client.ts
+const DEFAULT_ENDPOINT = "https://cloudcode-pa.googleapis.com";
 const ENDPOINT_FALLBACKS = [
 	"https://daily-cloudcode-pa.googleapis.com",
-	"https://cloudcode-pa.googleapis.com",
+	DEFAULT_ENDPOINT,
 	"https://daily-cloudcode-pa.sandbox.googleapis.com"
 ];
 /** LoadCodeAssistRequest.mode — 0 MODE_UNSPECIFIED / 1 FULL_ELIGIBILITY_CHECK / 2 HEALTH_CHECK. */
@@ -27804,6 +27938,21 @@ const DISCOVERY_TIMEOUT_MS = 1e4;
 function endpointCandidates(customBaseUrl) {
 	const explicit = customBaseUrl?.trim() || process.env.ANTIGRAVITY_BASE_URL?.trim();
 	if (explicit) return [explicit.replace(/\/+$/, "")];
+	return [...ENDPOINT_FALLBACKS];
+}
+/**
+* Return endpoint candidates prioritized for the requested model.
+* Gemini 4 generation models (argon, hydrogen, etc.) are strictly routed daily-first
+* because production endpoints return HTTP 429 for Gemini 4 requests.
+*/
+function getEndpointCandidatesForModel(model, customBaseUrl) {
+	const explicit = customBaseUrl?.trim() || process.env.ANTIGRAVITY_BASE_URL?.trim();
+	if (explicit) return [explicit.replace(/\/+$/, "")];
+	if (isDailyEndpointModel(model)) return [
+		"https://daily-cloudcode-pa.googleapis.com",
+		"https://daily-cloudcode-pa.sandbox.googleapis.com",
+		DEFAULT_ENDPOINT
+	];
 	return [...ENDPOINT_FALLBACKS];
 }
 const LOG_PREFIX = "[agy-client]";
@@ -28369,7 +28518,7 @@ function antigravityRequestEnvelope(wireModelId, isClaude, options) {
 * Execute streamGenerateContent against Google CloudCode PA endpoint with fallback.
 */
 async function streamGenerateContent(token, request, signal, proxyUrl, customEndpoints) {
-	const endpoints = customEndpoints && customEndpoints.length ? customEndpoints : endpointCandidates();
+	const endpoints = customEndpoints && customEndpoints.length ? customEndpoints : getEndpointCandidatesForModel(request.model);
 	const isClaude = request.model.startsWith("claude-");
 	const headers = {
 		...antigravityHeaders(token),
@@ -29822,18 +29971,32 @@ var AgyAdapter = class extends LlmAdapter {
 					break;
 				}
 				let account = null;
+				let borrowedAccount = void 0;
+				let effectiveWireModel = wireModel;
 				if (this.deps.pool) {
-					const pinned = this.deps.pool.getPinnedAccount();
-					if (pinned && !triedAccountIds.has(pinned.id) && this.deps.pool.isAccountHealthy(pinned, family, wireModel)) account = pinned;
-					if (!account && boundAccountId && !triedAccountIds.has(boundAccountId)) {
-						const boundAcc = this.deps.pool.getAccount(boundAccountId);
-						if (boundAcc && this.deps.pool.isAccountHealthy(boundAcc, family, wireModel)) account = boundAcc;
+					if (isGemini4Model(wireModel)) {
+						const pinned = this.deps.pool.getPinnedAccount();
+						const preferredId = pinned && !triedAccountIds.has(pinned.id) ? pinned.id : boundAccountId && !triedAccountIds.has(boundAccountId) ? boundAccountId : void 0;
+						const capable = this.deps.pool.getCapableAccount(wireModel, preferredId);
+						if (capable && !triedAccountIds.has(capable.account.id)) {
+							account = capable.account;
+							borrowedAccount = capable.borrowedFrom;
+							effectiveWireModel = capable.modelToUse;
+						}
 					}
 					if (!account) {
-						await this.refreshQuotasForSelection(family);
-						account = this.deps.pool.selectAccount(family, wireModel);
+						const pinned = this.deps.pool.getPinnedAccount();
+						if (pinned && !triedAccountIds.has(pinned.id) && this.deps.pool.isAccountHealthy(pinned, family, wireModel)) account = pinned;
+						if (!account && boundAccountId && !triedAccountIds.has(boundAccountId)) {
+							const boundAcc = this.deps.pool.getAccount(boundAccountId);
+							if (boundAcc && this.deps.pool.isAccountHealthy(boundAcc, family, wireModel)) account = boundAcc;
+						}
+						if (!account) {
+							await this.refreshQuotasForSelection(family);
+							account = this.deps.pool.selectAccount(family, wireModel);
+						}
+						if (account && triedAccountIds.has(account.id)) account = this.deps.pool.getAccounts().find((a) => !triedAccountIds.has(a.id) && this.deps.pool.isAccountHealthy(a, family, wireModel)) ?? null;
 					}
-					if (account && triedAccountIds.has(account.id)) account = this.deps.pool.getAccounts().find((a) => !triedAccountIds.has(a.id) && this.deps.pool.isAccountHealthy(a, family, wireModel)) ?? null;
 				}
 				if (rawSessionId && this.deps.sessionStore && account) this.deps.sessionStore.bindAccount(rawSessionId, account.id);
 				if (!account && this.deps.pool && !process.env.ANTIGRAVITY_TOKEN?.trim()) {
@@ -29852,12 +30015,29 @@ var AgyAdapter = class extends LlmAdapter {
 					return;
 				}
 				const accountId = account ? account.id : "acc_default";
+				const authTargetAccount = borrowedAccount ?? account;
+				const authTargetId = authTargetAccount ? authTargetAccount.id : accountId;
 				triedAccountIds.add(accountId);
 				lastAttemptAccountId = accountId;
 				let releaseAccount = null;
 				if (this.deps.pool && account) {
 					const cfg = this.deps.getConfig();
-					releaseAccount = await this.deps.pool.acquireAccount(account.id, cfg.maxConcurrent);
+					const releaseBorrower = await this.deps.pool.acquireAccount(account.id, cfg.maxConcurrent);
+					let releaseBorrowed = null;
+					if (borrowedAccount && borrowedAccount.id !== account.id) try {
+						releaseBorrowed = await this.deps.pool.acquireAccount(borrowedAccount.id, cfg.maxConcurrent);
+					} catch (err) {
+						releaseBorrower();
+						throw err;
+					}
+					releaseAccount = () => {
+						try {
+							releaseBorrower();
+						} catch {}
+						try {
+							releaseBorrowed?.();
+						} catch {}
+					};
 				}
 				const requestStartTime = Date.now();
 				let firstChunkTime = null;
@@ -29905,19 +30085,19 @@ var AgyAdapter = class extends LlmAdapter {
 					envelope = env;
 					let token = null;
 					if (process.env.ANTIGRAVITY_TOKEN?.trim()) token = process.env.ANTIGRAVITY_TOKEN.trim();
-					else if (this.deps.quota && account) token = await this.deps.quota.getValidAccessToken(account);
-					else if (this.deps.pool) token = this.deps.pool.getMemoryToken(accountId);
+					else if (this.deps.quota && authTargetAccount) token = await this.deps.quota.getValidAccessToken(authTargetAccount);
+					else if (this.deps.pool) token = this.deps.pool.getMemoryToken(authTargetId);
 					if (!token) {
-						if (this.deps.pool && account) this.deps.pool.markAuthRequired(account.id, "No valid access token or refresh failed");
+						if (this.deps.pool && authTargetAccount) this.deps.pool.markAuthRequired(authTargetAccount.id, "No valid access token or refresh failed");
 						failures.push({
 							cause: "auth",
-							accountId,
+							accountId: authTargetId,
 							httpStatus: null,
 							upstreamError: "no usable access token (refresh failed or credential revoked)"
 						});
 						recordTelemetry("error");
 						if (!hasEmitted && attempt < maxAttempts && Date.now() < ceilingAt) {
-							this.deps.log?.(`No access token for ${accountId}, switching accounts...`);
+							this.deps.log?.(`No access token for ${authTargetId}, switching accounts...`);
 							continue;
 						}
 						yield {
@@ -29939,10 +30119,11 @@ var AgyAdapter = class extends LlmAdapter {
 						};
 						return;
 					}
-					const proxyUrl = account?.proxyUrl;
+					const targetAccount = borrowedAccount ?? account;
+					const proxyUrl = targetAccount?.proxyUrl;
 					const customEndpoints = this.deps.endpointCandidates;
 					const requestBody = {
-						project: await ensureProject(token, account?.alias || account?.id || "antigravity-default", proxyUrl, customEndpoints),
+						project: await ensureProject(token, targetAccount?.alias || targetAccount?.id || "antigravity-default", proxyUrl, customEndpoints),
 						requestId: env.requestId,
 						request: {
 							contents,
@@ -29957,7 +30138,7 @@ var AgyAdapter = class extends LlmAdapter {
 							sessionId: env.sessionId,
 							labels: env.labels
 						},
-						model: wireModel,
+						model: effectiveWireModel,
 						userAgent: env.userAgent,
 						requestType: env.requestType
 					};
@@ -30040,57 +30221,60 @@ var AgyAdapter = class extends LlmAdapter {
 						const canFailover = !hasEmitted && attempt < maxAttempts && Date.now() < ceilingAt;
 						if (res.status === 429) {
 							const resetHeader = res.headers.get("retry-after") || void 0;
-							if (this.deps.pool && account) this.deps.pool.recordFailure(account.id, family, errText || "Rate limit 429", resetHeader);
+							if (this.deps.pool && authTargetAccount) this.deps.pool.recordFailure(authTargetAccount.id, family, errText || "Rate limit 429", resetHeader);
 							failures.push({
 								cause: "rate_limit",
-								accountId,
+								accountId: authTargetId,
 								httpStatus: 429,
 								upstreamError: errText || "429 Too Many Requests"
 							});
 							if (canFailover) {
 								recordTelemetry("error");
-								this.deps.log?.(`Rate limited (429) on ${accountId}, switching accounts...`);
+								this.deps.log?.(`Rate limited (429) on ${authTargetId}, switching accounts...`);
 								continue;
 							}
 						} else if (res.status === 401) {
-							if (this.deps.pool && account) this.deps.pool.markAuthRequired(account.id, `Auth failed (401): ${errText}`);
+							if (this.deps.pool && authTargetAccount) this.deps.pool.markAuthRequired(authTargetAccount.id, `Auth failed (401): ${errText}`);
 							const failure = {
 								cause: "auth",
-								accountId,
+								accountId: authTargetId,
 								httpStatus: 401,
 								upstreamError: errText || "401 Unauthorized"
 							};
-							const guidance = this.reauthGuidanceForAttempt(account, failure);
+							const guidance = this.reauthGuidanceForAttempt(authTargetAccount, failure);
 							failures.push(guidance ? {
 								...failure,
 								guidance
 							} : failure);
 							if (canFailover) {
 								recordTelemetry("error");
-								this.deps.log?.(`Auth failed (401) on ${accountId}, switching accounts...${guidance ? ` ${guidance}` : ""}`);
+								this.deps.log?.(`Auth failed (401) on ${authTargetId}, switching accounts...${guidance ? ` ${guidance}` : ""}`);
 								continue;
 							}
 						} else if (res.status === 403) {
-							if (this.deps.pool && account) this.deps.pool.recordModelUnsupported(account.id, family, wireModel, `HTTP 403: ${errText || "forbidden"}`);
+							if (this.deps.pool) {
+								const quarantineTarget = borrowedAccount ?? account;
+								if (quarantineTarget) this.deps.pool.recordModelUnsupported(quarantineTarget.id, family, effectiveWireModel, `HTTP 403: ${errText || "forbidden"}`);
+							}
 							const failure = {
 								cause: "model_unsupported",
-								accountId,
+								accountId: authTargetId,
 								httpStatus: 403,
 								upstreamError: errText || "403 Forbidden"
 							};
-							const guidance = this.reauthGuidanceForAttempt(account, failure);
+							const guidance = this.reauthGuidanceForAttempt(authTargetAccount, failure);
 							failures.push(guidance ? {
 								...failure,
 								guidance
 							} : failure);
 							if (canFailover) {
 								recordTelemetry("error");
-								this.deps.log?.(`Account ${accountId} cannot serve '${wireModel}' (403), switching accounts...${guidance ? ` ${guidance}` : ""}`);
+								this.deps.log?.(`Account ${authTargetId} cannot serve '${effectiveWireModel}' (403), switching accounts...${guidance ? ` ${guidance}` : ""}`);
 								continue;
 							}
 						} else failures.push({
 							cause: "api",
-							accountId,
+							accountId: authTargetId,
 							httpStatus: res.status,
 							upstreamError: errText || `HTTP ${res.status}`
 						});
@@ -31332,7 +31516,7 @@ function familyQuotaSummary(info) {
 * Normalize one account's recorded model entitlements. Read-only: `account` is never mutated,
 * every returned object is freshly built, and no clock or I/O is touched.
 */
-function describeAccountModels(account) {
+function describeAccountModels(account, poolBroadcastModels) {
 	const quotas = account.quotas ?? {};
 	const byFamily = /* @__PURE__ */ new Map();
 	const bucketFor = (family) => {
@@ -31343,6 +31527,15 @@ function describeAccountModels(account) {
 		}
 		return bucket;
 	};
+	if (poolBroadcastModels && poolBroadcastModels.length > 0) for (const id of poolBroadcastModels) {
+		const family = modelFamilyOf(id);
+		const bucket = bucketFor(family);
+		if (!bucket.has(id)) bucket.set(id, {
+			id,
+			name: prettifyModelSlug(id) || id,
+			family
+		});
+	}
 	for (const [rawKey, info] of Object.entries(quotas)) {
 		if (!info || typeof info !== "object") continue;
 		const declared = isModelFamily(rawKey) ? rawKey : "unknown";
@@ -31437,7 +31630,8 @@ async function handleAccountModels(req, deps) {
 			account = deps.getAccount(id) ?? account;
 		} else refreshError = "refresh_unavailable";
 	}
-	const catalog = describeAccountModels(account);
+	const broadcasted = deps.getBroadcastedModels ? deps.getBroadcastedModels("google") : void 0;
+	const catalog = describeAccountModels(account, broadcasted);
 	const alias = trimmedString(account.alias);
 	const email = trimmedString(account.email);
 	return {
