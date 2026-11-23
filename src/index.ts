@@ -12,7 +12,14 @@ import { PROVIDER_ID, GEMINI_APP_PROVIDER_ID, type PluginConfig } from './common
 import { AgyAdapter } from './host/adapter.ts'
 import { GeminiAppAdapter } from './host/gemini-app-adapter.ts'
 import { defineGeminiAppAskTool } from './host/gemini-app-ask-tool.ts'
-import { resolveGeminiAppToken, saveGeminiAppToken } from './host/gemini-app.ts'
+import {
+  GeminiAppPoolManager,
+  GMS_EMBEDDED_SETUP_URL,
+  exchangeMasterTokenForAccessToken,
+  exchangeOAuthTokenForMasterToken,
+  resolveGeminiAppToken,
+  saveGeminiAppToken,
+} from './host/gemini-app.ts'
 import { describePoolAuthHealth, reauthGuidanceResolver } from './host/account-health.ts'
 import { handleAccountModels } from './host/account-models.ts'
 import { defineAgyAskTool } from './host/ask-tool.ts'
@@ -228,9 +235,12 @@ export function apply(ctx: Context, entryConfig: Record<string, unknown> = {}): 
     return null
   }
 
+  const geminiAppPool = new GeminiAppPoolManager()
+
   const geminiAdapter = new GeminiAppAdapter({
     getConfig,
     log,
+    pool: geminiAppPool,
   })
 
   const adapter = new AgyAdapter({
@@ -334,7 +344,7 @@ export function apply(ctx: Context, entryConfig: Record<string, unknown> = {}): 
     const want = getConfig().geminiAppAskToolEnabled
     if (want && geminiAppAskToolDispose.current === null && toolsSvcRef.current) {
       const reg = toolsSvcRef.current.register(
-        defineGeminiAppAskTool({ cfg: getConfig, log }),
+        defineGeminiAppAskTool({ cfg: getConfig, log, pool: geminiAppPool }),
       ) as unknown as () => void
       geminiAppAskToolDispose.current = typeof reg === 'function' ? reg : null
     } else if (!want && geminiAppAskToolDispose.current !== null) {
@@ -412,6 +422,7 @@ export function apply(ctx: Context, entryConfig: Record<string, unknown> = {}): 
         const cfg = getConfig()
         const cat = catalog.get()
         const authStatus = await auth.resolvedStatus()
+        const geminiPoolSummary = geminiAppPool.getSummary()
         sendJson(res as RawRes, 200, {
           plugin: 'dsh-cloudcode-link',
           transport: 'direct',
@@ -426,7 +437,10 @@ export function apply(ctx: Context, entryConfig: Record<string, unknown> = {}): 
           geminiAppFreshSessionSingleTurn: cfg.geminiAppFreshSessionSingleTurn,
           geminiAppOffloadFallbackToAgy: cfg.geminiAppOffloadFallbackToAgy,
           geminiAppOffloadMaxContextChars: cfg.geminiAppOffloadMaxContextChars,
-          hasGeminiAppToken: (await resolveGeminiAppToken({ token: cfg.geminiAppToken })) !== null,
+          hasGeminiAppToken:
+            geminiPoolSummary.total > 0 ||
+            (await resolveGeminiAppToken({ token: cfg.geminiAppToken })) !== null,
+          geminiAppPool: geminiPoolSummary,
           auth: authStatus,
           poolAuth: poolAuth.status(),
           pool: pool.getPoolData(),
@@ -676,6 +690,93 @@ export function apply(ctx: Context, entryConfig: Record<string, unknown> = {}): 
             ? { ok: true, key, hasGeminiAppToken: (await resolveGeminiAppToken({ token: getConfig().geminiAppToken })) !== null }
             : { ok: true, key, value: body.value },
         )
+      })()
+    })
+
+    regBoth('gemini-app/login-url', (_req, res) => {
+      sendJson(res as RawRes, 200, { url: GMS_EMBEDDED_SETUP_URL })
+    })
+
+    regBoth('gemini-app/pool/login', (req, res) => {
+      void (async () => {
+        if (methodOf(req) !== 'POST') {
+          sendJson(res as RawRes, 405, { error: 'POST only' })
+          return
+        }
+        const body = await readBody(req)
+        const email = typeof body.email === 'string' ? body.email.trim() : ''
+        const oauthToken = typeof body.oauthToken === 'string' ? body.oauthToken.trim() : ''
+        const masterToken = typeof body.masterToken === 'string' ? body.masterToken.trim() : ''
+        const accessToken = typeof body.accessToken === 'string' ? body.accessToken.trim() : ''
+        const expiresAt =
+          typeof body.expiresAt === 'number' && Number.isFinite(body.expiresAt)
+            ? body.expiresAt
+            : undefined
+
+        if (!oauthToken && !masterToken && !accessToken) {
+          sendJson(res as RawRes, 400, {
+            ok: false,
+            error: 'oauthToken, masterToken, or accessToken is required',
+          })
+          return
+        }
+
+        try {
+          if (oauthToken) {
+            const masterRes = await exchangeOAuthTokenForMasterToken(oauthToken)
+            const resolvedEmail = masterRes.email || email || 'gemini-app-user'
+            const accessRes = await exchangeMasterTokenForAccessToken(
+              masterRes.masterToken,
+              resolvedEmail,
+            )
+            geminiAppPool.addAccount({
+              email: resolvedEmail,
+              masterToken: masterRes.masterToken,
+              accessToken: accessRes.accessToken,
+              expiresAt: accessRes.expiresAt,
+            })
+          } else if (masterToken) {
+            const resolvedEmail = email || 'gemini-app-user'
+            const accessRes = await exchangeMasterTokenForAccessToken(
+              masterToken,
+              resolvedEmail,
+            )
+            geminiAppPool.addAccount({
+              email: resolvedEmail,
+              masterToken,
+              accessToken: accessRes.accessToken,
+              expiresAt: accessRes.expiresAt,
+            })
+          } else {
+            geminiAppPool.addAccount({
+              email: email || 'gemini-app-user',
+              accessToken,
+              expiresAt,
+            })
+          }
+          sendJson(res as RawRes, 200, { ok: true, pool: geminiAppPool.getSummary() })
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err)
+          log(`[gemini-app/pool/login] failed: ${message}`)
+          sendJson(res as RawRes, 400, { ok: false, error: message })
+        }
+      })()
+    })
+
+    regBoth('gemini-app/pool/remove', (req, res) => {
+      void (async () => {
+        if (methodOf(req) !== 'POST') {
+          sendJson(res as RawRes, 405, { error: 'POST only' })
+          return
+        }
+        const body = await readBody(req)
+        const id = typeof body.id === 'string' ? body.id.trim() : ''
+        if (!id) {
+          sendJson(res as RawRes, 400, { ok: false, error: 'id is required' })
+          return
+        }
+        geminiAppPool.removeAccount(id)
+        sendJson(res as RawRes, 200, { ok: true, pool: geminiAppPool.getSummary() })
       })()
     })
 

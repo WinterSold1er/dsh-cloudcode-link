@@ -6,6 +6,7 @@ import type { PluginConfig } from '../common/types.ts'
 import {
   GeminiAppClient,
   GeminiAppError,
+  GeminiAppPoolManager,
   buildProcessQueryRequest,
   type GeminiAppConfig,
   type GeminiAppTransport,
@@ -15,6 +16,7 @@ import type { GenerateOptions as CoreGenerateOptions, Message } from '../../pack
 export interface GeminiAppAskToolDeps {
   cfg: () => PluginConfig
   transport?: GeminiAppTransport
+  pool?: GeminiAppPoolManager
   log?: (msg: string) => void
 }
 
@@ -78,7 +80,7 @@ export function defineGeminiAppAskTool(deps: GeminiAppAskToolDeps) {
         clientConfig,
       )
 
-      const client = new GeminiAppClient(clientConfig, deps.transport)
+      const client = new GeminiAppClient(clientConfig, deps.transport, deps.pool)
       const controller = new AbortController()
       let timeoutTimer: NodeJS.Timeout | undefined
       if (timeoutMs > 0) {

@@ -91,6 +91,18 @@ interface StatusPayload {
 	geminiAppOffloadFallbackToAgy?: boolean;
 	geminiAppOffloadMaxContextChars?: number;
 	hasGeminiAppToken?: boolean;
+	geminiAppPool?: {
+		total: number;
+		ready: number;
+		accounts: Array<{
+			id: string;
+			email: string;
+			status: string;
+			cooldownUntil?: number;
+			lastUsedAt?: number;
+			errorCount: number;
+		}>;
+	};
 	distSha256?: string | null;
 	auth?: {
 		phase: string;
@@ -415,6 +427,10 @@ export function apply(ctx: ClientContext): void {
 		const [auditError, setAuditError] = useState<string | null>(null);
 		const [cfgDrafts, setCfgDrafts] = useState<Record<string, string | undefined>>({});
 		const [geminiAppTokenInput, setGeminiAppTokenInput] = useState('');
+		const [addingGeminiAppAccount, setAddingGeminiAppAccount] = useState(false);
+		const [geminiAppEmailInput, setGeminiAppEmailInput] = useState('');
+		const [geminiAppCredInput, setGeminiAppCredInput] = useState('');
+		const [geminiAppBusy, setGeminiAppBusy] = useState(false);
 		const flowStartedRef = useRef(false);
 		// refs mirror the poll UI state so the 3s tick can fold transitions without reading
 		// stale closure state (and without re-rendering when nothing actually changed).
@@ -1580,6 +1596,7 @@ export function apply(ctx: ClientContext): void {
 					: null,
 				h('div', { style: { display: 'flex', gap: 'var(--agy-space-2)', flexWrap: 'wrap', marginBottom: 'var(--agy-space-3)' } },
 					renderStatCard('可调度账号', `${readyAccounts} / ${accounts.length}`, `主用：${status?.pool?.primaryAccountId ?? '自动'}`),
+					renderStatCard('Gemini App 账号', `${status?.geminiAppPool?.total ?? 0} 个`, `就绪：${status?.geminiAppPool?.ready ?? 0} 个`),
 					renderStatCard('授权状态', isAuthed ? '正常' : '待认证', `auth: ${status?.auth?.phase ?? '—'} · poolAuth: ${poolAuthPhase}`),
 					renderStatCard('默认模型', status?.defaultModel ?? '—', `Effort：${status?.defaultEffort ?? '—'}`),
 					renderStatCard('上游目录模型数', formatNumber(status?.catalog?.count ?? 0), `来源：${status?.catalog?.source ?? '—'}`),
@@ -1828,10 +1845,152 @@ export function apply(ctx: ClientContext): void {
 			}, s.label)),
 		);
 
+		const loginGeminiAppAccount = async (): Promise<void> => {
+			const cred = geminiAppCredInput.trim();
+			if (!cred) {
+				showToast('请粘贴 oauth_token、MasterToken 或 Access Token', 'error');
+				return;
+			}
+			setGeminiAppBusy(true);
+			try {
+				const payload: Record<string, string> = {};
+				const email = geminiAppEmailInput.trim();
+				if (email) payload.email = email;
+				if (cred.startsWith('aas_et/')) {
+					payload.masterToken = cred;
+				} else if (cred.startsWith('ya29.')) {
+					payload.accessToken = cred;
+				} else {
+					payload.oauthToken = cred;
+				}
+				const res = await fetchWithFallback(`${API_PREFIX}/gemini-app/pool/login`, {
+					method: 'POST',
+					headers: { 'content-type': 'application/json' },
+					body: JSON.stringify(payload),
+				});
+				const data = res ? ((await res.json()) as { ok?: boolean; error?: string }) : null;
+				if (!res || !res.ok || !data?.ok) {
+					showToast(data?.error || `登录失败 (${res?.status ?? 'network'})`, 'error');
+					return;
+				}
+				setGeminiAppEmailInput('');
+				setGeminiAppCredInput('');
+				setAddingGeminiAppAccount(false);
+				const next = await getStatus();
+				if (next) setStatus(next);
+				showToast('Gemini App 账号已添加', 'success');
+			} catch (err) {
+				showToast(`添加失败：${err instanceof Error ? err.message : String(err)}`, 'error');
+			} finally {
+				setGeminiAppBusy(false);
+			}
+		};
+
+		const removeGeminiAppAccount = async (id: string): Promise<void> => {
+			setGeminiAppBusy(true);
+			try {
+				const res = await fetchWithFallback(`${API_PREFIX}/gemini-app/pool/remove`, {
+					method: 'POST',
+					headers: { 'content-type': 'application/json' },
+					body: JSON.stringify({ id }),
+				});
+				if (!res || !res.ok) {
+					showToast(`删除失败 (${res?.status ?? 'network'})`, 'error');
+					return;
+				}
+				const next = await getStatus();
+				if (next) setStatus(next);
+				showToast('已移除 Gemini App 账号', 'success');
+			} catch (err) {
+				showToast(`删除失败：${err instanceof Error ? err.message : String(err)}`, 'error');
+			} finally {
+				setGeminiAppBusy(false);
+			}
+		};
+
+		const geminiPool = status?.geminiAppPool ?? { total: 0, ready: 0, accounts: [] };
+		const geminiAppAccountsCard = h('div', { style: { ...S.card, marginTop: 'var(--agy-space-3)' } },
+			h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 'var(--agy-space-2)', flexWrap: 'wrap' } },
+				h('div', { style: { display: 'flex', alignItems: 'center', gap: 'var(--agy-space-2)' } },
+					h('span', { style: S.panelTitle }, 'Gemini App 账号'),
+					h('span', { style: S.muted }, `已登录 ${geminiPool.total} 个账号`),
+				),
+				h('button', {
+					className: 'agy-btn',
+					style: S.btnSmPrimary,
+					disabled: geminiAppBusy,
+					onClick: () => setAddingGeminiAppAccount((v) => !v),
+				}, uiIcon('plus', 12), addingGeminiAppAccount ? ' 收起' : ' 添加 / 登录账号'),
+			),
+			addingGeminiAppAccount
+				? h('div', { style: { marginTop: 'var(--agy-space-3)', paddingTop: 'var(--agy-space-3)', borderTop: '1px solid var(--agy-border)', display: 'flex', flexDirection: 'column', gap: 'var(--agy-space-2)' } },
+					h('div', { style: { display: 'flex', alignItems: 'center', gap: 'var(--agy-space-2)', flexWrap: 'wrap' } },
+						h('button', {
+							className: 'agy-btn',
+							style: S.btnSm,
+							onClick: () => { win.open?.('https://accounts.google.com/EmbeddedSetup', '_blank'); },
+						}, '打开 Google EmbeddedSetup 登录页'),
+						h('span', { style: S.muted }, '登录后从 Cookie 提取 oauth_token，或直接粘贴 aas_et/ MasterToken / ya29.m.* Token'),
+					),
+					h('input', {
+						type: 'text',
+						placeholder: '邮箱（可选，换票时自动识别）',
+						value: geminiAppEmailInput,
+						onChange: (e: { target: { value: string } }) => setGeminiAppEmailInput(e.target.value),
+						style: S.input,
+					}),
+					h('input', {
+						type: 'password',
+						placeholder: '粘贴 oauth_token / aas_et/... / ya29.m.*',
+						value: geminiAppCredInput,
+						onChange: (e: { target: { value: string } }) => setGeminiAppCredInput(e.target.value),
+						style: S.input,
+					}),
+					h('div', { style: { display: 'flex', gap: 'var(--agy-space-2)' } },
+						h('button', {
+							className: 'agy-btn',
+							style: S.btnSmPrimary,
+							disabled: geminiAppBusy || !geminiAppCredInput.trim(),
+							onClick: () => { void loginGeminiAppAccount(); },
+						}, geminiAppBusy ? '处理中...' : '保存并入池'),
+						h('button', {
+							className: 'agy-btn',
+							style: S.btnSm,
+							disabled: geminiAppBusy,
+							onClick: () => setAddingGeminiAppAccount(false),
+						}, '取消'),
+					),
+				)
+				: null,
+			geminiPool.accounts.length > 0
+				? h('div', { style: { marginTop: 'var(--agy-space-2)', display: 'flex', flexDirection: 'column', gap: '6px' } },
+					...geminiPool.accounts.map((acc) => {
+						const badgeText = acc.status === 'ready' ? '就绪' : acc.status === 'cooldown' ? '冷却中' : '需重新登录';
+						const badgeStyle = acc.status === 'ready' ? S.badgeReady : acc.status === 'cooldown' ? S.badgeTag : S.badgeUnready;
+						return h('div', {
+							key: acc.id,
+							style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '6px 8px', borderRadius: '6px', background: 'var(--agy-surface-2, rgba(127,127,127,0.06))' },
+						},
+							h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px' } },
+								h('span', { style: { fontSize: '13px' } }, acc.email ? maskEmail(acc.email) : acc.id),
+								h('span', { style: badgeStyle }, badgeText),
+							),
+							h('button', {
+								className: 'agy-btn',
+								style: S.btnSm,
+								disabled: geminiAppBusy,
+								onClick: () => { void removeGeminiAppAccount(acc.id); },
+							}, '删除'),
+						);
+					}),
+				)
+				: null,
+		);
+
 		const sectionBody = (): unknown => {
 			switch (activeSection) {
 				case 'overview': return renderOverviewSection();
-				case 'accounts': return h('div', null, addAccountSection, ...renderedAccountCards);
+				case 'accounts': return h('div', null, addAccountSection, ...renderedAccountCards, geminiAppAccountsCard);
 				case 'models': return renderModelsSection();
 				case 'usage': return renderUsageSection();
 				case 'diagnostics': return renderDiagnosticsSection();

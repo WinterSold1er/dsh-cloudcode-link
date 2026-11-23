@@ -14,7 +14,7 @@ import { apply } from '../src/index.ts'
 
 describe('Gemini App: Configuration & Commands', () => {
   it('resolves defaults when no env or overrides are present', () => {
-    const cfg = resolveConfig(undefined, {})
+    const cfg = resolveConfig(undefined, {}, {})
     assert.strictEqual(cfg.geminiAppEnabled, false)
     assert.strictEqual(cfg.geminiAppEndpoint, 'robinfrontend-pa.googleapis.com')
     assert.strictEqual(cfg.geminiAppToken, undefined)

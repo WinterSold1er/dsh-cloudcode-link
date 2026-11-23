@@ -11,6 +11,7 @@ import {
 import { GEMINI_APP_PROVIDER_ID, type PluginConfig } from '../common/types.ts'
 import {
   GeminiAppClient,
+  GeminiAppPoolManager,
   buildProcessQueryRequest,
   type GeminiAppConfig,
   type GeminiAppTransport,
@@ -21,6 +22,7 @@ export interface GeminiAppAdapterDeps {
   getConfig: () => PluginConfig
   log?: (msg: string) => void
   transport?: GeminiAppTransport
+  pool?: GeminiAppPoolManager
 }
 
 export const GEMINI_APP_MODELS: readonly LlmModelInfo[] = [
@@ -50,6 +52,10 @@ export class GeminiAppAdapter extends LlmAdapter {
   constructor(deps: GeminiAppAdapterDeps) {
     super()
     this.deps = deps
+  }
+
+  getPool(): GeminiAppPoolManager | undefined {
+    return this.deps.pool
   }
 
   override providerInfo(provider: string): LlmProviderInfo {
@@ -111,7 +117,7 @@ export class GeminiAppAdapter extends LlmAdapter {
       defaultModel: cfg.geminiAppDefaultModel,
     }
 
-    const client = new GeminiAppClient(clientConfig, this.deps.transport)
+    const client = new GeminiAppClient(clientConfig, this.deps.transport, this.deps.pool)
     const request = buildProcessQueryRequest(options as unknown as CoreGenerateOptions, clientConfig)
 
     this.deps.log?.(`[gemini-app] Dispatching request for model ${options.model || 'default'}`)

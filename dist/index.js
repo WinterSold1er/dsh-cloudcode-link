@@ -1,9 +1,9 @@
 import { createRequire } from "node:module";
-import { dirname, isAbsolute, join, resolve } from "node:path";
-import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import path, { dirname, isAbsolute, join, resolve } from "node:path";
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
-import { homedir } from "node:os";
+import os, { homedir } from "node:os";
 import { LlmAdapter } from "@deepseek-ai/dsh-llm";
 import { createServer } from "node:http";
 import { gunzipSync } from "node:zlib";
@@ -29811,6 +29811,18 @@ const RobinBardMode = {
 	STANDARD: 1,
 	ADVANCED: 2
 };
+var GeminiAppError = class extends Error {
+	code;
+	httpStatus;
+	grpcStatus;
+	constructor(message, code, httpStatus, grpcStatus) {
+		super(message);
+		this.name = "GeminiAppError";
+		this.code = code;
+		this.httpStatus = httpStatus;
+		this.grpcStatus = grpcStatus;
+	}
+};
 var ProtobufWriter = class {
 	chunks = [];
 	totalLength = 0;
@@ -30464,6 +30476,313 @@ function formatGeminiAppAuthGuidance() {
 	return "Gemini App authentication token is missing or expired. Please configure a valid Google OAuth bearer token with the assistant scope via:\n  - Setting environment variable DSH_GEMINI_APP_TOKEN=\"ya29...\"\n  - Or saving the token to ~/.dsh/gemini-app/token\n  - Or running /ccl gemini-token <token> in DSH chat";
 }
 //#endregion
+//#region packages/core/src/gemini-app/gms-auth.ts
+const GMS_AUTH_URL = "https://android.clients.google.com/auth";
+const GMS_EMBEDDED_SETUP_URL = "https://accounts.google.com/EmbeddedSetup";
+const AGSA_PACKAGE_NAME = "com.google.android.googlequicksearchbox";
+const AGSA_CLIENT_SIG = "38918a453d07199354f8b19af05ec6562ced5788";
+const AGSA_ASSISTANT_SERVICE = "oauth2:https://www.googleapis.com/auth/assistant";
+const GMS_USER_AGENT = "GoogleAuth/1.4 (PJZ110 UP1A.231005.007)";
+function parseGmsKeyValueResponse(body) {
+	const result = {};
+	for (const rawLine of body.split(/\r?\n/)) {
+		const line = rawLine.trim();
+		if (!line) continue;
+		const eqIdx = line.indexOf("=");
+		if (eqIdx <= 0) continue;
+		const key = line.slice(0, eqIdx).trim();
+		const value = line.slice(eqIdx + 1).trim();
+		if (key) result[key] = value;
+	}
+	return result;
+}
+function classifyGmsErrorCode(gmsError, httpStatus) {
+	const normalized = (gmsError || "").toLowerCase();
+	if (normalized.includes("badauthentication") || normalized.includes("needsbrowser") || normalized.includes("invalidsecondfactor") || normalized.includes("tokenexpired") || normalized.includes("accountdeleted") || normalized.includes("accountdisabled") || normalized.includes("unknown") || httpStatus === 401 || httpStatus === 403) return "AUTH_REQUIRED";
+	if (httpStatus === 429) return "RATE_LIMIT";
+	return "AUTH_REQUIRED";
+}
+async function postGmsAuth(params, fetchFn) {
+	const body = new URLSearchParams(params).toString();
+	let res;
+	try {
+		res = await fetchFn(GMS_AUTH_URL, {
+			method: "POST",
+			headers: {
+				"content-type": "application/x-www-form-urlencoded",
+				"user-agent": GMS_USER_AGENT
+			},
+			body
+		});
+	} catch (err) {
+		throw new GeminiAppError(`GMS auth request failed: ${err instanceof Error ? err.message : String(err)}`, "CONNECTION_ERROR");
+	}
+	const rawBody = await res.text();
+	const parsed = parseGmsKeyValueResponse(rawBody);
+	return {
+		status: res.status,
+		ok: res.ok,
+		parsed,
+		rawBody
+	};
+}
+/**
+* Exchange an EmbeddedSetup OAuth token (oauth2_4/...) for a long-lived Android Master Token (aas_et/...).
+*/
+async function exchangeOAuthTokenForMasterToken(oauthToken, email, fetchFn = fetch) {
+	const trimmedToken = oauthToken.trim();
+	if (!trimmedToken) throw new GeminiAppError("OAuth token is required for GMS master token exchange", "AUTH_REQUIRED");
+	const params = {
+		Token: trimmedToken,
+		ACCESS_TOKEN: "1",
+		service: "ac2dm",
+		get_accountid: "1",
+		droidguard_results: "null",
+		sdk_version: "35",
+		device_country: "us",
+		operatorCountry: "us",
+		lang: "en",
+		callerPkg: AGSA_PACKAGE_NAME,
+		callerSig: AGSA_CLIENT_SIG
+	};
+	if (email?.trim()) params.Email = email.trim();
+	const { status, ok, parsed, rawBody } = await postGmsAuth(params, fetchFn);
+	if (parsed.Error) throw new GeminiAppError(`GMS master token exchange failed: ${parsed.Error}${parsed.ErrorDetail ? ` (${parsed.ErrorDetail})` : ""}`, classifyGmsErrorCode(parsed.Error, status), status);
+	if (!ok) throw new GeminiAppError(`GMS master token exchange failed with HTTP ${status}: ${rawBody.slice(0, 200)}`, classifyGmsErrorCode(void 0, status), status);
+	const masterToken = parsed.Token;
+	if (!masterToken) throw new GeminiAppError("GMS master token exchange succeeded but response did not contain Token=", "AUTH_REQUIRED", status);
+	return {
+		masterToken,
+		email: parsed.Email || email?.trim() || ""
+	};
+}
+/**
+* Exchange a long-lived Android Master Token (aas_et/...) for a short-lived AGSA Assistant Access Token (ya29.m.*).
+*/
+async function exchangeMasterTokenForAccessToken(masterToken, email, fetchFn = fetch) {
+	const trimmedMaster = masterToken.trim();
+	if (!trimmedMaster) throw new GeminiAppError("Master token is required for GMS access token exchange", "AUTH_REQUIRED");
+	const params = {
+		Token: trimmedMaster,
+		service: AGSA_ASSISTANT_SERVICE,
+		app: AGSA_PACKAGE_NAME,
+		client_sig: AGSA_CLIENT_SIG,
+		callerPkg: AGSA_PACKAGE_NAME,
+		callerSig: AGSA_CLIENT_SIG,
+		sdk_version: "35",
+		device_country: "us",
+		operatorCountry: "us",
+		lang: "en"
+	};
+	if (email?.trim()) params.Email = email.trim();
+	const { status, ok, parsed, rawBody } = await postGmsAuth(params, fetchFn);
+	if (parsed.Error) throw new GeminiAppError(`GMS access token exchange failed: ${parsed.Error}${parsed.ErrorDetail ? ` (${parsed.ErrorDetail})` : ""}`, classifyGmsErrorCode(parsed.Error, status), status);
+	if (!ok) throw new GeminiAppError(`GMS access token exchange failed with HTTP ${status}: ${rawBody.slice(0, 200)}`, classifyGmsErrorCode(void 0, status), status);
+	const accessToken = parsed.Auth;
+	if (!accessToken) throw new GeminiAppError("GMS access token exchange succeeded but response did not contain Auth=", "AUTH_REQUIRED", status);
+	let expiresAt = Date.now() + 36e5;
+	if (parsed.Expiry) {
+		const expirySec = Number(parsed.Expiry);
+		if (Number.isFinite(expirySec) && expirySec > 0) expiresAt = expirySec * 1e3;
+	}
+	return {
+		accessToken,
+		expiresAt,
+		...parsed.Email || email?.trim() ? { email: parsed.Email || email?.trim() } : {}
+	};
+}
+//#endregion
+//#region packages/core/src/gemini-app/pool.ts
+const DEFAULT_POOL_PATH = path.join(os.homedir(), ".dsh", "gemini-app", "pool.json");
+const TOKEN_REFRESH_BUFFER_MS = 6e4;
+const BASE_COOLDOWN_MS = 6e4;
+const MAX_COOLDOWN_MS = 18e5;
+var GeminiAppPoolManager = class {
+	poolPath;
+	fetchFn;
+	state;
+	constructor(poolPath = DEFAULT_POOL_PATH, fetchFn = fetch) {
+		this.poolPath = poolPath;
+		this.fetchFn = fetchFn;
+		this.state = this.load();
+	}
+	getPoolPath() {
+		return this.poolPath;
+	}
+	load() {
+		if (!existsSync(this.poolPath)) return {
+			version: 1,
+			accounts: []
+		};
+		const raw = readFileSync(this.poolPath, "utf8");
+		if (!raw.trim()) return {
+			version: 1,
+			accounts: []
+		};
+		const parsed = JSON.parse(raw);
+		if (!parsed || !Array.isArray(parsed.accounts)) throw new GeminiAppError(`Invalid Gemini App pool file format at ${this.poolPath}`, "POOL_CORRUPT");
+		return {
+			version: typeof parsed.version === "number" ? parsed.version : 1,
+			accounts: parsed.accounts.map((acc) => ({ ...acc }))
+		};
+	}
+	save() {
+		const dir = path.dirname(this.poolPath);
+		mkdirSync(dir, {
+			recursive: true,
+			mode: 448
+		});
+		const tmpPath = `${this.poolPath}.tmp.${process.pid}.${Date.now()}`;
+		const payload = JSON.stringify(this.state, null, 2);
+		try {
+			writeFileSync(tmpPath, payload, {
+				encoding: "utf8",
+				mode: 384
+			});
+			renameSync(tmpPath, this.poolPath);
+		} catch (err) {
+			if (existsSync(tmpPath)) unlinkSync(tmpPath);
+			throw err;
+		}
+	}
+	recoverExpiredCooldowns(now) {
+		let changed = false;
+		for (const acc of this.state.accounts) if (acc.status === "cooldown" && acc.cooldownUntil !== void 0 && acc.cooldownUntil <= now) {
+			acc.status = "ready";
+			acc.cooldownUntil = void 0;
+			changed = true;
+		}
+		return changed;
+	}
+	addAccount(input) {
+		const email = input.email.trim();
+		const accessToken = input.accessToken.trim();
+		if (!email) throw new GeminiAppError("Account email is required", "INVALID_ARGUMENT");
+		if (!accessToken) throw new GeminiAppError("Account accessToken is required", "AUTH_REQUIRED");
+		const id = input.id?.trim() || email;
+		const existingIdx = this.state.accounts.findIndex((a) => a.id === id || a.email.toLowerCase() === email.toLowerCase());
+		const account = {
+			id,
+			email,
+			accessToken,
+			...input.masterToken?.trim() ? { masterToken: input.masterToken.trim() } : {},
+			...input.expiresAt !== void 0 ? { expiresAt: input.expiresAt } : {},
+			status: "ready",
+			errorCount: 0
+		};
+		if (existingIdx >= 0) {
+			const prev = this.state.accounts[existingIdx];
+			this.state.accounts[existingIdx] = {
+				...account,
+				id: prev?.id || id,
+				...prev?.lastUsedAt !== void 0 ? { lastUsedAt: prev.lastUsedAt } : {}
+			};
+		} else this.state.accounts.push(account);
+		this.save();
+		return { ...this.state.accounts.find((a) => a.id === (existingIdx >= 0 ? this.state.accounts[existingIdx]?.id : id)) || account };
+	}
+	removeAccount(id) {
+		const before = this.state.accounts.length;
+		this.state.accounts = this.state.accounts.filter((a) => a.id !== id);
+		if (this.state.accounts.length === before) return false;
+		this.save();
+		return true;
+	}
+	listAccounts(now = Date.now()) {
+		if (this.recoverExpiredCooldowns(now)) this.save();
+		return this.state.accounts.map((a) => ({ ...a }));
+	}
+	getSummary(now = Date.now()) {
+		const summaries = this.listAccounts(now).map((a) => ({
+			id: a.id,
+			email: a.email,
+			status: a.status,
+			hasMasterToken: Boolean(a.masterToken),
+			...a.expiresAt !== void 0 ? { expiresAt: a.expiresAt } : {},
+			...a.cooldownUntil !== void 0 ? { cooldownUntil: a.cooldownUntil } : {},
+			...a.lastUsedAt !== void 0 ? { lastUsedAt: a.lastUsedAt } : {},
+			errorCount: a.errorCount,
+			...a.lastError !== void 0 ? { lastError: a.lastError } : {}
+		}));
+		return {
+			total: summaries.length,
+			ready: summaries.filter((a) => a.status === "ready").length,
+			accounts: summaries
+		};
+	}
+	selectAccount(now = Date.now()) {
+		if (this.recoverExpiredCooldowns(now)) this.save();
+		const chosen = this.state.accounts.filter((a) => a.status === "ready").sort((a, b) => (a.lastUsedAt ?? 0) - (b.lastUsedAt ?? 0))[0];
+		return chosen ? { ...chosen } : null;
+	}
+	async ensureValidToken(account, now = Date.now()) {
+		const target = this.state.accounts.find((a) => a.id === account.id) || account;
+		if (!(!target.accessToken || target.expiresAt !== void 0 && target.expiresAt <= now + TOKEN_REFRESH_BUFFER_MS)) return { ...target };
+		if (!target.masterToken) {
+			if (target.expiresAt !== void 0 && target.expiresAt <= now) {
+				this.markAuthRequired(target.id, "Access token expired and no masterToken is available", now);
+				throw new GeminiAppError(`Gemini App account ${target.email} access token expired and has no masterToken`, "AUTH_REQUIRED");
+			}
+			return { ...target };
+		}
+		return this.forceRefreshAccount(target.id);
+	}
+	async forceRefreshAccount(id) {
+		const target = this.state.accounts.find((a) => a.id === id);
+		if (!target) throw new GeminiAppError(`Gemini App account not found: ${id}`, "AUTH_REQUIRED");
+		if (!target.masterToken) {
+			this.markAuthRequired(id, "No masterToken available for silent refresh");
+			throw new GeminiAppError(`Gemini App account ${target.email} has no masterToken for silent refresh`, "AUTH_REQUIRED");
+		}
+		try {
+			const refreshed = await exchangeMasterTokenForAccessToken(target.masterToken, target.email, this.fetchFn);
+			target.accessToken = refreshed.accessToken;
+			target.expiresAt = refreshed.expiresAt;
+			target.status = "ready";
+			target.errorCount = 0;
+			target.cooldownUntil = void 0;
+			target.lastError = void 0;
+			this.save();
+			return { ...target };
+		} catch (err) {
+			const message = err instanceof Error ? err.message : String(err);
+			if (err instanceof GeminiAppError && err.code === "AUTH_REQUIRED") this.markAuthRequired(id, message);
+			throw err;
+		}
+	}
+	markCooldown(id, reason, now = Date.now()) {
+		const target = this.state.accounts.find((a) => a.id === id);
+		if (!target) return;
+		target.errorCount = (target.errorCount || 0) + 1;
+		const backoffMs = Math.min(BASE_COOLDOWN_MS * Math.pow(2, target.errorCount - 1), MAX_COOLDOWN_MS);
+		target.status = "cooldown";
+		target.cooldownUntil = now + backoffMs;
+		target.lastUsedAt = now;
+		target.lastError = reason;
+		this.save();
+	}
+	markAuthRequired(id, reason, now = Date.now()) {
+		const target = this.state.accounts.find((a) => a.id === id);
+		if (!target) return;
+		target.errorCount = (target.errorCount || 0) + 1;
+		target.status = "auth_required";
+		target.cooldownUntil = void 0;
+		target.lastUsedAt = now;
+		target.lastError = reason;
+		this.save();
+	}
+	markSuccess(id, now = Date.now()) {
+		const target = this.state.accounts.find((a) => a.id === id);
+		if (!target) return;
+		target.status = "ready";
+		target.errorCount = 0;
+		target.cooldownUntil = void 0;
+		target.lastError = void 0;
+		target.lastUsedAt = now;
+		this.save();
+	}
+};
+//#endregion
 //#region packages/core/src/gemini-app/stream-mapper.ts
 async function* mapRobinResponsesToChunks(responses, signal, onFirstEmit) {
 	let blockIndex = 0;
@@ -30677,18 +30996,6 @@ async function* parseRobinGrpcFramesToChunks(frames, signal, onFirstEmit) {
 }
 //#endregion
 //#region packages/core/src/gemini-app/client.ts
-var GeminiAppError = class extends Error {
-	code;
-	httpStatus;
-	grpcStatus;
-	constructor(message, code, httpStatus, grpcStatus) {
-		super(message);
-		this.name = "GeminiAppError";
-		this.code = code;
-		this.httpStatus = httpStatus;
-		this.grpcStatus = grpcStatus;
-	}
-};
 /**
 * Standard HTTP/2 gRPC transport connecting to robinfrontend-pa.googleapis.com.
 */
@@ -30809,29 +31116,13 @@ async function defaultHttp2Transport(endpoint, headers, body, signal) {
 var GeminiAppClient = class {
 	config;
 	transport;
-	constructor(config = {}, transport = defaultHttp2Transport) {
+	pool;
+	constructor(config = {}, transport = defaultHttp2Transport, pool) {
 		this.config = config;
 		this.transport = transport;
+		this.pool = pool;
 	}
-	/**
-	* Primary streaming method: executes ProcessQuery gRPC call and streams StreamChunks.
-	*/
-	async *streamProcessQuery(request, signal, onFirstEmit) {
-		const token = await resolveGeminiAppToken(this.config);
-		if (!token) {
-			yield {
-				type: "finish",
-				reason: {
-					kind: "error",
-					failure: {
-						code: "AUTH_REQUIRED",
-						message: formatGeminiAppAuthGuidance()
-					}
-				}
-			};
-			return;
-		}
-		const endpoint = this.config.endpoint || "robinfrontend-pa.googleapis.com";
+	buildGrpcPayload(request) {
 		const requestFrames = encodeProcessQueryFrames(request).map((frame) => encodeGrpcFrame(frame));
 		const totalLen = requestFrames.reduce((sum, f) => sum + f.length, 0);
 		const grpcPayload = new Uint8Array(totalLen);
@@ -30840,6 +31131,9 @@ var GeminiAppClient = class {
 			grpcPayload.set(f, offset);
 			offset += f.length;
 		}
+		return grpcPayload;
+	}
+	async *executeWithToken(token, endpoint, grpcPayload, signal, onFirstEmit) {
 		const headers = {
 			"content-type": "application/grpc",
 			"grpc-accept-encoding": "gzip",
@@ -30865,6 +31159,131 @@ var GeminiAppClient = class {
 			return;
 		}
 		yield* parseRobinGrpcFramesToChunks(transportResult.frames, signal, onFirstEmit);
+	}
+	/**
+	* Primary streaming method: executes ProcessQuery gRPC call and streams StreamChunks.
+	*/
+	async *streamProcessQuery(request, signal, onFirstEmit) {
+		const endpoint = this.config.endpoint || "robinfrontend-pa.googleapis.com";
+		const grpcPayload = this.buildGrpcPayload(request);
+		if (this.pool && this.pool.listAccounts().length > 0) {
+			const totalAccounts = this.pool.listAccounts().length;
+			const triedIds = /* @__PURE__ */ new Set();
+			let lastFailure = null;
+			while (triedIds.size < totalAccounts) {
+				const selected = this.pool.selectAccount();
+				if (!selected || triedIds.has(selected.id)) break;
+				triedIds.add(selected.id);
+				let account;
+				try {
+					account = await this.pool.ensureValidToken(selected);
+				} catch (err) {
+					const message = err instanceof Error ? err.message : String(err);
+					const code = err instanceof GeminiAppError ? err.code : "AUTH_REQUIRED";
+					if (code === "AUTH_REQUIRED") this.pool.markAuthRequired(selected.id, message);
+					else this.pool.markCooldown(selected.id, message);
+					lastFailure = {
+						code,
+						message
+					};
+					continue;
+				}
+				let refreshedOnce = false;
+				while (true) {
+					let hasEmittedContent = false;
+					let retrySameAccount = false;
+					let switchNextAccount = false;
+					for await (const chunk of this.executeWithToken(account.accessToken, endpoint, grpcPayload, signal, onFirstEmit)) {
+						if (chunk.type === "content-block-start" || chunk.type === "content-block-delta") {
+							hasEmittedContent = true;
+							yield chunk;
+							continue;
+						}
+						if (chunk.type === "finish") {
+							const reason = chunk.reason;
+							if (reason?.kind === "stop") {
+								this.pool.markSuccess(account.id);
+								yield chunk;
+								return;
+							}
+							if (reason?.kind === "aborted") {
+								yield chunk;
+								return;
+							}
+							if (reason?.kind === "error") {
+								const code = reason.failure?.code || "UNKNOWN_ERROR";
+								const message = reason.failure?.message || "Gemini App request failed";
+								if (!hasEmittedContent && code === "RATE_LIMIT") {
+									this.pool.markCooldown(account.id, message);
+									lastFailure = {
+										code,
+										message
+									};
+									switchNextAccount = true;
+									break;
+								}
+								if (!hasEmittedContent && code === "AUTH_REQUIRED") {
+									if (!refreshedOnce && account.masterToken) {
+										refreshedOnce = true;
+										try {
+											account = await this.pool.forceRefreshAccount(account.id);
+											retrySameAccount = true;
+											break;
+										} catch (refreshErr) {
+											lastFailure = {
+												code: "AUTH_REQUIRED",
+												message: refreshErr instanceof Error ? refreshErr.message : String(refreshErr)
+											};
+											switchNextAccount = true;
+											break;
+										}
+									}
+									this.pool.markAuthRequired(account.id, message);
+									lastFailure = {
+										code,
+										message
+									};
+									switchNextAccount = true;
+									break;
+								}
+								yield chunk;
+								return;
+							}
+						}
+						yield chunk;
+					}
+					if (retrySameAccount) continue;
+					if (switchNextAccount) break;
+					return;
+				}
+			}
+			yield {
+				type: "finish",
+				reason: {
+					kind: "error",
+					failure: lastFailure ?? {
+						code: "RATE_LIMIT",
+						message: "All Gemini App pool accounts are unavailable (cooldown or auth_required)."
+					}
+				}
+			};
+			return;
+		}
+		const token = await resolveGeminiAppToken(this.config);
+		if (!token) {
+			yield {
+				type: "finish",
+				reason: {
+					kind: "error",
+					failure: {
+						code: "AUTH_REQUIRED",
+						message: formatGeminiAppAuthGuidance()
+					}
+				}
+			};
+			return;
+		}
+		yield* this.executeWithToken(token, endpoint, grpcPayload, signal, onFirstEmit);
 	}
 	/**
 	* Non-streaming convenience method: gathers all stream chunks and returns accumulated text.
@@ -30934,13 +31353,14 @@ function hasToolUsageInMessages(messages) {
 	}
 	return false;
 }
-async function shouldOffloadToGeminiApp(options, config) {
+async function shouldOffloadToGeminiApp(options, config, pool) {
 	if (!config.geminiAppEnabled || !config.geminiAppOffloadEnabled) return false;
 	if (options.tools && options.tools.length > 0) return false;
 	if (hasToolUsageInMessages(options.messages)) return false;
 	const stop = options.stop;
 	if (stop && stop.length > 0) return false;
 	if (estimateContextChars(options) > config.geminiAppOffloadMaxContextChars) return false;
+	if (pool && pool.getSummary().total > 0) return true;
 	return await resolveGeminiAppToken({ token: config.geminiAppToken }) !== null;
 }
 function buildFreshSessionOptions(options, config) {
@@ -30966,7 +31386,7 @@ function isContentChunk(chunk) {
 }
 async function* streamWithGeminiAppOffload(options, deps) {
 	const cfg = deps.getConfig();
-	if (!await shouldOffloadToGeminiApp(options, cfg)) {
+	if (!await shouldOffloadToGeminiApp(options, cfg, deps.geminiAdapter.getPool?.())) {
 		yield* deps.fallbackToAgy(options);
 		return;
 	}
@@ -31797,6 +32217,9 @@ var GeminiAppAdapter = class extends LlmAdapter {
 		super();
 		this.deps = deps;
 	}
+	getPool() {
+		return this.deps.pool;
+	}
 	providerInfo(provider) {
 		return {
 			id: provider,
@@ -31838,7 +32261,7 @@ var GeminiAppAdapter = class extends LlmAdapter {
 			timeoutMs,
 			defaultModel: cfg.geminiAppDefaultModel
 		};
-		const client = new GeminiAppClient(clientConfig, this.deps.transport);
+		const client = new GeminiAppClient(clientConfig, this.deps.transport, this.deps.pool);
 		const request = buildProcessQueryRequest(options, clientConfig);
 		this.deps.log?.(`[gemini-app] Dispatching request for model ${options.model || "default"}`);
 		const controller = new AbortController();
@@ -31922,7 +32345,7 @@ function defineGeminiAppAskTool(deps) {
 				model: rawMode === "advanced" ? "gemini-app-advanced" : "gemini-app-default",
 				messages
 			}, clientConfig);
-			const client = new GeminiAppClient(clientConfig, deps.transport);
+			const client = new GeminiAppClient(clientConfig, deps.transport, deps.pool);
 			const controller = new AbortController();
 			let timeoutTimer;
 			if (timeoutMs > 0) timeoutTimer = setTimeout(() => {
@@ -34586,9 +35009,11 @@ function apply(ctx, entryConfig = {}) {
 		}
 		return null;
 	};
+	const geminiAppPool = new GeminiAppPoolManager();
 	const geminiAdapter = new GeminiAppAdapter({
 		getConfig,
-		log
+		log,
+		pool: geminiAppPool
 	});
 	const adapter = new AgyAdapter({
 		getConfig,
@@ -34680,7 +35105,8 @@ function apply(ctx, entryConfig = {}) {
 		if (want && geminiAppAskToolDispose.current === null && toolsSvcRef.current) {
 			const reg = toolsSvcRef.current.register(defineGeminiAppAskTool({
 				cfg: getConfig,
-				log
+				log,
+				pool: geminiAppPool
 			}));
 			geminiAppAskToolDispose.current = typeof reg === "function" ? reg : null;
 		} else if (!want && geminiAppAskToolDispose.current !== null) {
@@ -34760,6 +35186,7 @@ function apply(ctx, entryConfig = {}) {
 				const cfg = getConfig();
 				const cat = catalog.get();
 				const authStatus = await auth.resolvedStatus();
+				const geminiPoolSummary = geminiAppPool.getSummary();
 				sendJson(res, 200, {
 					plugin: "dsh-cloudcode-link",
 					transport: "direct",
@@ -34774,7 +35201,8 @@ function apply(ctx, entryConfig = {}) {
 					geminiAppFreshSessionSingleTurn: cfg.geminiAppFreshSessionSingleTurn,
 					geminiAppOffloadFallbackToAgy: cfg.geminiAppOffloadFallbackToAgy,
 					geminiAppOffloadMaxContextChars: cfg.geminiAppOffloadMaxContextChars,
-					hasGeminiAppToken: await resolveGeminiAppToken({ token: cfg.geminiAppToken }) !== null,
+					hasGeminiAppToken: geminiPoolSummary.total > 0 || await resolveGeminiAppToken({ token: cfg.geminiAppToken }) !== null,
+					geminiAppPool: geminiPoolSummary,
 					auth: authStatus,
 					poolAuth: poolAuth.status(),
 					pool: pool.getPoolData(),
@@ -35027,6 +35455,89 @@ function apply(ctx, entryConfig = {}) {
 					ok: true,
 					key,
 					value: body.value
+				});
+			})();
+		});
+		regBoth("gemini-app/login-url", (_req, res) => {
+			sendJson(res, 200, { url: GMS_EMBEDDED_SETUP_URL });
+		});
+		regBoth("gemini-app/pool/login", (req, res) => {
+			(async () => {
+				if (methodOf(req) !== "POST") {
+					sendJson(res, 405, { error: "POST only" });
+					return;
+				}
+				const body = await readBody(req);
+				const email = typeof body.email === "string" ? body.email.trim() : "";
+				const oauthToken = typeof body.oauthToken === "string" ? body.oauthToken.trim() : "";
+				const masterToken = typeof body.masterToken === "string" ? body.masterToken.trim() : "";
+				const accessToken = typeof body.accessToken === "string" ? body.accessToken.trim() : "";
+				const expiresAt = typeof body.expiresAt === "number" && Number.isFinite(body.expiresAt) ? body.expiresAt : void 0;
+				if (!oauthToken && !masterToken && !accessToken) {
+					sendJson(res, 400, {
+						ok: false,
+						error: "oauthToken, masterToken, or accessToken is required"
+					});
+					return;
+				}
+				try {
+					if (oauthToken) {
+						const masterRes = await exchangeOAuthTokenForMasterToken(oauthToken);
+						const resolvedEmail = masterRes.email || email || "gemini-app-user";
+						const accessRes = await exchangeMasterTokenForAccessToken(masterRes.masterToken, resolvedEmail);
+						geminiAppPool.addAccount({
+							email: resolvedEmail,
+							masterToken: masterRes.masterToken,
+							accessToken: accessRes.accessToken,
+							expiresAt: accessRes.expiresAt
+						});
+					} else if (masterToken) {
+						const resolvedEmail = email || "gemini-app-user";
+						const accessRes = await exchangeMasterTokenForAccessToken(masterToken, resolvedEmail);
+						geminiAppPool.addAccount({
+							email: resolvedEmail,
+							masterToken,
+							accessToken: accessRes.accessToken,
+							expiresAt: accessRes.expiresAt
+						});
+					} else geminiAppPool.addAccount({
+						email: email || "gemini-app-user",
+						accessToken,
+						expiresAt
+					});
+					sendJson(res, 200, {
+						ok: true,
+						pool: geminiAppPool.getSummary()
+					});
+				} catch (err) {
+					const message = err instanceof Error ? err.message : String(err);
+					log(`[gemini-app/pool/login] failed: ${message}`);
+					sendJson(res, 400, {
+						ok: false,
+						error: message
+					});
+				}
+			})();
+		});
+		regBoth("gemini-app/pool/remove", (req, res) => {
+			(async () => {
+				if (methodOf(req) !== "POST") {
+					sendJson(res, 405, { error: "POST only" });
+					return;
+				}
+				const body = await readBody(req);
+				const id = typeof body.id === "string" ? body.id.trim() : "";
+				if (!id) {
+					sendJson(res, 400, {
+						ok: false,
+						error: "id is required"
+					});
+					return;
+				}
+				geminiAppPool.removeAccount(id);
+				sendJson(res, 200, {
+					ok: true,
+					pool: geminiAppPool.getSummary()
 				});
 			})();
 		});

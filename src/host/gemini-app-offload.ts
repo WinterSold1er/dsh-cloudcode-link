@@ -3,7 +3,7 @@
 
 import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
 import type { PluginConfig } from '../common/types.ts'
-import { resolveGeminiAppToken } from './gemini-app.ts'
+import { GeminiAppPoolManager, resolveGeminiAppToken } from './gemini-app.ts'
 import type { GeminiAppAdapter } from './gemini-app-adapter.ts'
 
 const TOOL_BLOCK_TYPES = new Set(['tool-call', 'tool_call', 'tool-result', 'tool_result'])
@@ -73,6 +73,7 @@ export function hasToolUsageInMessages(messages: GenerateOptions['messages']): b
 export async function shouldOffloadToGeminiApp(
   options: GenerateOptions,
   config: PluginConfig,
+  pool?: GeminiAppPoolManager,
 ): Promise<boolean> {
   if (!config.geminiAppEnabled || !config.geminiAppOffloadEnabled) {
     return false
@@ -89,6 +90,9 @@ export async function shouldOffloadToGeminiApp(
   }
   if (estimateContextChars(options) > config.geminiAppOffloadMaxContextChars) {
     return false
+  }
+  if (pool && pool.getSummary().total > 0) {
+    return true
   }
   const token = await resolveGeminiAppToken({ token: config.geminiAppToken })
   return token !== null
@@ -142,7 +146,11 @@ export async function* streamWithGeminiAppOffload(
   deps: GeminiAppOffloadDeps,
 ): AsyncIterable<StreamChunk> {
   const cfg = deps.getConfig()
-  const offload = await shouldOffloadToGeminiApp(options, cfg)
+  const offload = await shouldOffloadToGeminiApp(
+    options,
+    cfg,
+    deps.geminiAdapter.getPool?.(),
+  )
   if (!offload) {
     yield* deps.fallbackToAgy(options)
     return
