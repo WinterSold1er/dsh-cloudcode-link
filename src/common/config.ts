@@ -72,7 +72,7 @@ export function resolveConfig(
 ): PluginConfig {
   const base = defaultConfig()
   const e = entry ?? {}
-  const layers: Array<Record<string, unknown>> = [e, overrides]
+  const layers: Array<Record<string, unknown>> = [overrides, e]
   const get = (k: string): unknown => {
     for (const l of layers) if (l[k] !== undefined && l[k] !== null && l[k] !== '') return l[k]
     return undefined
@@ -124,6 +124,22 @@ export function resolveConfig(
     geminiAppToken: asString(get('geminiAppToken')) ?? base.geminiAppToken,
     geminiAppTimeoutMs: asNum(get('geminiAppTimeoutMs')) ?? base.geminiAppTimeoutMs,
     geminiAppDefaultModel: asString(get('geminiAppDefaultModel')) ?? base.geminiAppDefaultModel,
+    geminiAppOffloadEnabled: asBool(get('geminiAppOffloadEnabled')) ?? base.geminiAppOffloadEnabled,
+    geminiAppOffloadMaxContextChars: (() => {
+      const n = asNum(get('geminiAppOffloadMaxContextChars'))
+      return n !== undefined ? Math.max(1, n) : base.geminiAppOffloadMaxContextChars
+    })(),
+    geminiAppFreshSessionMaxChars: (() => {
+      const n = asNum(get('geminiAppFreshSessionMaxChars'))
+      return n !== undefined ? Math.max(0, n) : base.geminiAppFreshSessionMaxChars
+    })(),
+    geminiAppFreshSessionSingleTurn:
+      asBool(get('geminiAppFreshSessionSingleTurn')) ?? base.geminiAppFreshSessionSingleTurn,
+    geminiAppOffloadFallbackToAgy:
+      asBool(get('geminiAppOffloadFallbackToAgy')) ?? base.geminiAppOffloadFallbackToAgy,
+    geminiAppAskToolEnabled:
+      asBool(get('geminiAppAskToolEnabled')) ??
+      (asBool(get('geminiAppOffloadEnabled')) ?? base.geminiAppOffloadEnabled),
 
     // Deprecated fields kept for backward compatibility
     agyBin: asString(get('agyBin')) ?? base.agyBin,
@@ -246,6 +262,43 @@ export function resolveConfig(
   }
   const envGeminiAppDefaultModel = env.DSH_GEMINI_APP_DEFAULT_MODEL ?? env.GEMINI_APP_DEFAULT_MODEL
   if (envGeminiAppDefaultModel) cfg.geminiAppDefaultModel = envGeminiAppDefaultModel
+
+  const explicitAskToolInLayers = asBool(get('geminiAppAskToolEnabled'))
+  const envGeminiAppOffloadEnabled = env.DSH_GEMINI_APP_OFFLOAD_ENABLED
+  if (envGeminiAppOffloadEnabled !== undefined) {
+    const b = asBool(envGeminiAppOffloadEnabled)
+    if (b !== undefined) {
+      cfg.geminiAppOffloadEnabled = b
+      if (explicitAskToolInLayers === undefined && env.DSH_GEMINI_APP_ASK_TOOL === undefined) {
+        cfg.geminiAppAskToolEnabled = b
+      }
+    }
+  }
+  const envGeminiAppOffloadMaxChars = env.DSH_GEMINI_APP_OFFLOAD_MAX_CHARS
+  if (envGeminiAppOffloadMaxChars !== undefined) {
+    const n = asNum(envGeminiAppOffloadMaxChars)
+    if (n !== undefined) cfg.geminiAppOffloadMaxContextChars = Math.max(1, n)
+  }
+  const envGeminiAppFreshMaxChars = env.DSH_GEMINI_APP_FRESH_SESSION_MAX_CHARS
+  if (envGeminiAppFreshMaxChars !== undefined) {
+    const n = asNum(envGeminiAppFreshMaxChars)
+    if (n !== undefined) cfg.geminiAppFreshSessionMaxChars = Math.max(0, n)
+  }
+  const envGeminiAppFreshSingleTurn = env.DSH_GEMINI_APP_FRESH_SESSION_SINGLE_TURN
+  if (envGeminiAppFreshSingleTurn !== undefined) {
+    const b = asBool(envGeminiAppFreshSingleTurn)
+    if (b !== undefined) cfg.geminiAppFreshSessionSingleTurn = b
+  }
+  const envGeminiAppOffloadFallback = env.DSH_GEMINI_APP_OFFLOAD_FALLBACK
+  if (envGeminiAppOffloadFallback !== undefined) {
+    const b = asBool(envGeminiAppOffloadFallback)
+    if (b !== undefined) cfg.geminiAppOffloadFallbackToAgy = b
+  }
+  const envGeminiAppAskTool = env.DSH_GEMINI_APP_ASK_TOOL
+  if (envGeminiAppAskTool !== undefined) {
+    const b = asBool(envGeminiAppAskTool)
+    if (b !== undefined) cfg.geminiAppAskToolEnabled = b
+  }
 
   return cfg
 }

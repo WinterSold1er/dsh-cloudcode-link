@@ -2,13 +2,18 @@
 
 import { describe, it } from 'node:test'
 import assert from 'node:assert'
+import { gzipSync } from 'node:zlib'
 import {
   ProtobufWriter,
   ProtobufReader,
   encodeGrpcFrame,
   decodeGrpcFrames,
   encodeProcessQueryRequest,
+  encodeProcessQueryFrames,
   decodeProcessQueryResponse,
+  ROBIN_EXT_INITIAL,
+  ROBIN_EXT_PREFETCH_OR_COMMIT,
+  ROBIN_CLIENT_TYPE_AGSA,
   WIRE_TYPE_VARINT,
   WIRE_TYPE_LENGTH_DELIMITED,
 } from '../packages/core/src/gemini-app/proto.ts'
@@ -173,19 +178,37 @@ describe('Gemini App: Protobuf Request & Response Serialization', () => {
 
     // Inspect fields through ProtobufReader
     const reader = new ProtobufReader(encoded)
-    let hasSession = false
+    let hasExt1000 = false
     let hasDevice = false
     let hasMode = false
 
     while (!reader.isAtEnd()) {
       const tag = reader.readTag()
       if (!tag) break
-      if (tag.fieldNumber === 1) {
-        hasSession = true
-        const sub = reader.readSubReader()
-        const subTag = sub.readTag()
-        assert.strictEqual(subTag?.fieldNumber, 1)
-        assert.strictEqual(sub.readString(), 'What is the speed of light?')
+      if (tag.fieldNumber === ROBIN_EXT_INITIAL) {
+        hasExt1000 = true
+        const extReader = reader.readSubReader()
+        let clientType = 0
+        let prompt = ''
+        while (!extReader.isAtEnd()) {
+          const extTag = extReader.readTag()
+          if (!extTag) break
+          if (extTag.fieldNumber === 1) {
+            const clientReader = extReader.readSubReader()
+            const cTag = clientReader.readTag()
+            assert.strictEqual(cTag?.fieldNumber, 4)
+            clientType = clientReader.readInt32()
+          } else if (extTag.fieldNumber === 2) {
+            const queryReader = extReader.readSubReader()
+            const qTag = queryReader.readTag()
+            assert.strictEqual(qTag?.fieldNumber, 1)
+            prompt = queryReader.readString()
+          } else {
+            extReader.skipField(extTag.wireType)
+          }
+        }
+        assert.strictEqual(clientType, ROBIN_CLIENT_TYPE_AGSA)
+        assert.strictEqual(prompt, 'What is the speed of light?')
       } else if (tag.fieldNumber === 2) {
         hasDevice = true
         reader.skipField(tag.wireType)
@@ -200,9 +223,55 @@ describe('Gemini App: Protobuf Request & Response Serialization', () => {
       }
     }
 
-    assert.strictEqual(hasSession, true)
+    assert.strictEqual(hasExt1000, true)
     assert.strictEqual(hasDevice, true)
     assert.strictEqual(hasMode, true)
+  })
+
+  it('encodes 3-frame BIDI_STREAMING ProcessQueryRequest (ext 1000 + ext 1007 prefetch + ext 1007 commit 0x12 0x00)', () => {
+    const req: ProcessQueryRequest = {
+      sessionInput: { textPrompt: 'Hello Robin' },
+    }
+    const [frame1, frame2, frame3] = encodeProcessQueryFrames(req)
+    assert.ok(frame1.length > 0)
+    assert.ok(frame2.length > 0)
+    assert.ok(frame3.length > 0)
+
+    // Frame 2: ext 1007 -> field 1 = 'Hello Robin'
+    const r2 = new ProtobufReader(frame2)
+    const t2 = r2.readTag()
+    assert.strictEqual(t2?.fieldNumber, ROBIN_EXT_PREFETCH_OR_COMMIT)
+    const sub2 = r2.readSubReader()
+    const st2 = sub2.readTag()
+    assert.strictEqual(st2?.fieldNumber, 1)
+    assert.strictEqual(sub2.readString(), 'Hello Robin')
+
+    // Frame 3: ext 1007 -> field 2 = Empty (explicit 0x12 0x00)
+    assert.deepStrictEqual(Array.from(frame3), [0xfa, 0x3e, 0x02, 0x12, 0x00])
+  })
+
+  it('decodes gzip-compressed gRPC frames (compressed = 1)', () => {
+    const respWriter = new ProtobufWriter()
+    const chatWriter = new ProtobufWriter()
+    chatWriter.writeString(1, 'Compressed hello')
+    chatWriter.writeString(5, 'conv_123')
+    chatWriter.writeString(6, 'resp_456')
+    respWriter.writeMessage(1, chatWriter.toUint8Array())
+    respWriter.writeInt32(2, RobinStreamingState.FINISHED)
+
+    const rawProto = respWriter.toUint8Array()
+    const gzipped = new Uint8Array(gzipSync(rawProto))
+    const grpcFrame = encodeGrpcFrame(gzipped, true)
+
+    const { frames, rest } = decodeGrpcFrames(grpcFrame)
+    assert.strictEqual(rest.length, 0)
+    assert.strictEqual(frames.length, 1)
+
+    const decoded = decodeProcessQueryResponse(frames[0]!)
+    assert.strictEqual(decoded.chatHistoryOutput?.deltaText, 'Compressed hello')
+    assert.strictEqual(decoded.conversationId, 'conv_123')
+    assert.strictEqual(decoded.responseId, 'resp_456')
+    assert.strictEqual(decoded.streamingState, RobinStreamingState.FINISHED)
   })
 
   it('deserializes ProcessQueryResponse with delta text and streaming state', () => {
@@ -242,5 +311,57 @@ describe('Gemini App: Protobuf Request & Response Serialization', () => {
     assert.strictEqual(decoded.streamingState, RobinStreamingState.ERROR)
     assert.strictEqual(decoded.error?.code, 401)
     assert.strictEqual(decoded.error?.message, 'Request not authenticated')
+  })
+
+  it('deserializes live extension 1003 (f1003) BardResponse and stream-end frames', () => {
+    // Frame with f1003.f1 (Candidate f7 + f2.f1 fallback + session ids)
+    const cand1 = new ProtobufWriter()
+    const f2Sub = new ProtobufWriter()
+    f2Sub.writeString(1, 'Fallback text')
+    cand1.writeMessage(2, f2Sub.toUint8Array())
+    cand1.writeString(7, 'OK')
+
+    const ids = new ProtobufWriter()
+    ids.writeString(1, 'c_live_123')
+    ids.writeString(2, 'r_live_456')
+
+    const bardResp = new ProtobufWriter()
+    bardResp.writeMessage(1, cand1.toUint8Array())
+    bardResp.writeMessage(2, ids.toUint8Array())
+
+    const ext1003 = new ProtobufWriter()
+    ext1003.writeMessage(1, bardResp.toUint8Array())
+
+    const resp1 = new ProtobufWriter()
+    resp1.writeMessage(1003, ext1003.toUint8Array())
+
+    const decoded1 = decodeProcessQueryResponse(resp1.toUint8Array())
+    assert.strictEqual(decoded1.chatHistoryOutput?.fullText, 'OK')
+    assert.strictEqual(decoded1.conversationId, 'c_live_123')
+    assert.strictEqual(decoded1.responseId, 'r_live_456')
+
+    // Frame with f1003.f1 using f2.f1 when f7 is absent
+    const cand2 = new ProtobufWriter()
+    const f2Only = new ProtobufWriter()
+    f2Only.writeString(1, 'Only f2 text')
+    cand2.writeMessage(2, f2Only.toUint8Array())
+    const bardResp2 = new ProtobufWriter()
+    bardResp2.writeMessage(1, cand2.toUint8Array())
+    const ext1003_2 = new ProtobufWriter()
+    ext1003_2.writeMessage(1, bardResp2.toUint8Array())
+    const resp2 = new ProtobufWriter()
+    resp2.writeMessage(1003, ext1003_2.toUint8Array())
+
+    const decoded2 = decodeProcessQueryResponse(resp2.toUint8Array())
+    assert.strictEqual(decoded2.chatHistoryOutput?.fullText, 'Only f2 text')
+
+    // Frame with f1003.f2 (empty stream-end message)
+    const ext1003End = new ProtobufWriter()
+    ext1003End.writeEmptyMessage(2)
+    const respEnd = new ProtobufWriter()
+    respEnd.writeMessage(1003, ext1003End.toUint8Array())
+
+    const decodedEnd = decodeProcessQueryResponse(respEnd.toUint8Array())
+    assert.strictEqual(decodedEnd.streamingState, RobinStreamingState.FINISHED)
   })
 })

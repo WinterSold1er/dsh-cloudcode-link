@@ -86,6 +86,18 @@ export interface PluginConfig {
   geminiAppTimeoutMs: number
   /** Default model identifier for Gemini App (default: gemini-app-default). */
   geminiAppDefaultModel: string
+  /** Enable transparent offloading of tool-free tasks to Gemini App (default: false). */
+  geminiAppOffloadEnabled: boolean
+  /** Max estimated context chars eligible for Gemini App offload (default: 3_000_000). */
+  geminiAppOffloadMaxContextChars: number
+  /** Max estimated context chars for trimming to a fresh single-turn session (default: 32_000). */
+  geminiAppFreshSessionMaxChars: number
+  /** Trim small-context offloaded requests to a fresh single-turn session (default: true). */
+  geminiAppFreshSessionSingleTurn: boolean
+  /** Fall back to AGY pool if Gemini App offload fails before emitting content (default: true). */
+  geminiAppOffloadFallbackToAgy: boolean
+  /** Register the dedicated gemini_app_ask tool (defaults to geminiAppOffloadEnabled). */
+  geminiAppAskToolEnabled: boolean
 
   // Deprecated configuration options (kept for backwards compatibility, silently ignored):
   /** @deprecated Use direct CloudCode API instead of agy binary */
@@ -176,6 +188,12 @@ export function defaultConfig(): PluginConfig {
     geminiAppToken: undefined,
     geminiAppTimeoutMs: 120_000,
     geminiAppDefaultModel: 'gemini-app-default',
+    geminiAppOffloadEnabled: false,
+    geminiAppOffloadMaxContextChars: 3_000_000,
+    geminiAppFreshSessionMaxChars: 32_000,
+    geminiAppFreshSessionSingleTurn: false,
+    geminiAppOffloadFallbackToAgy: true,
+    geminiAppAskToolEnabled: false,
     agyBin: '',
     permissionMode: 'skip',
     workspaceRoot: '',

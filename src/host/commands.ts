@@ -36,6 +36,7 @@ const HELP = [
   '- `/ccl models` — refresh and list discovered models',
   '- `/ccl effort <low|medium|high|default>` — default reasoning effort',
   '- `/ccl gemini-token <token>` — configure Google OAuth bearer token for Gemini App (Robin)',
+  '- `/ccl gemini-offload <on|off>` — toggle offloading tool-free tasks to Gemini App',
   '- `/ccl doctor` — write a diagnostic report and return its path',
   '- `/ccl help` — this text',
 ].join('\n')
@@ -155,6 +156,18 @@ async function handle(deps: CommandDeps, raw: string): Promise<CommandResult> {
       deps.setOverride('geminiAppEnabled', true)
       return ok('Gemini App token saved and enabled. Provider route `gemini-app` is now active.')
     }
+    if (sub === 'gemini-offload') {
+      const v = arg.trim().toLowerCase()
+      if (v === 'on' || v === 'true' || v === '1') {
+        deps.setOverride('geminiAppOffloadEnabled', true)
+        return ok('Gemini App offload enabled (`geminiAppOffloadEnabled = true`). Tool-free tasks within context limits will route to Gemini App.')
+      }
+      if (v === 'off' || v === 'false' || v === '0') {
+        deps.setOverride('geminiAppOffloadEnabled', false)
+        return ok('Gemini App offload disabled (`geminiAppOffloadEnabled = false`).')
+      }
+      return err('usage: /ccl gemini-offload <on|off>')
+    }
     return ok(HELP)
   } catch (e) {
     return err(e instanceof Error ? e.message : String(e))
@@ -225,9 +238,9 @@ export async function renderStatus(deps: CommandDeps): Promise<string> {
     '- default effort: ' + (cfg.defaultEffort !== '' ? cfg.defaultEffort : 'model default'),
     '- catalog: ' + cat.source + ' (' + cat.models.length + ' models)',
     '- pool accounts: ' + accounts.length + ' accounts configured',
-    ...(cfg.geminiAppEnabled
+    ...(cfg.geminiAppEnabled || cfg.geminiAppOffloadEnabled || cfg.geminiAppAskToolEnabled
       ? [
-          `- gemini-app: enabled (endpoint: ${cfg.geminiAppEndpoint}, token: ${cfg.geminiAppToken ? 'configured' : 'not configured'})`,
+          `- gemini-app: ${cfg.geminiAppEnabled ? 'enabled' : 'disabled'} (endpoint: ${cfg.geminiAppEndpoint}, token: ${cfg.geminiAppToken ? 'configured' : 'not configured'}, offload: ${cfg.geminiAppOffloadEnabled ? 'on' : 'off'}, ask-tool: ${cfg.geminiAppAskToolEnabled ? 'on' : 'off'})`,
         ]
       : []),
     ...(reauthNeeded > 0

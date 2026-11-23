@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { homedir } from "node:os";
 import { LlmAdapter } from "@deepseek-ai/dsh-llm";
 import { createServer } from "node:http";
+import { gunzipSync } from "node:zlib";
 import http2 from "node:http2";
 import { readFile } from "node:fs/promises";
 import { execFile, execFileSync } from "node:child_process";
@@ -30,8 +31,6 @@ function modelFamilyOf(modelId) {
 function shouldPollAccount(account) {
 	if (!account.enabled) return false;
 	if (account.authRequired) return false;
-	const now = Date.now();
-	for (const cd of Object.values(account.cooldowns)) if (cd && cd.cooldownUntil > now) return false;
 	return true;
 }
 function defaultPoolData() {
@@ -128,6 +127,14 @@ const DEFAULT_FALLBACK_MODELS$1 = [
 		inputModalities: ["text"]
 	}
 ];
+function looksLikeHardRateLimit(text) {
+	if (!text) return false;
+	return /RESOURCE_EXHAUSTED|code[ :]?429\b|status[ :]?429\b|HTTP[ :]?429\b|too many requests|individual quota reached|quota (?:exceeded|reached|exhausted)|rate[ -]?limit(?:ed)? (?:exceeded|reached|hit)|exceeded (?:your |the )?quota/i.test(text);
+}
+function looksLikeRateLimit(text) {
+	if (!text) return false;
+	return looksLikeHardRateLimit(text) || /model overloaded|experiencing high traffic/i.test(text);
+}
 function parseResetDurationMs(text) {
 	if (!text) return void 0;
 	const compactMatch = text.match(/resets?\s+in\s+((?:(\d+)\s*h)?\s*(?:(\d+)\s*m)?\s*(?:(\d+)\s*s)?)/i);
@@ -701,11 +708,12 @@ var ModelCatalog = class {
 	}
 };
 function resolveModelSlug(id) {
-	const s = id.trim().toLowerCase();
+	const stripped = id.trim().replace(/^antigravity\//i, "");
+	const s = stripped.toLowerCase();
 	if (s === "claude-opus-4-6" || s === "claude-opus-4-8" || s === "claude-opus" || s === "claude-opus-4.6" || s === "claude-opus-4-5" || s === "opus") return "claude-opus-4-6-thinking";
 	if (s === "claude-sonnet" || s === "claude-sonnet-4.6" || s === "claude-sonnet-4-5" || s === "sonnet") return "claude-sonnet-4-6";
 	if (s === "gpt-oss-120b" || s === "gpt-oss-20b" || s === "gpt-oss") return "gpt-oss-120b-medium";
-	return id.trim();
+	return stripped;
 }
 function findEntry(catalog, id) {
 	const direct = catalog.models.find((m) => m.id === id);
@@ -1729,23 +1737,54 @@ var AccountPoolManager = class {
 		this.normalizeAccountAliases();
 		this.persist();
 	}
-	recordFailure(id, family, reason, serverResetTime) {
+	recordFailure(id, family, reason, serverResetTime, opts) {
 		const acc = this.getAccount(id);
 		if (!acc) return;
-		const failures = (acc.cooldowns[family]?.consecutiveFailures ?? 0) + 1;
+		const modelId = opts?.modelId?.trim();
+		const failures = ((modelId ? acc.modelCooldowns?.[modelId] : acc.cooldowns[family])?.consecutiveFailures ?? 0) + 1;
 		let cooldownUntil;
-		const parsedDuration = parseResetDurationMs(serverResetTime || reason);
-		if (serverResetTime && !parsedDuration) {
-			const parsed = Date.parse(serverResetTime);
-			if (!Number.isNaN(parsed) && parsed > Date.now()) cooldownUntil = parsed + 1e4;
+		if (typeof serverResetTime === "number") {
+			if (Number.isFinite(serverResetTime) && serverResetTime > 0) cooldownUntil = Date.now() + serverResetTime;
 			else cooldownUntil = Date.now() + Math.min(this.data.defaultCooldownMs * failures, this.data.maxCooldownMs);
-		} else if (parsedDuration && parsedDuration > 0) cooldownUntil = Date.now() + parsedDuration + 1e4;
-		else cooldownUntil = Date.now() + Math.min(this.data.defaultCooldownMs * failures, this.data.maxCooldownMs);
-		acc.cooldowns[family] = {
-			cooldownUntil,
-			reason,
-			consecutiveFailures: failures
-		};
+		} else {
+			const resetStr = serverResetTime ?? opts?.resetTime;
+			const parsedDuration = parseResetDurationMs(resetStr || reason);
+			if (resetStr && !parsedDuration) {
+				const parsed = Date.parse(resetStr);
+				if (!Number.isNaN(parsed) && parsed > Date.now()) cooldownUntil = parsed + 1e4;
+				else cooldownUntil = Date.now() + Math.min(this.data.defaultCooldownMs * failures, this.data.maxCooldownMs);
+			} else if (parsedDuration && parsedDuration > 0) cooldownUntil = Date.now() + parsedDuration + 1e4;
+			else cooldownUntil = Date.now() + Math.min(this.data.defaultCooldownMs * failures, this.data.maxCooldownMs);
+		}
+		if (modelId) {
+			acc.modelCooldowns ??= {};
+			acc.modelCooldowns[modelId] = {
+				cooldownUntil,
+				reason,
+				consecutiveFailures: failures
+			};
+			if (opts?.quotaExhausted) {
+				acc.modelQuotas ??= {};
+				acc.modelQuotas[modelId] = {
+					...acc.modelQuotas[modelId],
+					remainingFraction: 0,
+					...opts.resetTime !== void 0 ? { resetTime: opts.resetTime } : {},
+					updatedAt: Date.now()
+				};
+			}
+		} else {
+			acc.cooldowns[family] = {
+				cooldownUntil,
+				reason,
+				consecutiveFailures: failures
+			};
+			if (opts?.quotaExhausted) acc.quotas[family] = {
+				...acc.quotas[family],
+				remainingFraction: 0,
+				...opts.resetTime !== void 0 ? { resetTime: opts.resetTime } : {},
+				updatedAt: Date.now()
+			};
+		}
 		this.persist();
 	}
 	/**
@@ -1789,7 +1828,7 @@ var AccountPoolManager = class {
 			this.modelQuarantine.delete(key);
 		}
 	}
-	recordSuccess(id, family) {
+	recordSuccess(id, family, wireModel) {
 		const acc = this.getAccount(id);
 		if (!acc) return;
 		acc.lastUsedAt = Date.now();
@@ -1798,16 +1837,32 @@ var AccountPoolManager = class {
 			delete acc.authError;
 		}
 		if (acc.cooldowns[family]) delete acc.cooldowns[family];
+		const modelKey = wireModel?.trim();
+		if (modelKey && acc.modelCooldowns?.[modelKey]) delete acc.modelCooldowns[modelKey];
 		this.persist();
 	}
-	clearCooldown(id, family) {
+	clearCooldown(id, family, wireModel) {
+		const modelKey = wireModel?.trim();
+		const clearForAccount = (acc) => {
+			if (modelKey) {
+				if (acc.modelCooldowns) delete acc.modelCooldowns[modelKey];
+				return;
+			}
+			if (family) {
+				delete acc.cooldowns[family];
+				if (acc.modelCooldowns) {
+					for (const m of Object.keys(acc.modelCooldowns)) if (modelFamilyOf(m) === family) delete acc.modelCooldowns[m];
+				}
+			} else {
+				acc.cooldowns = {};
+				if (acc.modelCooldowns) acc.modelCooldowns = {};
+			}
+		};
 		if (id) {
 			const acc = this.getAccount(id);
 			if (!acc) return;
-			if (family) delete acc.cooldowns[family];
-			else acc.cooldowns = {};
-		} else for (const acc of this.data.accounts) if (family) delete acc.cooldowns[family];
-		else acc.cooldowns = {};
+			clearForAccount(acc);
+		} else for (const acc of this.data.accounts) clearForAccount(acc);
 		this.persist();
 	}
 	isAccountHealthy(account, family, thresholdOrWireModel, maybeWireModel) {
@@ -1831,8 +1886,18 @@ var AccountPoolManager = class {
 			}
 		}
 		if (wireModel?.trim()) {
+			const modelKey = wireModel.trim();
 			if (!modelEntitlementOf(account, family, wireModel).supported) return false;
 			if (this.getModelQuarantine(account.id, family, wireModel)) return false;
+			const modelCd = account.modelCooldowns?.[modelKey];
+			if (modelCd && modelCd.cooldownUntil > now) return false;
+			const modelQuota = account.modelQuotas?.[modelKey];
+			if (modelQuota && typeof modelQuota.remainingFraction === "number" && modelQuota.remainingFraction <= threshold) {
+				if (modelQuota.resetTime) {
+					const resetMs = Date.parse(modelQuota.resetTime);
+					if (!Number.isNaN(resetMs) && resetMs > now) return false;
+				} else if (modelQuota.remainingFraction <= 0) return false;
+			}
 		}
 		return true;
 	}
@@ -1853,9 +1918,10 @@ var AccountPoolManager = class {
 			const activeId = this.runtimeActiveAccountIds.get(family) ?? this.data.activeAccountIds?.[family];
 			const lastIndex = activeId ? this.data.accounts.findIndex((a) => a.id === activeId) : -1;
 			const total = this.data.accounts.length;
+			const modelKey = wireModel?.trim();
 			const chosen = candidates.slice().sort((a, b) => {
-				const aFrac = a.quotas[family]?.remainingFraction ?? 1;
-				const bFrac = b.quotas[family]?.remainingFraction ?? 1;
+				const aFrac = (modelKey ? a.modelQuotas?.[modelKey]?.remainingFraction : void 0) ?? a.quotas[family]?.remainingFraction ?? 1;
+				const bFrac = (modelKey ? b.modelQuotas?.[modelKey]?.remainingFraction : void 0) ?? b.quotas[family]?.remainingFraction ?? 1;
 				if (Math.abs(bFrac - aFrac) >= .001) return bFrac - aFrac;
 				const aIndex = this.data.accounts.indexOf(a);
 				const bIndex = this.data.accounts.indexOf(b);
@@ -1889,14 +1955,24 @@ var AccountPoolManager = class {
 		this.runtimeActiveAccountIds.set(family, nextAccount.id);
 		return nextAccount;
 	}
-	getEarliestResetCountdown(family) {
+	getEarliestResetCountdown(family, wireModel) {
 		const now = Date.now();
+		const modelKey = wireModel?.trim();
 		let earliest = null;
 		for (const acc of this.data.accounts) {
 			if (!acc.enabled || acc.authRequired) continue;
 			let accReset = null;
 			const cd = acc.cooldowns[family];
 			if (cd && cd.cooldownUntil > now) accReset = Math.max(accReset ?? 0, cd.cooldownUntil);
+			if (modelKey) {
+				const modelCd = acc.modelCooldowns?.[modelKey];
+				if (modelCd && modelCd.cooldownUntil > now) accReset = Math.max(accReset ?? 0, modelCd.cooldownUntil);
+				const modelQuota = acc.modelQuotas?.[modelKey];
+				if (modelQuota && typeof modelQuota.remainingFraction === "number" && modelQuota.remainingFraction <= this.lowQuotaThreshold && modelQuota.resetTime) {
+					const resetMs = Date.parse(modelQuota.resetTime);
+					if (!Number.isNaN(resetMs) && resetMs > now) accReset = Math.max(accReset ?? 0, resetMs);
+				}
+			}
 			const quota = acc.quotas[family];
 			if (quota && typeof quota.remainingFraction === "number" && quota.remainingFraction <= this.lowQuotaThreshold) {
 				if (quota.resetTime) {
@@ -1957,11 +2033,13 @@ var AccountPoolManager = class {
 				resetInMs: null
 			};
 		}
-		const resetInMs = this.getEarliestResetCountdown(family);
+		const modelKey = wireModel?.trim();
+		const now = Date.now();
+		const resetInMs = this.getEarliestResetCountdown(family, modelKey);
 		return {
 			hasAccount: true,
 			suppressed: true,
-			reason: authValidAccounts.some((a) => a.cooldowns[family] && a.cooldowns[family].cooldownUntil > Date.now()) ? "rate_limited" : "quota_exhausted",
+			reason: authValidAccounts.some((a) => a.cooldowns[family] && a.cooldowns[family].cooldownUntil > now || (modelKey ? a.modelCooldowns?.[modelKey] && a.modelCooldowns[modelKey].cooldownUntil > now : false)) ? "rate_limited" : "quota_exhausted",
 			resetInMs
 		};
 	}
@@ -2204,6 +2282,12 @@ function defaultConfig() {
 		geminiAppToken: void 0,
 		geminiAppTimeoutMs: 12e4,
 		geminiAppDefaultModel: "gemini-app-default",
+		geminiAppOffloadEnabled: false,
+		geminiAppOffloadMaxContextChars: 3e6,
+		geminiAppFreshSessionMaxChars: 32e3,
+		geminiAppFreshSessionSingleTurn: false,
+		geminiAppOffloadFallbackToAgy: true,
+		geminiAppAskToolEnabled: false,
 		agyBin: "",
 		permissionMode: "skip",
 		workspaceRoot: "",
@@ -2280,7 +2364,7 @@ function asMode(v) {
 /** Layered config read; cheap enough to call per request (thunk pattern). */
 function resolveConfig(entry, env = process.env, overrides = readOverrides()) {
 	const base = defaultConfig();
-	const layers = [entry ?? {}, overrides];
+	const layers = [overrides, entry ?? {}];
 	const get = (k) => {
 		for (const l of layers) if (l[k] !== void 0 && l[k] !== null && l[k] !== "") return l[k];
 	};
@@ -2323,6 +2407,18 @@ function resolveConfig(entry, env = process.env, overrides = readOverrides()) {
 		geminiAppToken: asString$1(get("geminiAppToken")) ?? base.geminiAppToken,
 		geminiAppTimeoutMs: asNum(get("geminiAppTimeoutMs")) ?? base.geminiAppTimeoutMs,
 		geminiAppDefaultModel: asString$1(get("geminiAppDefaultModel")) ?? base.geminiAppDefaultModel,
+		geminiAppOffloadEnabled: asBool(get("geminiAppOffloadEnabled")) ?? base.geminiAppOffloadEnabled,
+		geminiAppOffloadMaxContextChars: (() => {
+			const n = asNum(get("geminiAppOffloadMaxContextChars"));
+			return n !== void 0 ? Math.max(1, n) : base.geminiAppOffloadMaxContextChars;
+		})(),
+		geminiAppFreshSessionMaxChars: (() => {
+			const n = asNum(get("geminiAppFreshSessionMaxChars"));
+			return n !== void 0 ? Math.max(0, n) : base.geminiAppFreshSessionMaxChars;
+		})(),
+		geminiAppFreshSessionSingleTurn: asBool(get("geminiAppFreshSessionSingleTurn")) ?? base.geminiAppFreshSessionSingleTurn,
+		geminiAppOffloadFallbackToAgy: asBool(get("geminiAppOffloadFallbackToAgy")) ?? base.geminiAppOffloadFallbackToAgy,
+		geminiAppAskToolEnabled: asBool(get("geminiAppAskToolEnabled")) ?? asBool(get("geminiAppOffloadEnabled")) ?? base.geminiAppOffloadEnabled,
 		agyBin: asString$1(get("agyBin")) ?? base.agyBin,
 		permissionMode: asMode(get("permissionMode")) ?? base.permissionMode,
 		workspaceRoot: asString$1(get("workspaceRoot")) ?? base.workspaceRoot,
@@ -2433,6 +2529,40 @@ function resolveConfig(entry, env = process.env, overrides = readOverrides()) {
 	}
 	const envGeminiAppDefaultModel = env.DSH_GEMINI_APP_DEFAULT_MODEL ?? env.GEMINI_APP_DEFAULT_MODEL;
 	if (envGeminiAppDefaultModel) cfg.geminiAppDefaultModel = envGeminiAppDefaultModel;
+	const explicitAskToolInLayers = asBool(get("geminiAppAskToolEnabled"));
+	const envGeminiAppOffloadEnabled = env.DSH_GEMINI_APP_OFFLOAD_ENABLED;
+	if (envGeminiAppOffloadEnabled !== void 0) {
+		const b = asBool(envGeminiAppOffloadEnabled);
+		if (b !== void 0) {
+			cfg.geminiAppOffloadEnabled = b;
+			if (explicitAskToolInLayers === void 0 && env.DSH_GEMINI_APP_ASK_TOOL === void 0) cfg.geminiAppAskToolEnabled = b;
+		}
+	}
+	const envGeminiAppOffloadMaxChars = env.DSH_GEMINI_APP_OFFLOAD_MAX_CHARS;
+	if (envGeminiAppOffloadMaxChars !== void 0) {
+		const n = asNum(envGeminiAppOffloadMaxChars);
+		if (n !== void 0) cfg.geminiAppOffloadMaxContextChars = Math.max(1, n);
+	}
+	const envGeminiAppFreshMaxChars = env.DSH_GEMINI_APP_FRESH_SESSION_MAX_CHARS;
+	if (envGeminiAppFreshMaxChars !== void 0) {
+		const n = asNum(envGeminiAppFreshMaxChars);
+		if (n !== void 0) cfg.geminiAppFreshSessionMaxChars = Math.max(0, n);
+	}
+	const envGeminiAppFreshSingleTurn = env.DSH_GEMINI_APP_FRESH_SESSION_SINGLE_TURN;
+	if (envGeminiAppFreshSingleTurn !== void 0) {
+		const b = asBool(envGeminiAppFreshSingleTurn);
+		if (b !== void 0) cfg.geminiAppFreshSessionSingleTurn = b;
+	}
+	const envGeminiAppOffloadFallback = env.DSH_GEMINI_APP_OFFLOAD_FALLBACK;
+	if (envGeminiAppOffloadFallback !== void 0) {
+		const b = asBool(envGeminiAppOffloadFallback);
+		if (b !== void 0) cfg.geminiAppOffloadFallbackToAgy = b;
+	}
+	const envGeminiAppAskTool = env.DSH_GEMINI_APP_ASK_TOOL;
+	if (envGeminiAppAskTool !== void 0) {
+		const b = asBool(envGeminiAppAskTool);
+		if (b !== void 0) cfg.geminiAppAskToolEnabled = b;
+	}
 	return cfg;
 }
 //#endregion
@@ -27560,7 +27690,6 @@ var QuotaService = class {
 		if (!summary && (!discovered || !discovered.models)) return null;
 		if (account.authRequired) this.pool.clearAuthRequired(account.id);
 		const familyQuotas = {};
-		const summaryFamilies = /* @__PURE__ */ new Set();
 		if (summary && Array.isArray(summary.groups)) for (const group of summary.groups) {
 			const dName = (group.displayName || "").toLowerCase();
 			const desc = (group.description || "").toLowerCase();
@@ -27582,7 +27711,6 @@ var QuotaService = class {
 				}
 			}
 			for (const fam of targetFamilies) {
-				summaryFamilies.add(fam);
 				const prev = familyQuotas[fam];
 				familyQuotas[fam] = {
 					remainingFraction: fiveHourFrac !== void 0 ? fiveHourFrac : prev?.remainingFraction,
@@ -27613,11 +27741,11 @@ var QuotaService = class {
 				resetTime,
 				updatedAt: now
 			});
-			else if (!summaryFamilies.has(fam) || familyQuotas[fam].remainingFraction === void 0) {
-				const curRemaining = familyQuotas[fam].remainingFraction ?? 1;
-				if (remaining < curRemaining) {
+			else {
+				const curRemaining = familyQuotas[fam].remainingFraction;
+				if (curRemaining === void 0 || remaining < curRemaining) {
 					familyQuotas[fam].remainingFraction = remaining;
-					familyQuotas[fam].resetTime = resetTime;
+					familyQuotas[fam].resetTime = resetTime ?? familyQuotas[fam].resetTime;
 				} else if (remaining === curRemaining) {
 					if (resetTime && (!familyQuotas[fam].resetTime || Date.parse(resetTime) > Date.parse(familyQuotas[fam].resetTime))) familyQuotas[fam].resetTime = resetTime;
 				}
@@ -29669,6 +29797,1208 @@ function describePoolAuthHealth(data, grantedOf, systemHome) {
 		accountsNeedingReauth: accounts.filter((account) => account.reauthRequired).length
 	};
 }
+const ROBIN_PROCESS_QUERY_METHOD = "/assistant.mobile.robin.RobinService/ProcessQuery";
+const ROBIN_DEFAULT_USER_AGENT = "grpc-java-cronet/1.62.0 (gzip)";
+const ROBIN_API_CLIENT = "gl-android/35";
+const RobinStreamingState = {
+	UNSPECIFIED: 0,
+	IN_PROGRESS: 1,
+	FINISHED: 2,
+	ERROR: 3
+};
+const RobinBardMode = {
+	UNSPECIFIED: 0,
+	STANDARD: 1,
+	ADVANCED: 2
+};
+var ProtobufWriter = class {
+	chunks = [];
+	totalLength = 0;
+	writeTag(fieldNumber, wireType) {
+		const tag = fieldNumber << 3 | wireType & 7;
+		this.writeVarint(tag);
+		return this;
+	}
+	writeVarint(value) {
+		let v = typeof value === "number" ? BigInt(Math.floor(value)) : value;
+		if (v < 0n) v = BigInt.asUintN(64, v);
+		const bytes = [];
+		while (v >= 128n) {
+			bytes.push(Number(v & 127n | 128n));
+			v >>= 7n;
+		}
+		bytes.push(Number(v & 127n));
+		const buf = new Uint8Array(bytes);
+		this.chunks.push(buf);
+		this.totalLength += buf.length;
+		return this;
+	}
+	writeInt32(fieldNumber, value) {
+		if (value === 0) return this;
+		this.writeTag(fieldNumber, 0);
+		this.writeVarint(value);
+		return this;
+	}
+	writeInt64(fieldNumber, value) {
+		if (value === 0 || value === 0n) return this;
+		this.writeTag(fieldNumber, 0);
+		this.writeVarint(value);
+		return this;
+	}
+	writeFixed32(fieldNumber, value) {
+		this.writeTag(fieldNumber, 5);
+		const buf = /* @__PURE__ */ new Uint8Array(4);
+		buf[0] = value & 255;
+		buf[1] = value >>> 8 & 255;
+		buf[2] = value >>> 16 & 255;
+		buf[3] = value >>> 24 & 255;
+		this.chunks.push(buf);
+		this.totalLength += 4;
+		return this;
+	}
+	writeFixed64(fieldNumber, value) {
+		this.writeTag(fieldNumber, 1);
+		const buf = /* @__PURE__ */ new Uint8Array(8);
+		let v = value;
+		for (let i = 0; i < 8; i++) {
+			buf[i] = Number(v & 255n);
+			v >>= 8n;
+		}
+		this.chunks.push(buf);
+		this.totalLength += 8;
+		return this;
+	}
+	writeString(fieldNumber, str) {
+		if (!str || str.length === 0) return this;
+		const encoded = new TextEncoder().encode(str);
+		this.writeTag(fieldNumber, 2);
+		this.writeVarint(encoded.length);
+		this.chunks.push(encoded);
+		this.totalLength += encoded.length;
+		return this;
+	}
+	writeBytes(fieldNumber, bytes) {
+		if (!bytes || bytes.length === 0) return this;
+		this.writeTag(fieldNumber, 2);
+		this.writeVarint(bytes.length);
+		this.chunks.push(bytes);
+		this.totalLength += bytes.length;
+		return this;
+	}
+	writeMessage(fieldNumber, msgBytes) {
+		if (!msgBytes || msgBytes.length === 0) return this;
+		this.writeTag(fieldNumber, 2);
+		this.writeVarint(msgBytes.length);
+		this.chunks.push(msgBytes);
+		this.totalLength += msgBytes.length;
+		return this;
+	}
+	writeEmptyMessage(fieldNumber) {
+		this.writeTag(fieldNumber, 2);
+		this.writeVarint(0);
+		return this;
+	}
+	toUint8Array() {
+		const out = new Uint8Array(this.totalLength);
+		let offset = 0;
+		for (const chunk of this.chunks) {
+			out.set(chunk, offset);
+			offset += chunk.length;
+		}
+		return out;
+	}
+};
+var ProtobufReader = class ProtobufReader {
+	buffer;
+	pos = 0;
+	end;
+	view;
+	constructor(buffer, start = 0, length) {
+		this.buffer = buffer;
+		this.pos = start;
+		this.end = length !== void 0 ? start + length : buffer.length;
+		this.view = new DataView(buffer.buffer, buffer.byteOffset, buffer.byteLength);
+	}
+	isAtEnd() {
+		return this.pos >= this.end;
+	}
+	readTag() {
+		if (this.isAtEnd()) return null;
+		const tag = Number(this.readVarint());
+		return {
+			fieldNumber: tag >>> 3,
+			wireType: tag & 7
+		};
+	}
+	readVarint() {
+		let result = 0n;
+		let shift = 0n;
+		while (this.pos < this.end) {
+			const byte = this.buffer[this.pos++];
+			if (byte === void 0) throw new Error("Unexpected end of buffer while reading varint");
+			result |= BigInt(byte & 127) << shift;
+			if ((byte & 128) === 0) return result;
+			shift += 7n;
+			if (shift >= 64n) throw new Error("Protobuf varint exceeds 64 bits");
+		}
+		throw new Error("Unexpected end of buffer while reading varint");
+	}
+	readInt32() {
+		return Number(this.readVarint()) | 0;
+	}
+	readString() {
+		const len = Number(this.readVarint());
+		if (this.pos + len > this.end) throw new Error(`Protobuf string length ${len} exceeds available bytes (${this.end - this.pos})`);
+		const slice = this.buffer.subarray(this.pos, this.pos + len);
+		this.pos += len;
+		return new TextDecoder("utf-8", { fatal: false }).decode(slice);
+	}
+	readBytes() {
+		const len = Number(this.readVarint());
+		if (this.pos + len > this.end) throw new Error(`Protobuf bytes length ${len} exceeds available bytes (${this.end - this.pos})`);
+		const slice = this.buffer.subarray(this.pos, this.pos + len);
+		this.pos += len;
+		return new Uint8Array(slice);
+	}
+	readSubReader() {
+		const len = Number(this.readVarint());
+		if (this.pos + len > this.end) throw new Error(`Protobuf submessage length ${len} exceeds available bytes (${this.end - this.pos})`);
+		const reader = new ProtobufReader(this.buffer, this.pos, len);
+		this.pos += len;
+		return reader;
+	}
+	skipField(wireType) {
+		switch (wireType) {
+			case 0:
+				this.readVarint();
+				break;
+			case 1:
+				if (this.pos + 8 > this.end) throw new Error("Unexpected EOF reading 64-bit field");
+				this.pos += 8;
+				break;
+			case 2: {
+				const len = Number(this.readVarint());
+				if (this.pos + len > this.end) throw new Error("Unexpected EOF skipping length-delimited field");
+				this.pos += len;
+				break;
+			}
+			case 5:
+				if (this.pos + 4 > this.end) throw new Error("Unexpected EOF reading 32-bit field");
+				this.pos += 4;
+				break;
+			case 3:
+				while (true) {
+					const t = this.readTag();
+					if (!t || t.wireType === 4) break;
+					this.skipField(t.wireType);
+				}
+				break;
+			case 4: break;
+			default: throw new Error(`Unsupported wire type: ${wireType}`);
+		}
+	}
+};
+/**
+* Packs payload into a gRPC length-prefixed frame.
+* Header: 1-byte compression flag (0 = uncompressed) + 4-byte big-endian payload length.
+*/
+function encodeGrpcFrame(payload, compressed = false) {
+	const frame = new Uint8Array(5 + payload.length);
+	frame[0] = compressed ? 1 : 0;
+	const len = payload.length;
+	frame[1] = len >>> 24 & 255;
+	frame[2] = len >>> 16 & 255;
+	frame[3] = len >>> 8 & 255;
+	frame[4] = len & 255;
+	frame.set(payload, 5);
+	return frame;
+}
+/**
+* Extracts all complete gRPC length-prefixed frames from buffer.
+* Returns decoded frames and remaining partial buffer.
+*/
+function decodeGrpcFrames(buffer) {
+	const frames = [];
+	let offset = 0;
+	while (offset + 5 <= buffer.length) {
+		const b0 = buffer[offset];
+		const b1 = buffer[offset + 1];
+		const b2 = buffer[offset + 2];
+		const b3 = buffer[offset + 3];
+		const b4 = buffer[offset + 4];
+		if (b0 === void 0 || b1 === void 0 || b2 === void 0 || b3 === void 0 || b4 === void 0) break;
+		const compressed = b0 !== 0;
+		const len = (b1 << 24 >>> 0) + (b2 << 16) + (b3 << 8) + b4;
+		if (offset + 5 + len > buffer.length) break;
+		const frameData = buffer.subarray(offset + 5, offset + 5 + len);
+		if (compressed) frames.push(new Uint8Array(gunzipSync(frameData)));
+		else frames.push(new Uint8Array(frameData));
+		offset += 5 + len;
+	}
+	const rest = buffer.subarray(offset);
+	return {
+		frames,
+		rest: new Uint8Array(rest)
+	};
+}
+function encodeRobinAttachment(att) {
+	const writer = new ProtobufWriter();
+	writer.writeString(1, att.mimeType);
+	writer.writeBytes(2, att.data);
+	if (att.name) writer.writeString(3, att.name);
+	return writer.toUint8Array();
+}
+function encodeUiInteraction(ui) {
+	const writer = new ProtobufWriter();
+	if (ui.eventType) writer.writeString(1, ui.eventType);
+	if (ui.interactionContext) writer.writeString(2, ui.interactionContext);
+	return writer.toUint8Array();
+}
+function encodeDeviceContext(ctx) {
+	const writer = new ProtobufWriter();
+	if (ctx.deviceModel) writer.writeString(1, ctx.deviceModel);
+	if (ctx.agsaVersion) writer.writeString(2, ctx.agsaVersion);
+	if (ctx.locale) writer.writeString(3, ctx.locale);
+	if (ctx.timeZone) writer.writeString(4, ctx.timeZone);
+	return writer.toUint8Array();
+}
+function encodeRobinBardModeConfig(cfg) {
+	const writer = new ProtobufWriter();
+	writer.writeInt32(1, cfg.modeId);
+	if (cfg.bardModeName) writer.writeString(2, cfg.bardModeName);
+	return writer.toUint8Array();
+}
+const ROBIN_EXT_INITIAL = 1e3;
+const ROBIN_EXT_PREFETCH_OR_COMMIT = 1007;
+function encodeClientInfoAgsa() {
+	const writer = new ProtobufWriter();
+	writer.writeInt32(4, 1);
+	return writer.toUint8Array();
+}
+function encodeInitialQueryInput(input) {
+	const writer = new ProtobufWriter();
+	if (input.textPrompt) writer.writeString(1, input.textPrompt);
+	if (input.attachments && input.attachments.length > 0) for (const att of input.attachments) writer.writeMessage(2, encodeRobinAttachment(att));
+	if (input.uiInteraction) writer.writeMessage(3, encodeUiInteraction(input.uiInteraction));
+	return writer.toUint8Array();
+}
+function encodeInitialExtension(req) {
+	const writer = new ProtobufWriter();
+	writer.writeMessage(1, encodeClientInfoAgsa());
+	if (req.sessionInput) writer.writeMessage(2, encodeInitialQueryInput(req.sessionInput));
+	return writer.toUint8Array();
+}
+function encodePrefetchExtension(textPrompt) {
+	const writer = new ProtobufWriter();
+	if (textPrompt) writer.writeString(1, textPrompt);
+	return writer.toUint8Array();
+}
+function encodeCommitExtension() {
+	const writer = new ProtobufWriter();
+	writer.writeEmptyMessage(2);
+	return writer.toUint8Array();
+}
+/**
+* Encodes Frame 1 (initial) of ProcessQueryRequest using extension field 1000 (Lgeez;).
+*/
+function encodeProcessQueryRequest(req) {
+	const writer = new ProtobufWriter();
+	writer.writeMessage(ROBIN_EXT_INITIAL, encodeInitialExtension(req));
+	if (req.deviceContext) writer.writeMessage(2, encodeDeviceContext(req.deviceContext));
+	if (req.modeConfig) writer.writeMessage(3, encodeRobinBardModeConfig(req.modeConfig));
+	return writer.toUint8Array();
+}
+/**
+* Encodes the 3-frame BIDI_STREAMING ProcessQueryRequest sequence:
+* - Frame 1 (initial): ext 1000 (Lgeez;) with ClientType.AGSA (field 1 -> field 4 = 1) and textPrompt (field 2 -> field 1)
+* - Frame 2 (PrefetchInputRequest): ext 1007 (Lgeey;) with field 1 = textPrompt
+* - Frame 3 (commit): ext 1007 (Lgeey;) with field 2 = Empty (0x12 0x00)
+*/
+function encodeProcessQueryFrames(req) {
+	const frame1 = encodeProcessQueryRequest(req);
+	const textPrompt = req.sessionInput?.textPrompt ?? "";
+	const frame2Writer = new ProtobufWriter();
+	frame2Writer.writeMessage(ROBIN_EXT_PREFETCH_OR_COMMIT, encodePrefetchExtension(textPrompt));
+	const frame2 = frame2Writer.toUint8Array();
+	const frame3Writer = new ProtobufWriter();
+	frame3Writer.writeMessage(ROBIN_EXT_PREFETCH_OR_COMMIT, encodeCommitExtension());
+	return [
+		frame1,
+		frame2,
+		frame3Writer.toUint8Array()
+	];
+}
+function decodeChatHistoryOutput(reader) {
+	const output = {};
+	while (!reader.isAtEnd()) {
+		const tag = reader.readTag();
+		if (!tag) break;
+		switch (tag.fieldNumber) {
+			case 1:
+				output.deltaText = reader.readString();
+				break;
+			case 2:
+				output.fullText = reader.readString();
+				break;
+			case 3:
+				output.candidateId = reader.readString();
+				break;
+			case 4:
+				output.thoughtsText = reader.readString();
+				break;
+			case 5:
+				output.conversationId = reader.readString();
+				break;
+			case 6:
+				output.responseId = reader.readString();
+				break;
+			default: reader.skipField(tag.wireType);
+		}
+	}
+	return output;
+}
+function decodeRobinPunt(reader) {
+	const punt = {};
+	while (!reader.isAtEnd()) {
+		const tag = reader.readTag();
+		if (!tag) break;
+		switch (tag.fieldNumber) {
+			case 1:
+				punt.actionType = reader.readString();
+				break;
+			case 2:
+				punt.payload = reader.readString();
+				break;
+			default: reader.skipField(tag.wireType);
+		}
+	}
+	return punt;
+}
+function decodeRobinError(reader) {
+	let code = 0;
+	let message = "";
+	while (!reader.isAtEnd()) {
+		const tag = reader.readTag();
+		if (!tag) break;
+		switch (tag.fieldNumber) {
+			case 1:
+				code = reader.readInt32();
+				break;
+			case 2:
+				message = reader.readString();
+				break;
+			default: reader.skipField(tag.wireType);
+		}
+	}
+	return {
+		code,
+		message
+	};
+}
+function decodeExt1003Candidate(reader) {
+	let f7Text;
+	let f2Text;
+	while (!reader.isAtEnd()) {
+		const tag = reader.readTag();
+		if (!tag) break;
+		switch (tag.fieldNumber) {
+			case 2:
+				if (tag.wireType === 2) {
+					const sub = reader.readSubReader();
+					while (!sub.isAtEnd()) {
+						const subTag = sub.readTag();
+						if (!subTag) break;
+						if (subTag.fieldNumber === 1 && subTag.wireType === 2) f2Text = sub.readString();
+						else sub.skipField(subTag.wireType);
+					}
+				} else reader.skipField(tag.wireType);
+				break;
+			case 7:
+				if (tag.wireType === 2) f7Text = reader.readString();
+				else reader.skipField(tag.wireType);
+				break;
+			default: reader.skipField(tag.wireType);
+		}
+	}
+	const fullText = f7Text && f7Text.length > 0 ? f7Text : f2Text;
+	return fullText !== void 0 ? { fullText } : {};
+}
+function decodeExt1003BardResponse(reader) {
+	let fullText;
+	let conversationId;
+	let responseId;
+	while (!reader.isAtEnd()) {
+		const tag = reader.readTag();
+		if (!tag) break;
+		switch (tag.fieldNumber) {
+			case 1:
+				if (tag.wireType === 2) {
+					const cand = decodeExt1003Candidate(reader.readSubReader());
+					if (cand.fullText !== void 0) fullText = cand.fullText;
+				} else reader.skipField(tag.wireType);
+				break;
+			case 2:
+				if (tag.wireType === 2) {
+					const idReader = reader.readSubReader();
+					while (!idReader.isAtEnd()) {
+						const idTag = idReader.readTag();
+						if (!idTag) break;
+						if (idTag.fieldNumber === 1 && idTag.wireType === 2) conversationId = idReader.readString();
+						else if (idTag.fieldNumber === 2 && idTag.wireType === 2) responseId = idReader.readString();
+						else idReader.skipField(idTag.wireType);
+					}
+				} else reader.skipField(tag.wireType);
+				break;
+			default: reader.skipField(tag.wireType);
+		}
+	}
+	return {
+		fullText,
+		conversationId,
+		responseId
+	};
+}
+function decodeExt1003(reader, resp) {
+	while (!reader.isAtEnd()) {
+		const tag = reader.readTag();
+		if (!tag) break;
+		switch (tag.fieldNumber) {
+			case 1:
+				if (tag.wireType === 2) {
+					const bard = decodeExt1003BardResponse(reader.readSubReader());
+					if (bard.fullText !== void 0) {
+						if (!resp.chatHistoryOutput) resp.chatHistoryOutput = {};
+						resp.chatHistoryOutput.fullText = bard.fullText;
+					}
+					if (bard.conversationId !== void 0) {
+						resp.conversationId = bard.conversationId;
+						if (!resp.chatHistoryOutput) resp.chatHistoryOutput = {};
+						resp.chatHistoryOutput.conversationId = bard.conversationId;
+					}
+					if (bard.responseId !== void 0) {
+						resp.responseId = bard.responseId;
+						if (!resp.chatHistoryOutput) resp.chatHistoryOutput = {};
+						resp.chatHistoryOutput.responseId = bard.responseId;
+					}
+				} else reader.skipField(tag.wireType);
+				break;
+			case 2:
+				reader.skipField(tag.wireType);
+				resp.streamingState = RobinStreamingState.FINISHED;
+				break;
+			default: reader.skipField(tag.wireType);
+		}
+	}
+}
+function decodeProcessQueryResponse(data) {
+	const reader = new ProtobufReader(data);
+	const resp = {};
+	while (!reader.isAtEnd()) {
+		const tag = reader.readTag();
+		if (!tag) break;
+		switch (tag.fieldNumber) {
+			case 1:
+				resp.chatHistoryOutput = decodeChatHistoryOutput(reader.readSubReader());
+				break;
+			case 2:
+				resp.streamingState = reader.readInt32();
+				break;
+			case 3:
+				resp.punt = decodeRobinPunt(reader.readSubReader());
+				break;
+			case 4:
+				resp.error = decodeRobinError(reader.readSubReader());
+				break;
+			case 5:
+				if (tag.wireType === 2) resp.conversationId = reader.readString();
+				else reader.skipField(tag.wireType);
+				break;
+			case 6:
+				if (tag.wireType === 2) resp.responseId = reader.readString();
+				else reader.skipField(tag.wireType);
+				break;
+			case 1003:
+				if (tag.wireType === 2) decodeExt1003(reader.readSubReader(), resp);
+				else reader.skipField(tag.wireType);
+				break;
+			default: reader.skipField(tag.wireType);
+		}
+	}
+	if (!resp.conversationId && resp.chatHistoryOutput?.conversationId) resp.conversationId = resp.chatHistoryOutput.conversationId;
+	if (!resp.responseId && resp.chatHistoryOutput?.responseId) resp.responseId = resp.chatHistoryOutput.responseId;
+	return resp;
+}
+//#endregion
+//#region packages/core/src/gemini-app/builder.ts
+function extractTextFromBlocks(blocks) {
+	const parts = [];
+	for (const block of blocks) if (block.type === "text") {
+		const txt = typeof block.text === "string" ? block.text : String(block.text ?? "");
+		parts.push(txt);
+	} else if (block.type === "reasoning") {
+		const txt = typeof block.text === "string" ? block.text : String(block.text ?? "");
+		parts.push(`[Thinking: ${txt}]`);
+	} else if (block.type === "tool-call" || block.type === "tool_call") {
+		const args = typeof block.arguments === "string" ? block.arguments : JSON.stringify(block.arguments ?? {});
+		parts.push(`[Action: ${block.name ?? "unknown"}(${args})]`);
+	} else if (block.type === "tool_result" || block.type === "tool-result") {
+		const res = typeof block.result === "string" ? block.result : JSON.stringify(block.result ?? block.content ?? {});
+		parts.push(`[Action Result: ${res}]`);
+	}
+	return parts.join("\n");
+}
+function extractAttachmentsFromBlocks(blocks) {
+	const attachments = [];
+	for (const block of blocks) if (block.type === "image") {
+		const img = block;
+		if (img.offloaded) continue;
+		let data;
+		if (img.data) {
+			if (typeof img.data === "string") {
+				const base64Str = img.data.includes(",") ? img.data.split(",")[1] : img.data;
+				data = new Uint8Array(Buffer.from(base64Str ?? "", "base64"));
+			} else if (img.data instanceof Uint8Array) data = img.data;
+			else if (Buffer.isBuffer(img.data)) data = new Uint8Array(img.data);
+		}
+		if (data && data.length > 0) attachments.push({
+			mimeType: img.mimeType || "image/jpeg",
+			data,
+			name: img.attachment?.id || `image_${attachments.length + 1}`
+		});
+	}
+	return attachments;
+}
+function formatMessagesToPrompt(messages, systemPrompt) {
+	const allAttachments = [];
+	const systemLines = [];
+	if (typeof systemPrompt === "string" && systemPrompt.trim()) systemLines.push(systemPrompt.trim());
+	const conversationLines = [];
+	for (const msg of messages) {
+		let text = "";
+		let atts = [];
+		if (typeof msg.content === "string") text = msg.content;
+		else if (Array.isArray(msg.content)) {
+			text = extractTextFromBlocks(msg.content);
+			atts = extractAttachmentsFromBlocks(msg.content);
+			allAttachments.push(...atts);
+		}
+		if (msg.role === "system" || msg.role === "developer") {
+			if (text.trim()) systemLines.push(text.trim());
+		} else if (msg.role === "user") {
+			if (text.trim()) conversationLines.push(`User: ${text.trim()}`);
+		} else if (msg.role === "assistant") {
+			if (text.trim()) conversationLines.push(`Model: ${text.trim()}`);
+		} else if (msg.role === "tool") {
+			if (text.trim()) conversationLines.push(`Tool Output: ${text.trim()}`);
+		}
+	}
+	if (systemLines.length === 0 && conversationLines.length === 1 && conversationLines[0]?.startsWith("User: ")) return {
+		promptText: conversationLines[0].substring(6),
+		attachments: allAttachments
+	};
+	const sections = [];
+	if (systemLines.length > 0) sections.push(`[System Instructions]\n${systemLines.join("\n\n")}`);
+	if (conversationLines.length > 0) sections.push(conversationLines.join("\n\n"));
+	return {
+		promptText: sections.join("\n\n"),
+		attachments: allAttachments
+	};
+}
+function buildProcessQueryRequest(options, config) {
+	const { promptText, attachments } = formatMessagesToPrompt(options.messages, options.system);
+	const sessionInput = {
+		textPrompt: promptText,
+		...attachments.length > 0 ? { attachments } : {}
+	};
+	const isAdvanced = options.model && (options.model.includes("advanced") || options.model.includes("pro")) || false;
+	return {
+		sessionInput,
+		deviceContext: {
+			deviceModel: config?.deviceModel || "OnePlus PJZ110",
+			agsaVersion: config?.agsaVersion || "15.42.34.28.arm64",
+			locale: config?.locale || "zh-CN",
+			timeZone: config?.timeZone || "Asia/Shanghai"
+		},
+		modeConfig: {
+			modeId: isAdvanced ? RobinBardMode.ADVANCED : RobinBardMode.STANDARD,
+			bardModeName: isAdvanced ? "Advanced" : "Standard"
+		}
+	};
+}
+//#endregion
+//#region packages/core/src/gemini-app/auth.ts
+const GEMINI_APP_DIR = join(homedir(), ".dsh", "gemini-app");
+const GEMINI_APP_TOKEN_FILE = join(GEMINI_APP_DIR, "token");
+/**
+* Resolves the OAuth2 bearer token for Gemini App in priority order:
+* 1. Explicitly supplied in config.token
+* 2. Environment variables: DSH_GEMINI_APP_TOKEN or GEMINI_APP_TOKEN
+* 3. Stored token file: ~/.dsh/gemini-app/token
+*/
+async function resolveGeminiAppToken(config) {
+	if (config?.token && config.token.trim()) return config.token.trim();
+	const envToken = process.env.DSH_GEMINI_APP_TOKEN?.trim() || process.env.GEMINI_APP_TOKEN?.trim();
+	if (envToken) return envToken;
+	if (existsSync(GEMINI_APP_TOKEN_FILE)) try {
+		const content = readFileSync(GEMINI_APP_TOKEN_FILE, "utf-8").trim();
+		if (content) return content;
+	} catch (err) {
+		return null;
+	}
+	return null;
+}
+/**
+* Persists an OAuth2 token to ~/.dsh/gemini-app/token.
+*/
+function saveGeminiAppToken(token) {
+	mkdirSync(GEMINI_APP_DIR, { recursive: true });
+	writeFileSync(GEMINI_APP_TOKEN_FILE, token.trim(), {
+		encoding: "utf-8",
+		mode: 384
+	});
+}
+/**
+* Returns human-actionable re-authentication guidance.
+*/
+function formatGeminiAppAuthGuidance() {
+	return "Gemini App authentication token is missing or expired. Please configure a valid Google OAuth bearer token with the assistant scope via:\n  - Setting environment variable DSH_GEMINI_APP_TOKEN=\"ya29...\"\n  - Or saving the token to ~/.dsh/gemini-app/token\n  - Or running /ccl gemini-token <token> in DSH chat";
+}
+//#endregion
+//#region packages/core/src/gemini-app/stream-mapper.ts
+async function* mapRobinResponsesToChunks(responses, signal, onFirstEmit) {
+	let blockIndex = 0;
+	let currentBlock = null;
+	let firstChunkEmitted = false;
+	let accumulatedChars = 0;
+	const notifyFirstEmit = () => {
+		if (!firstChunkEmitted) {
+			firstChunkEmitted = true;
+			if (onFirstEmit) onFirstEmit();
+		}
+	};
+	const closeCurrentBlock = () => {
+		if (!currentBlock) return null;
+		const chunk = {
+			type: "block-end",
+			index: currentBlock.index,
+			block: {
+				type: currentBlock.type,
+				text: currentBlock.text
+			}
+		};
+		currentBlock = null;
+		return chunk;
+	};
+	try {
+		for await (const resp of responses) {
+			if (signal?.aborted) {
+				const end = closeCurrentBlock();
+				if (end) yield end;
+				yield {
+					type: "finish",
+					reason: {
+						kind: "aborted",
+						failure: {
+							message: "Gemini App request was aborted",
+							code: "ABORTED"
+						}
+					}
+				};
+				return;
+			}
+			if (resp.error && resp.error.code !== 0) {
+				const end = closeCurrentBlock();
+				if (end) yield end;
+				notifyFirstEmit();
+				yield {
+					type: "finish",
+					reason: {
+						kind: "error",
+						failure: {
+							code: `ROBIN_ERROR_${resp.error.code}`,
+							message: resp.error.message || `Upstream Robin service reported error code ${resp.error.code}`
+						}
+					}
+				};
+				return;
+			}
+			if (resp.chatHistoryOutput) {
+				const { deltaText, thoughtsText, fullText } = resp.chatHistoryOutput;
+				if (thoughtsText && thoughtsText.length > 0) {
+					notifyFirstEmit();
+					if (currentBlock?.type !== "reasoning") {
+						const end = closeCurrentBlock();
+						if (end) yield end;
+						const idx = blockIndex++;
+						currentBlock = {
+							index: idx,
+							type: "reasoning",
+							text: ""
+						};
+						yield {
+							type: "block-start",
+							index: idx,
+							blockType: "reasoning"
+						};
+					}
+					currentBlock.text += thoughtsText;
+					accumulatedChars += thoughtsText.length;
+					yield {
+						type: "reasoning-delta",
+						index: currentBlock.index,
+						text: thoughtsText
+					};
+				}
+				let textToEmit = deltaText;
+				if (!textToEmit && fullText) {
+					const prevLen = currentBlock?.type === "text" ? currentBlock.text.length : 0;
+					if (fullText.length > prevLen) textToEmit = fullText.slice(prevLen);
+				}
+				if (textToEmit && textToEmit.length > 0) {
+					notifyFirstEmit();
+					if (currentBlock?.type !== "text") {
+						const end = closeCurrentBlock();
+						if (end) yield end;
+						const idx = blockIndex++;
+						currentBlock = {
+							index: idx,
+							type: "text",
+							text: ""
+						};
+						yield {
+							type: "block-start",
+							index: idx,
+							blockType: "text"
+						};
+					}
+					currentBlock.text += textToEmit;
+					accumulatedChars += textToEmit.length;
+					yield {
+						type: "text-delta",
+						index: currentBlock.index,
+						text: textToEmit
+					};
+				}
+			}
+			if (resp.streamingState === RobinStreamingState.FINISHED) {
+				const end = closeCurrentBlock();
+				if (end) yield end;
+				notifyFirstEmit();
+				yield {
+					type: "usage",
+					usage: {
+						inputTokens: 0,
+						outputTokens: Math.max(1, Math.ceil(accumulatedChars / 4))
+					}
+				};
+				yield {
+					type: "finish",
+					reason: { kind: "stop" }
+				};
+				return;
+			}
+			if (resp.streamingState === RobinStreamingState.ERROR) {
+				const end = closeCurrentBlock();
+				if (end) yield end;
+				notifyFirstEmit();
+				yield {
+					type: "finish",
+					reason: {
+						kind: "error",
+						failure: {
+							code: "ROBIN_STREAM_ERROR",
+							message: "Gemini App stream encountered an unexpected server error state"
+						}
+					}
+				};
+				return;
+			}
+		}
+		if (signal?.aborted) {
+			const end = closeCurrentBlock();
+			if (end) yield end;
+			yield {
+				type: "finish",
+				reason: {
+					kind: "aborted",
+					failure: {
+						message: "Gemini App request was aborted",
+						code: "ABORTED"
+					}
+				}
+			};
+			return;
+		}
+		const end = closeCurrentBlock();
+		if (end) yield end;
+		notifyFirstEmit();
+		yield {
+			type: "usage",
+			usage: {
+				inputTokens: 0,
+				outputTokens: Math.max(1, Math.ceil(accumulatedChars / 4))
+			}
+		};
+		yield {
+			type: "finish",
+			reason: { kind: "stop" }
+		};
+	} catch (err) {
+		const end = closeCurrentBlock();
+		if (end) yield end;
+		notifyFirstEmit();
+		yield {
+			type: "finish",
+			reason: {
+				kind: "error",
+				failure: {
+					code: "ROBIN_MAPPING_EXCEPTION",
+					message: err instanceof Error ? err.message : String(err)
+				}
+			}
+		};
+	}
+}
+/**
+* Parses incoming raw Protobuf frames from gRPC length-prefixed stream and maps them to StreamChunks.
+*/
+async function* parseRobinGrpcFramesToChunks(frames, signal, onFirstEmit) {
+	async function* decodeFrames() {
+		for await (const frame of frames) {
+			if (signal?.aborted) return;
+			try {
+				yield decodeProcessQueryResponse(frame);
+			} catch (err) {
+				throw new Error(`Failed to decode Gemini App Protobuf frame: ${err instanceof Error ? err.message : String(err)}`);
+			}
+		}
+	}
+	yield* mapRobinResponsesToChunks(decodeFrames(), signal, onFirstEmit);
+}
+//#endregion
+//#region packages/core/src/gemini-app/client.ts
+var GeminiAppError = class extends Error {
+	code;
+	httpStatus;
+	grpcStatus;
+	constructor(message, code, httpStatus, grpcStatus) {
+		super(message);
+		this.name = "GeminiAppError";
+		this.code = code;
+		this.httpStatus = httpStatus;
+		this.grpcStatus = grpcStatus;
+	}
+};
+/**
+* Standard HTTP/2 gRPC transport connecting to robinfrontend-pa.googleapis.com.
+*/
+async function defaultHttp2Transport(endpoint, headers, body, signal) {
+	return new Promise((resolve, reject) => {
+		if (signal?.aborted) return reject(new GeminiAppError("Request was aborted before connecting", "ABORTED"));
+		let client = null;
+		try {
+			client = http2.connect(`https://${endpoint}:443`);
+		} catch (err) {
+			return reject(new GeminiAppError(`Failed to establish HTTP/2 connection to ${endpoint}: ${err instanceof Error ? err.message : String(err)}`, "CONNECTION_FAILED"));
+		}
+		client.on("error", (err) => {
+			reject(new GeminiAppError(`HTTP/2 session error with ${endpoint}: ${err.message}`, "SESSION_ERROR"));
+		});
+		const req = client.request({
+			":method": "POST",
+			":path": ROBIN_PROCESS_QUERY_METHOD,
+			":scheme": "https",
+			":authority": endpoint,
+			...headers
+		});
+		let buffer = /* @__PURE__ */ new Uint8Array(0);
+		const frameQueue = [];
+		let notifyFrame = null;
+		let isStreamEnded = false;
+		let streamError = null;
+		const trailers = {};
+		const onAbort = () => {
+			req.close(http2.constants.NGHTTP2_CANCEL);
+			client?.close();
+			streamError = new GeminiAppError("Request was aborted", "ABORTED");
+			if (notifyFrame) notifyFrame();
+		};
+		signal?.addEventListener("abort", onAbort, { once: true });
+		req.on("response", (headers) => {
+			const status = Number(headers[":status"] || 200);
+			if (status !== 200) {
+				let code = "HTTP_ERROR";
+				if (status === 401 || status === 403) code = "AUTH_ERROR";
+				else if (status === 429) code = "RATE_LIMIT";
+				streamError = new GeminiAppError(`Robin gRPC endpoint returned HTTP status ${status}`, code, status);
+				if (notifyFrame) notifyFrame();
+			}
+		});
+		req.on("data", (chunk) => {
+			const chunkBytes = new Uint8Array(chunk);
+			const combined = new Uint8Array(buffer.length + chunkBytes.length);
+			combined.set(buffer, 0);
+			combined.set(chunkBytes, buffer.length);
+			try {
+				const { frames, rest } = decodeGrpcFrames(combined);
+				buffer = rest;
+				for (const frame of frames) frameQueue.push(frame);
+				if (notifyFrame) {
+					const fn = notifyFrame;
+					notifyFrame = null;
+					fn();
+				}
+			} catch (err) {
+				streamError = err instanceof Error ? err : new Error(String(err));
+				if (notifyFrame) notifyFrame();
+			}
+		});
+		req.on("trailers", (hdrs) => {
+			const grpcStatus = hdrs["grpc-status"];
+			const grpcMessage = hdrs["grpc-message"];
+			trailers["grpc-status"] = grpcStatus !== void 0 ? Number(grpcStatus) : void 0;
+			trailers["grpc-message"] = typeof grpcMessage === "string" ? grpcMessage : void 0;
+			if (grpcStatus !== void 0 && Number(grpcStatus) !== 0) {
+				const statusCode = Number(grpcStatus);
+				let code = "GRPC_ERROR";
+				if (statusCode === 16) code = "UNAUTHENTICATED";
+				else if (statusCode === 8) code = "RESOURCE_EXHAUSTED";
+				else if (statusCode === 4) code = "DEADLINE_EXCEEDED";
+				streamError = new GeminiAppError(`gRPC error (status ${statusCode}): ${grpcMessage || "unknown error"}`, code, void 0, statusCode);
+				if (notifyFrame) notifyFrame();
+			}
+		});
+		req.on("end", () => {
+			isStreamEnded = true;
+			client?.close();
+			signal?.removeEventListener("abort", onAbort);
+			if (notifyFrame) {
+				const fn = notifyFrame;
+				notifyFrame = null;
+				fn();
+			}
+		});
+		req.on("error", (err) => {
+			streamError = err;
+			client?.close();
+			signal?.removeEventListener("abort", onAbort);
+			if (notifyFrame) {
+				const fn = notifyFrame;
+				notifyFrame = null;
+				fn();
+			}
+		});
+		req.write(body);
+		req.end();
+		async function* frameGenerator() {
+			while (true) {
+				while (frameQueue.length > 0) yield frameQueue.shift();
+				if (streamError) throw streamError;
+				if (isStreamEnded) break;
+				await new Promise((r) => {
+					notifyFrame = r;
+				});
+			}
+		}
+		resolve({
+			frames: frameGenerator(),
+			getTrailers: () => trailers
+		});
+	});
+}
+var GeminiAppClient = class {
+	config;
+	transport;
+	constructor(config = {}, transport = defaultHttp2Transport) {
+		this.config = config;
+		this.transport = transport;
+	}
+	/**
+	* Primary streaming method: executes ProcessQuery gRPC call and streams StreamChunks.
+	*/
+	async *streamProcessQuery(request, signal, onFirstEmit) {
+		const token = await resolveGeminiAppToken(this.config);
+		if (!token) {
+			yield {
+				type: "finish",
+				reason: {
+					kind: "error",
+					failure: {
+						code: "AUTH_REQUIRED",
+						message: formatGeminiAppAuthGuidance()
+					}
+				}
+			};
+			return;
+		}
+		const endpoint = this.config.endpoint || "robinfrontend-pa.googleapis.com";
+		const requestFrames = encodeProcessQueryFrames(request).map((frame) => encodeGrpcFrame(frame));
+		const totalLen = requestFrames.reduce((sum, f) => sum + f.length, 0);
+		const grpcPayload = new Uint8Array(totalLen);
+		let offset = 0;
+		for (const f of requestFrames) {
+			grpcPayload.set(f, offset);
+			offset += f.length;
+		}
+		const headers = {
+			"content-type": "application/grpc",
+			"grpc-accept-encoding": "gzip",
+			te: "trailers",
+			authorization: `Bearer ${token}`,
+			"user-agent": ROBIN_DEFAULT_USER_AGENT,
+			"x-goog-api-client": ROBIN_API_CLIENT
+		};
+		let transportResult;
+		try {
+			transportResult = await this.transport(endpoint, headers, grpcPayload, signal);
+		} catch (err) {
+			yield {
+				type: "finish",
+				reason: {
+					kind: signal?.aborted ? "aborted" : "error",
+					failure: {
+						code: err instanceof GeminiAppError ? err.code : "CONNECTION_ERROR",
+						message: err instanceof Error ? err.message : String(err)
+					}
+				}
+			};
+			return;
+		}
+		yield* parseRobinGrpcFramesToChunks(transportResult.frames, signal, onFirstEmit);
+	}
+	/**
+	* Non-streaming convenience method: gathers all stream chunks and returns accumulated text.
+	*/
+	async processQuery(request, signal) {
+		let accumulatedText = "";
+		let lastError = null;
+		for await (const chunk of this.streamProcessQuery(request, signal)) if (chunk.type === "text-delta") accumulatedText += chunk.text;
+		else if (chunk.type === "finish") {
+			const finish = chunk;
+			if (finish.reason?.kind === "error") lastError = new GeminiAppError(finish.reason.failure?.message || "Gemini App request failed", finish.reason.failure?.code || "UNKNOWN_ERROR");
+		}
+		if (lastError) throw lastError;
+		return {
+			text: accumulatedText,
+			response: { chatHistoryOutput: {
+				fullText: accumulatedText,
+				deltaText: ""
+			} }
+		};
+	}
+};
+//#endregion
+//#region src/host/gemini-app-offload.ts
+const TOOL_BLOCK_TYPES = /* @__PURE__ */ new Set([
+	"tool-call",
+	"tool_call",
+	"tool-result",
+	"tool_result"
+]);
+function estimateBlockChars(block) {
+	if (!block || typeof block !== "object") return 0;
+	const b = block;
+	if (typeof b.text === "string") return b.text.length;
+	if (b.type === "tool-call" || b.type === "tool_call") return (typeof b.name === "string" ? b.name.length : 0) + (typeof b.arguments === "string" ? b.arguments.length : b.arguments !== void 0 ? JSON.stringify(b.arguments).length : 0);
+	if (b.type === "tool-result" || b.type === "tool_result") {
+		if (typeof b.content === "string") return b.content.length;
+		if (b.content !== void 0) return JSON.stringify(b.content).length;
+		if (b.result !== void 0) return JSON.stringify(b.result).length;
+	}
+	return 0;
+}
+function estimateContextChars(options) {
+	let total = 0;
+	const sys = options.system;
+	if (typeof sys === "string") total += sys.length;
+	const messages = options.messages ?? [];
+	for (const msg of messages) {
+		if (!msg) continue;
+		const content = msg.content;
+		if (typeof content === "string") total += content.length;
+		else if (Array.isArray(content)) for (const block of content) total += estimateBlockChars(block);
+	}
+	return total;
+}
+function hasToolUsageInMessages(messages) {
+	if (!Array.isArray(messages)) return false;
+	for (const msg of messages) {
+		if (!msg) continue;
+		if (msg.role === "tool") return true;
+		if (Array.isArray(msg.content)) {
+			for (const block of msg.content) if (block && typeof block === "object") {
+				const t = block.type;
+				if (typeof t === "string" && TOOL_BLOCK_TYPES.has(t)) return true;
+			}
+		}
+	}
+	return false;
+}
+async function shouldOffloadToGeminiApp(options, config) {
+	if (!config.geminiAppEnabled || !config.geminiAppOffloadEnabled) return false;
+	if (options.tools && options.tools.length > 0) return false;
+	if (hasToolUsageInMessages(options.messages)) return false;
+	const stop = options.stop;
+	if (stop && stop.length > 0) return false;
+	if (estimateContextChars(options) > config.geminiAppOffloadMaxContextChars) return false;
+	return await resolveGeminiAppToken({ token: config.geminiAppToken }) !== null;
+}
+function buildFreshSessionOptions(options, config) {
+	const messages = options.messages ?? [];
+	const lastMsg = messages.length > 0 ? messages[messages.length - 1] : void 0;
+	const estimatedChars = estimateContextChars(options);
+	const baseClone = { ...options };
+	delete baseClone.sessionId;
+	delete baseClone.conversationId;
+	delete baseClone.conversation_id;
+	if (config.geminiAppFreshSessionSingleTurn && estimatedChars <= config.geminiAppFreshSessionMaxChars && lastMsg && lastMsg.role === "user") {
+		const systemMessages = messages.filter((m) => m && (m.role === "system" || m.role === "developer"));
+		return {
+			...baseClone,
+			messages: [...systemMessages, lastMsg]
+		};
+	}
+	return baseClone;
+}
+function isContentChunk(chunk) {
+	const t = chunk.type;
+	return t === "text-delta" || t === "reasoning-delta" || t === "block-start";
+}
+async function* streamWithGeminiAppOffload(options, deps) {
+	const cfg = deps.getConfig();
+	if (!await shouldOffloadToGeminiApp(options, cfg)) {
+		yield* deps.fallbackToAgy(options);
+		return;
+	}
+	const effectiveOptions = buildFreshSessionOptions(options, cfg);
+	deps.log?.(`[gemini-app-offload] routing tool-free request to Gemini App (chars=${estimateContextChars(options)}, trimmedMessages=${effectiveOptions.messages.length}/${options.messages.length})`);
+	let hasEmittedContent = false;
+	let fallbackReason = null;
+	try {
+		for await (const chunk of deps.geminiAdapter.stream(effectiveOptions)) {
+			if (isContentChunk(chunk)) {
+				hasEmittedContent = true;
+				yield chunk;
+				continue;
+			}
+			if (chunk.type === "finish") {
+				const reason = chunk.reason;
+				if (reason?.kind === "error" && !hasEmittedContent && cfg.geminiAppOffloadFallbackToAgy) {
+					fallbackReason = reason.failure?.message || reason.failure?.code || "Gemini App offload error";
+					break;
+				}
+			}
+			yield chunk;
+		}
+	} catch (err) {
+		if (!hasEmittedContent && cfg.geminiAppOffloadFallbackToAgy) fallbackReason = err instanceof Error ? err.message : String(err);
+		else throw err;
+	}
+	if (fallbackReason !== null) {
+		deps.log?.(`[gemini-app-offload] pre-emit failure (${fallbackReason}), falling back to AGY pool`);
+		yield* deps.fallbackToAgy(options);
+	}
+}
 //#endregion
 //#region src/host/adapter.ts
 /**
@@ -29921,6 +31251,18 @@ var AgyAdapter = class extends LlmAdapter {
 		return "";
 	}
 	async *stream(options) {
+		if (this.deps.geminiAppAdapter) {
+			yield* streamWithGeminiAppOffload(options, {
+				getConfig: this.deps.getConfig,
+				geminiAdapter: this.deps.geminiAppAdapter,
+				fallbackToAgy: (opts) => this.streamAgy(opts),
+				log: this.deps.log
+			});
+			return;
+		}
+		yield* this.streamAgy(options);
+	}
+	async *streamAgy(options) {
 		const startTime = Date.now();
 		const releaseGlobal = this.deps.acquire ? await this.deps.acquire() : null;
 		const connectBudgetMs = positiveOrDefault(this.deps.connectTimeoutMs, UPSTREAM_CONNECT_TIMEOUT_MS);
@@ -30427,920 +31769,6 @@ var AgyAdapter = class extends LlmAdapter {
 		}
 	}
 };
-const ROBIN_PROCESS_QUERY_METHOD = "/assistant.mobile.robin.RobinService/ProcessQuery";
-const ROBIN_DEFAULT_USER_AGENT = "grpc-java-cronet/1.62.0 (gzip)";
-const ROBIN_API_CLIENT = "gl-android/35";
-const RobinStreamingState = {
-	UNSPECIFIED: 0,
-	IN_PROGRESS: 1,
-	FINISHED: 2,
-	ERROR: 3
-};
-const RobinBardMode = {
-	UNSPECIFIED: 0,
-	STANDARD: 1,
-	ADVANCED: 2
-};
-var ProtobufWriter = class {
-	chunks = [];
-	totalLength = 0;
-	writeTag(fieldNumber, wireType) {
-		const tag = fieldNumber << 3 | wireType & 7;
-		this.writeVarint(tag);
-		return this;
-	}
-	writeVarint(value) {
-		let v = typeof value === "number" ? BigInt(Math.floor(value)) : value;
-		if (v < 0n) v = BigInt.asUintN(64, v);
-		const bytes = [];
-		while (v >= 128n) {
-			bytes.push(Number(v & 127n | 128n));
-			v >>= 7n;
-		}
-		bytes.push(Number(v & 127n));
-		const buf = new Uint8Array(bytes);
-		this.chunks.push(buf);
-		this.totalLength += buf.length;
-		return this;
-	}
-	writeInt32(fieldNumber, value) {
-		if (value === 0) return this;
-		this.writeTag(fieldNumber, 0);
-		this.writeVarint(value);
-		return this;
-	}
-	writeInt64(fieldNumber, value) {
-		if (value === 0 || value === 0n) return this;
-		this.writeTag(fieldNumber, 0);
-		this.writeVarint(value);
-		return this;
-	}
-	writeFixed32(fieldNumber, value) {
-		this.writeTag(fieldNumber, 5);
-		const buf = /* @__PURE__ */ new Uint8Array(4);
-		buf[0] = value & 255;
-		buf[1] = value >>> 8 & 255;
-		buf[2] = value >>> 16 & 255;
-		buf[3] = value >>> 24 & 255;
-		this.chunks.push(buf);
-		this.totalLength += 4;
-		return this;
-	}
-	writeFixed64(fieldNumber, value) {
-		this.writeTag(fieldNumber, 1);
-		const buf = /* @__PURE__ */ new Uint8Array(8);
-		let v = value;
-		for (let i = 0; i < 8; i++) {
-			buf[i] = Number(v & 255n);
-			v >>= 8n;
-		}
-		this.chunks.push(buf);
-		this.totalLength += 8;
-		return this;
-	}
-	writeString(fieldNumber, str) {
-		if (!str || str.length === 0) return this;
-		const encoded = new TextEncoder().encode(str);
-		this.writeTag(fieldNumber, 2);
-		this.writeVarint(encoded.length);
-		this.chunks.push(encoded);
-		this.totalLength += encoded.length;
-		return this;
-	}
-	writeBytes(fieldNumber, bytes) {
-		if (!bytes || bytes.length === 0) return this;
-		this.writeTag(fieldNumber, 2);
-		this.writeVarint(bytes.length);
-		this.chunks.push(bytes);
-		this.totalLength += bytes.length;
-		return this;
-	}
-	writeMessage(fieldNumber, msgBytes) {
-		if (!msgBytes || msgBytes.length === 0) return this;
-		this.writeTag(fieldNumber, 2);
-		this.writeVarint(msgBytes.length);
-		this.chunks.push(msgBytes);
-		this.totalLength += msgBytes.length;
-		return this;
-	}
-	toUint8Array() {
-		const out = new Uint8Array(this.totalLength);
-		let offset = 0;
-		for (const chunk of this.chunks) {
-			out.set(chunk, offset);
-			offset += chunk.length;
-		}
-		return out;
-	}
-};
-var ProtobufReader = class ProtobufReader {
-	buffer;
-	pos = 0;
-	end;
-	view;
-	constructor(buffer, start = 0, length) {
-		this.buffer = buffer;
-		this.pos = start;
-		this.end = length !== void 0 ? start + length : buffer.length;
-		this.view = new DataView(buffer.buffer, buffer.byteOffset, buffer.byteLength);
-	}
-	isAtEnd() {
-		return this.pos >= this.end;
-	}
-	readTag() {
-		if (this.isAtEnd()) return null;
-		const tag = Number(this.readVarint());
-		return {
-			fieldNumber: tag >>> 3,
-			wireType: tag & 7
-		};
-	}
-	readVarint() {
-		let result = 0n;
-		let shift = 0n;
-		while (this.pos < this.end) {
-			const byte = this.buffer[this.pos++];
-			if (byte === void 0) throw new Error("Unexpected end of buffer while reading varint");
-			result |= BigInt(byte & 127) << shift;
-			if ((byte & 128) === 0) return result;
-			shift += 7n;
-			if (shift >= 64n) throw new Error("Protobuf varint exceeds 64 bits");
-		}
-		throw new Error("Unexpected end of buffer while reading varint");
-	}
-	readInt32() {
-		return Number(this.readVarint()) | 0;
-	}
-	readString() {
-		const len = Number(this.readVarint());
-		if (this.pos + len > this.end) throw new Error(`Protobuf string length ${len} exceeds available bytes (${this.end - this.pos})`);
-		const slice = this.buffer.subarray(this.pos, this.pos + len);
-		this.pos += len;
-		return new TextDecoder("utf-8", { fatal: false }).decode(slice);
-	}
-	readBytes() {
-		const len = Number(this.readVarint());
-		if (this.pos + len > this.end) throw new Error(`Protobuf bytes length ${len} exceeds available bytes (${this.end - this.pos})`);
-		const slice = this.buffer.subarray(this.pos, this.pos + len);
-		this.pos += len;
-		return new Uint8Array(slice);
-	}
-	readSubReader() {
-		const len = Number(this.readVarint());
-		if (this.pos + len > this.end) throw new Error(`Protobuf submessage length ${len} exceeds available bytes (${this.end - this.pos})`);
-		const reader = new ProtobufReader(this.buffer, this.pos, len);
-		this.pos += len;
-		return reader;
-	}
-	skipField(wireType) {
-		switch (wireType) {
-			case 0:
-				this.readVarint();
-				break;
-			case 1:
-				if (this.pos + 8 > this.end) throw new Error("Unexpected EOF reading 64-bit field");
-				this.pos += 8;
-				break;
-			case 2: {
-				const len = Number(this.readVarint());
-				if (this.pos + len > this.end) throw new Error("Unexpected EOF skipping length-delimited field");
-				this.pos += len;
-				break;
-			}
-			case 5:
-				if (this.pos + 4 > this.end) throw new Error("Unexpected EOF reading 32-bit field");
-				this.pos += 4;
-				break;
-			case 3:
-				while (true) {
-					const t = this.readTag();
-					if (!t || t.wireType === 4) break;
-					this.skipField(t.wireType);
-				}
-				break;
-			case 4: break;
-			default: throw new Error(`Unsupported wire type: ${wireType}`);
-		}
-	}
-};
-/**
-* Packs payload into a gRPC length-prefixed frame.
-* Header: 1-byte compression flag (0 = uncompressed) + 4-byte big-endian payload length.
-*/
-function encodeGrpcFrame(payload, compressed = false) {
-	const frame = new Uint8Array(5 + payload.length);
-	frame[0] = compressed ? 1 : 0;
-	const len = payload.length;
-	frame[1] = len >>> 24 & 255;
-	frame[2] = len >>> 16 & 255;
-	frame[3] = len >>> 8 & 255;
-	frame[4] = len & 255;
-	frame.set(payload, 5);
-	return frame;
-}
-/**
-* Extracts all complete gRPC length-prefixed frames from buffer.
-* Returns decoded frames and remaining partial buffer.
-*/
-function decodeGrpcFrames(buffer) {
-	const frames = [];
-	let offset = 0;
-	while (offset + 5 <= buffer.length) {
-		const b0 = buffer[offset];
-		const b1 = buffer[offset + 1];
-		const b2 = buffer[offset + 2];
-		const b3 = buffer[offset + 3];
-		const b4 = buffer[offset + 4];
-		if (b0 === void 0 || b1 === void 0 || b2 === void 0 || b3 === void 0 || b4 === void 0) break;
-		const compressed = b0 !== 0;
-		const len = (b1 << 24 >>> 0) + (b2 << 16) + (b3 << 8) + b4;
-		if (offset + 5 + len > buffer.length) break;
-		const frameData = buffer.subarray(offset + 5, offset + 5 + len);
-		if (compressed) throw new Error("Compressed gRPC frames are not supported in uncompressed mode");
-		frames.push(new Uint8Array(frameData));
-		offset += 5 + len;
-	}
-	const rest = buffer.subarray(offset);
-	return {
-		frames,
-		rest: new Uint8Array(rest)
-	};
-}
-function encodeRobinAttachment(att) {
-	const writer = new ProtobufWriter();
-	writer.writeString(1, att.mimeType);
-	writer.writeBytes(2, att.data);
-	if (att.name) writer.writeString(3, att.name);
-	return writer.toUint8Array();
-}
-function encodeUiInteraction(ui) {
-	const writer = new ProtobufWriter();
-	if (ui.eventType) writer.writeString(1, ui.eventType);
-	if (ui.interactionContext) writer.writeString(2, ui.interactionContext);
-	return writer.toUint8Array();
-}
-function encodeSessionInput(input) {
-	const writer = new ProtobufWriter();
-	if (input.textPrompt) writer.writeString(1, input.textPrompt);
-	if (input.attachments && input.attachments.length > 0) for (const att of input.attachments) writer.writeMessage(2, encodeRobinAttachment(att));
-	if (input.uiInteraction) writer.writeMessage(3, encodeUiInteraction(input.uiInteraction));
-	return writer.toUint8Array();
-}
-function encodeDeviceContext(ctx) {
-	const writer = new ProtobufWriter();
-	if (ctx.deviceModel) writer.writeString(1, ctx.deviceModel);
-	if (ctx.agsaVersion) writer.writeString(2, ctx.agsaVersion);
-	if (ctx.locale) writer.writeString(3, ctx.locale);
-	if (ctx.timeZone) writer.writeString(4, ctx.timeZone);
-	return writer.toUint8Array();
-}
-function encodeRobinBardModeConfig(cfg) {
-	const writer = new ProtobufWriter();
-	writer.writeInt32(1, cfg.modeId);
-	if (cfg.bardModeName) writer.writeString(2, cfg.bardModeName);
-	return writer.toUint8Array();
-}
-function encodeProcessQueryRequest(req) {
-	const writer = new ProtobufWriter();
-	if (req.sessionInput) writer.writeMessage(1, encodeSessionInput(req.sessionInput));
-	if (req.deviceContext) writer.writeMessage(2, encodeDeviceContext(req.deviceContext));
-	if (req.modeConfig) writer.writeMessage(3, encodeRobinBardModeConfig(req.modeConfig));
-	return writer.toUint8Array();
-}
-function decodeChatHistoryOutput(reader) {
-	const output = {};
-	while (!reader.isAtEnd()) {
-		const tag = reader.readTag();
-		if (!tag) break;
-		switch (tag.fieldNumber) {
-			case 1:
-				output.deltaText = reader.readString();
-				break;
-			case 2:
-				output.fullText = reader.readString();
-				break;
-			case 3:
-				output.candidateId = reader.readString();
-				break;
-			case 4:
-				output.thoughtsText = reader.readString();
-				break;
-			default: reader.skipField(tag.wireType);
-		}
-	}
-	return output;
-}
-function decodeRobinPunt(reader) {
-	const punt = {};
-	while (!reader.isAtEnd()) {
-		const tag = reader.readTag();
-		if (!tag) break;
-		switch (tag.fieldNumber) {
-			case 1:
-				punt.actionType = reader.readString();
-				break;
-			case 2:
-				punt.payload = reader.readString();
-				break;
-			default: reader.skipField(tag.wireType);
-		}
-	}
-	return punt;
-}
-function decodeRobinError(reader) {
-	let code = 0;
-	let message = "";
-	while (!reader.isAtEnd()) {
-		const tag = reader.readTag();
-		if (!tag) break;
-		switch (tag.fieldNumber) {
-			case 1:
-				code = reader.readInt32();
-				break;
-			case 2:
-				message = reader.readString();
-				break;
-			default: reader.skipField(tag.wireType);
-		}
-	}
-	return {
-		code,
-		message
-	};
-}
-function decodeProcessQueryResponse(data) {
-	const reader = new ProtobufReader(data);
-	const resp = {};
-	while (!reader.isAtEnd()) {
-		const tag = reader.readTag();
-		if (!tag) break;
-		switch (tag.fieldNumber) {
-			case 1:
-				resp.chatHistoryOutput = decodeChatHistoryOutput(reader.readSubReader());
-				break;
-			case 2:
-				resp.streamingState = reader.readInt32();
-				break;
-			case 3:
-				resp.punt = decodeRobinPunt(reader.readSubReader());
-				break;
-			case 4:
-				resp.error = decodeRobinError(reader.readSubReader());
-				break;
-			default: reader.skipField(tag.wireType);
-		}
-	}
-	return resp;
-}
-//#endregion
-//#region packages/core/src/gemini-app/builder.ts
-function extractTextFromBlocks(blocks) {
-	const parts = [];
-	for (const block of blocks) if (block.type === "text") {
-		const txt = typeof block.text === "string" ? block.text : String(block.text ?? "");
-		parts.push(txt);
-	} else if (block.type === "reasoning") {
-		const txt = typeof block.text === "string" ? block.text : String(block.text ?? "");
-		parts.push(`[Thinking: ${txt}]`);
-	} else if (block.type === "tool-call" || block.type === "tool_call") {
-		const args = typeof block.arguments === "string" ? block.arguments : JSON.stringify(block.arguments ?? {});
-		parts.push(`[Action: ${block.name ?? "unknown"}(${args})]`);
-	} else if (block.type === "tool_result" || block.type === "tool-result") {
-		const res = typeof block.result === "string" ? block.result : JSON.stringify(block.result ?? block.content ?? {});
-		parts.push(`[Action Result: ${res}]`);
-	}
-	return parts.join("\n");
-}
-function extractAttachmentsFromBlocks(blocks) {
-	const attachments = [];
-	for (const block of blocks) if (block.type === "image") {
-		const img = block;
-		if (img.offloaded) continue;
-		let data;
-		if (img.data) {
-			if (typeof img.data === "string") {
-				const base64Str = img.data.includes(",") ? img.data.split(",")[1] : img.data;
-				data = new Uint8Array(Buffer.from(base64Str ?? "", "base64"));
-			} else if (img.data instanceof Uint8Array) data = img.data;
-			else if (Buffer.isBuffer(img.data)) data = new Uint8Array(img.data);
-		}
-		if (data && data.length > 0) attachments.push({
-			mimeType: img.mimeType || "image/jpeg",
-			data,
-			name: img.attachment?.id || `image_${attachments.length + 1}`
-		});
-	}
-	return attachments;
-}
-function formatMessagesToPrompt(messages) {
-	const allAttachments = [];
-	const systemLines = [];
-	const conversationLines = [];
-	for (const msg of messages) {
-		let text = "";
-		let atts = [];
-		if (typeof msg.content === "string") text = msg.content;
-		else if (Array.isArray(msg.content)) {
-			text = extractTextFromBlocks(msg.content);
-			atts = extractAttachmentsFromBlocks(msg.content);
-			allAttachments.push(...atts);
-		}
-		if (msg.role === "system" || msg.role === "developer") {
-			if (text.trim()) systemLines.push(text.trim());
-		} else if (msg.role === "user") {
-			if (text.trim()) conversationLines.push(`User: ${text.trim()}`);
-		} else if (msg.role === "assistant") {
-			if (text.trim()) conversationLines.push(`Model: ${text.trim()}`);
-		} else if (msg.role === "tool") {
-			if (text.trim()) conversationLines.push(`Tool Output: ${text.trim()}`);
-		}
-	}
-	if (systemLines.length === 0 && conversationLines.length === 1 && conversationLines[0]?.startsWith("User: ")) return {
-		promptText: conversationLines[0].substring(6),
-		attachments: allAttachments
-	};
-	const sections = [];
-	if (systemLines.length > 0) sections.push(`[System Instructions]\n${systemLines.join("\n\n")}`);
-	if (conversationLines.length > 0) sections.push(conversationLines.join("\n\n"));
-	return {
-		promptText: sections.join("\n\n"),
-		attachments: allAttachments
-	};
-}
-function buildProcessQueryRequest(options, config) {
-	const { promptText, attachments } = formatMessagesToPrompt(options.messages);
-	const sessionInput = {
-		textPrompt: promptText,
-		...attachments.length > 0 ? { attachments } : {}
-	};
-	const isAdvanced = options.model && (options.model.includes("advanced") || options.model.includes("pro")) || false;
-	return {
-		sessionInput,
-		deviceContext: {
-			deviceModel: config?.deviceModel || "OnePlus PJZ110",
-			agsaVersion: config?.agsaVersion || "15.42.34.28.arm64",
-			locale: config?.locale || "zh-CN",
-			timeZone: config?.timeZone || "Asia/Shanghai"
-		},
-		modeConfig: {
-			modeId: isAdvanced ? RobinBardMode.ADVANCED : RobinBardMode.STANDARD,
-			bardModeName: isAdvanced ? "Advanced" : "Standard"
-		}
-	};
-}
-//#endregion
-//#region packages/core/src/gemini-app/auth.ts
-const GEMINI_APP_DIR = join(homedir(), ".dsh", "gemini-app");
-const GEMINI_APP_TOKEN_FILE = join(GEMINI_APP_DIR, "token");
-/**
-* Resolves the OAuth2 bearer token for Gemini App in priority order:
-* 1. Explicitly supplied in config.token
-* 2. Environment variables: DSH_GEMINI_APP_TOKEN or GEMINI_APP_TOKEN
-* 3. Stored token file: ~/.dsh/gemini-app/token
-*/
-async function resolveGeminiAppToken(config) {
-	if (config?.token && config.token.trim()) return config.token.trim();
-	const envToken = process.env.DSH_GEMINI_APP_TOKEN?.trim() || process.env.GEMINI_APP_TOKEN?.trim();
-	if (envToken) return envToken;
-	if (existsSync(GEMINI_APP_TOKEN_FILE)) try {
-		const content = readFileSync(GEMINI_APP_TOKEN_FILE, "utf-8").trim();
-		if (content) return content;
-	} catch (err) {
-		return null;
-	}
-	return null;
-}
-/**
-* Persists an OAuth2 token to ~/.dsh/gemini-app/token.
-*/
-function saveGeminiAppToken(token) {
-	mkdirSync(GEMINI_APP_DIR, { recursive: true });
-	writeFileSync(GEMINI_APP_TOKEN_FILE, token.trim(), {
-		encoding: "utf-8",
-		mode: 384
-	});
-}
-/**
-* Returns human-actionable re-authentication guidance.
-*/
-function formatGeminiAppAuthGuidance() {
-	return "Gemini App authentication token is missing or expired. Please configure a valid Google OAuth bearer token with the assistant scope via:\n  - Setting environment variable DSH_GEMINI_APP_TOKEN=\"ya29...\"\n  - Or saving the token to ~/.dsh/gemini-app/token\n  - Or running /ccl gemini-token <token> in DSH chat";
-}
-//#endregion
-//#region packages/core/src/gemini-app/stream-mapper.ts
-async function* mapRobinResponsesToChunks(responses, signal, onFirstEmit) {
-	let blockIndex = 0;
-	let currentBlock = null;
-	let firstChunkEmitted = false;
-	let accumulatedChars = 0;
-	const notifyFirstEmit = () => {
-		if (!firstChunkEmitted) {
-			firstChunkEmitted = true;
-			if (onFirstEmit) onFirstEmit();
-		}
-	};
-	const closeCurrentBlock = () => {
-		if (!currentBlock) return null;
-		const chunk = {
-			type: "block-end",
-			index: currentBlock.index,
-			block: {
-				type: currentBlock.type,
-				text: currentBlock.text
-			}
-		};
-		currentBlock = null;
-		return chunk;
-	};
-	try {
-		for await (const resp of responses) {
-			if (signal?.aborted) {
-				const end = closeCurrentBlock();
-				if (end) yield end;
-				yield {
-					type: "finish",
-					reason: {
-						kind: "aborted",
-						failure: {
-							message: "Gemini App request was aborted",
-							code: "ABORTED"
-						}
-					}
-				};
-				return;
-			}
-			if (resp.error && resp.error.code !== 0) {
-				const end = closeCurrentBlock();
-				if (end) yield end;
-				notifyFirstEmit();
-				yield {
-					type: "finish",
-					reason: {
-						kind: "error",
-						failure: {
-							code: `ROBIN_ERROR_${resp.error.code}`,
-							message: resp.error.message || `Upstream Robin service reported error code ${resp.error.code}`
-						}
-					}
-				};
-				return;
-			}
-			if (resp.chatHistoryOutput) {
-				const { deltaText, thoughtsText, fullText } = resp.chatHistoryOutput;
-				if (thoughtsText && thoughtsText.length > 0) {
-					notifyFirstEmit();
-					if (currentBlock?.type !== "reasoning") {
-						const end = closeCurrentBlock();
-						if (end) yield end;
-						const idx = blockIndex++;
-						currentBlock = {
-							index: idx,
-							type: "reasoning",
-							text: ""
-						};
-						yield {
-							type: "block-start",
-							index: idx,
-							blockType: "reasoning"
-						};
-					}
-					currentBlock.text += thoughtsText;
-					accumulatedChars += thoughtsText.length;
-					yield {
-						type: "reasoning-delta",
-						index: currentBlock.index,
-						text: thoughtsText
-					};
-				}
-				let textToEmit = deltaText;
-				if (!textToEmit && fullText && currentBlock?.type === "text") {
-					if (fullText.length > currentBlock.text.length) textToEmit = fullText.slice(currentBlock.text.length);
-				}
-				if (textToEmit && textToEmit.length > 0) {
-					notifyFirstEmit();
-					if (currentBlock?.type !== "text") {
-						const end = closeCurrentBlock();
-						if (end) yield end;
-						const idx = blockIndex++;
-						currentBlock = {
-							index: idx,
-							type: "text",
-							text: ""
-						};
-						yield {
-							type: "block-start",
-							index: idx,
-							blockType: "text"
-						};
-					}
-					currentBlock.text += textToEmit;
-					accumulatedChars += textToEmit.length;
-					yield {
-						type: "text-delta",
-						index: currentBlock.index,
-						text: textToEmit
-					};
-				}
-			}
-			if (resp.streamingState === RobinStreamingState.FINISHED) {
-				const end = closeCurrentBlock();
-				if (end) yield end;
-				notifyFirstEmit();
-				yield {
-					type: "usage",
-					usage: {
-						inputTokens: 0,
-						outputTokens: Math.max(1, Math.ceil(accumulatedChars / 4))
-					}
-				};
-				yield {
-					type: "finish",
-					reason: { kind: "stop" }
-				};
-				return;
-			}
-			if (resp.streamingState === RobinStreamingState.ERROR) {
-				const end = closeCurrentBlock();
-				if (end) yield end;
-				notifyFirstEmit();
-				yield {
-					type: "finish",
-					reason: {
-						kind: "error",
-						failure: {
-							code: "ROBIN_STREAM_ERROR",
-							message: "Gemini App stream encountered an unexpected server error state"
-						}
-					}
-				};
-				return;
-			}
-		}
-		if (signal?.aborted) {
-			const end = closeCurrentBlock();
-			if (end) yield end;
-			yield {
-				type: "finish",
-				reason: {
-					kind: "aborted",
-					failure: {
-						message: "Gemini App request was aborted",
-						code: "ABORTED"
-					}
-				}
-			};
-			return;
-		}
-		const end = closeCurrentBlock();
-		if (end) yield end;
-		notifyFirstEmit();
-		yield {
-			type: "usage",
-			usage: {
-				inputTokens: 0,
-				outputTokens: Math.max(1, Math.ceil(accumulatedChars / 4))
-			}
-		};
-		yield {
-			type: "finish",
-			reason: { kind: "stop" }
-		};
-	} catch (err) {
-		const end = closeCurrentBlock();
-		if (end) yield end;
-		notifyFirstEmit();
-		yield {
-			type: "finish",
-			reason: {
-				kind: "error",
-				failure: {
-					code: "ROBIN_MAPPING_EXCEPTION",
-					message: err instanceof Error ? err.message : String(err)
-				}
-			}
-		};
-	}
-}
-/**
-* Parses incoming raw Protobuf frames from gRPC length-prefixed stream and maps them to StreamChunks.
-*/
-async function* parseRobinGrpcFramesToChunks(frames, signal, onFirstEmit) {
-	async function* decodeFrames() {
-		for await (const frame of frames) {
-			if (signal?.aborted) return;
-			try {
-				yield decodeProcessQueryResponse(frame);
-			} catch (err) {
-				throw new Error(`Failed to decode Gemini App Protobuf frame: ${err instanceof Error ? err.message : String(err)}`);
-			}
-		}
-	}
-	yield* mapRobinResponsesToChunks(decodeFrames(), signal, onFirstEmit);
-}
-//#endregion
-//#region packages/core/src/gemini-app/client.ts
-var GeminiAppError = class extends Error {
-	code;
-	httpStatus;
-	grpcStatus;
-	constructor(message, code, httpStatus, grpcStatus) {
-		super(message);
-		this.name = "GeminiAppError";
-		this.code = code;
-		this.httpStatus = httpStatus;
-		this.grpcStatus = grpcStatus;
-	}
-};
-/**
-* Standard HTTP/2 gRPC transport connecting to robinfrontend-pa.googleapis.com.
-*/
-async function defaultHttp2Transport(endpoint, headers, body, signal) {
-	return new Promise((resolve, reject) => {
-		if (signal?.aborted) return reject(new GeminiAppError("Request was aborted before connecting", "ABORTED"));
-		let client = null;
-		try {
-			client = http2.connect(`https://${endpoint}:443`);
-		} catch (err) {
-			return reject(new GeminiAppError(`Failed to establish HTTP/2 connection to ${endpoint}: ${err instanceof Error ? err.message : String(err)}`, "CONNECTION_FAILED"));
-		}
-		client.on("error", (err) => {
-			reject(new GeminiAppError(`HTTP/2 session error with ${endpoint}: ${err.message}`, "SESSION_ERROR"));
-		});
-		const req = client.request({
-			":method": "POST",
-			":path": ROBIN_PROCESS_QUERY_METHOD,
-			":scheme": "https",
-			":authority": endpoint,
-			...headers
-		});
-		let buffer = /* @__PURE__ */ new Uint8Array(0);
-		const frameQueue = [];
-		let notifyFrame = null;
-		let isStreamEnded = false;
-		let streamError = null;
-		const trailers = {};
-		const onAbort = () => {
-			req.close(http2.constants.NGHTTP2_CANCEL);
-			client?.close();
-			streamError = new GeminiAppError("Request was aborted", "ABORTED");
-			if (notifyFrame) notifyFrame();
-		};
-		signal?.addEventListener("abort", onAbort, { once: true });
-		req.on("response", (headers) => {
-			const status = Number(headers[":status"] || 200);
-			if (status !== 200) {
-				let code = "HTTP_ERROR";
-				if (status === 401 || status === 403) code = "AUTH_ERROR";
-				else if (status === 429) code = "RATE_LIMIT";
-				streamError = new GeminiAppError(`Robin gRPC endpoint returned HTTP status ${status}`, code, status);
-				if (notifyFrame) notifyFrame();
-			}
-		});
-		req.on("data", (chunk) => {
-			const chunkBytes = new Uint8Array(chunk);
-			const combined = new Uint8Array(buffer.length + chunkBytes.length);
-			combined.set(buffer, 0);
-			combined.set(chunkBytes, buffer.length);
-			try {
-				const { frames, rest } = decodeGrpcFrames(combined);
-				buffer = rest;
-				for (const frame of frames) frameQueue.push(frame);
-				if (notifyFrame) {
-					const fn = notifyFrame;
-					notifyFrame = null;
-					fn();
-				}
-			} catch (err) {
-				streamError = err instanceof Error ? err : new Error(String(err));
-				if (notifyFrame) notifyFrame();
-			}
-		});
-		req.on("trailers", (hdrs) => {
-			const grpcStatus = hdrs["grpc-status"];
-			const grpcMessage = hdrs["grpc-message"];
-			trailers["grpc-status"] = grpcStatus !== void 0 ? Number(grpcStatus) : void 0;
-			trailers["grpc-message"] = typeof grpcMessage === "string" ? grpcMessage : void 0;
-			if (grpcStatus !== void 0 && Number(grpcStatus) !== 0) {
-				const statusCode = Number(grpcStatus);
-				let code = "GRPC_ERROR";
-				if (statusCode === 16) code = "UNAUTHENTICATED";
-				else if (statusCode === 8) code = "RESOURCE_EXHAUSTED";
-				else if (statusCode === 4) code = "DEADLINE_EXCEEDED";
-				streamError = new GeminiAppError(`gRPC error (status ${statusCode}): ${grpcMessage || "unknown error"}`, code, void 0, statusCode);
-				if (notifyFrame) notifyFrame();
-			}
-		});
-		req.on("end", () => {
-			isStreamEnded = true;
-			client?.close();
-			signal?.removeEventListener("abort", onAbort);
-			if (notifyFrame) {
-				const fn = notifyFrame;
-				notifyFrame = null;
-				fn();
-			}
-		});
-		req.on("error", (err) => {
-			streamError = err;
-			client?.close();
-			signal?.removeEventListener("abort", onAbort);
-			if (notifyFrame) {
-				const fn = notifyFrame;
-				notifyFrame = null;
-				fn();
-			}
-		});
-		req.write(body);
-		req.end();
-		async function* frameGenerator() {
-			while (true) {
-				while (frameQueue.length > 0) yield frameQueue.shift();
-				if (streamError) throw streamError;
-				if (isStreamEnded) break;
-				await new Promise((r) => {
-					notifyFrame = r;
-				});
-			}
-		}
-		resolve({
-			frames: frameGenerator(),
-			getTrailers: () => trailers
-		});
-	});
-}
-var GeminiAppClient = class {
-	config;
-	transport;
-	constructor(config = {}, transport = defaultHttp2Transport) {
-		this.config = config;
-		this.transport = transport;
-	}
-	/**
-	* Primary streaming method: executes ProcessQuery gRPC call and streams StreamChunks.
-	*/
-	async *streamProcessQuery(request, signal, onFirstEmit) {
-		const token = await resolveGeminiAppToken(this.config);
-		if (!token) {
-			yield {
-				type: "finish",
-				reason: {
-					kind: "error",
-					failure: {
-						code: "AUTH_REQUIRED",
-						message: formatGeminiAppAuthGuidance()
-					}
-				}
-			};
-			return;
-		}
-		const endpoint = this.config.endpoint || "robinfrontend-pa.googleapis.com";
-		const grpcFrame = encodeGrpcFrame(encodeProcessQueryRequest(request));
-		const headers = {
-			"content-type": "application/grpc",
-			te: "trailers",
-			authorization: `Bearer ${token}`,
-			"user-agent": ROBIN_DEFAULT_USER_AGENT,
-			"x-goog-api-client": ROBIN_API_CLIENT
-		};
-		let transportResult;
-		try {
-			transportResult = await this.transport(endpoint, headers, grpcFrame, signal);
-		} catch (err) {
-			yield {
-				type: "finish",
-				reason: {
-					kind: signal?.aborted ? "aborted" : "error",
-					failure: {
-						code: err instanceof GeminiAppError ? err.code : "CONNECTION_ERROR",
-						message: err instanceof Error ? err.message : String(err)
-					}
-				}
-			};
-			return;
-		}
-		yield* parseRobinGrpcFramesToChunks(transportResult.frames, signal, onFirstEmit);
-	}
-	/**
-	* Non-streaming convenience method: gathers all stream chunks and returns accumulated text.
-	*/
-	async processQuery(request, signal) {
-		let accumulatedText = "";
-		let lastError = null;
-		for await (const chunk of this.streamProcessQuery(request, signal)) if (chunk.type === "text-delta") accumulatedText += chunk.text;
-		else if (chunk.type === "finish") {
-			const finish = chunk;
-			if (finish.reason?.kind === "error") lastError = new GeminiAppError(finish.reason.failure?.message || "Gemini App request failed", finish.reason.failure?.code || "UNKNOWN_ERROR");
-		}
-		if (lastError) throw lastError;
-		return {
-			text: accumulatedText,
-			response: { chatHistoryOutput: {
-				fullText: accumulatedText,
-				deltaText: ""
-			} }
-		};
-	}
-};
 //#endregion
 //#region src/host/gemini-app-adapter.ts
 const GEMINI_APP_MODELS = [
@@ -31440,6 +31868,84 @@ var GeminiAppAdapter = class extends LlmAdapter {
 	}
 };
 //#endregion
+//#region src/host/gemini-app-ask-tool.ts
+function defineGeminiAppAskTool(deps) {
+	return defineTool({
+		name: "gemini_app_ask",
+		description: "Delegate a standalone, tool-free task (such as writing an independent code snippet, summarizing text, translating, explaining concepts, or understanding images) to the Google Gemini App (Robin) API. Each call starts a fresh stateless session and does not support local tool calling. Use this when Gemini App offload/ask mode is enabled to offload tool-free work from the primary model.",
+		parameters: {
+			prompt: {
+				type: "string",
+				required: true,
+				description: "The standalone task or question for Gemini App."
+			},
+			system: {
+				type: "string",
+				description: "Optional system instructions for this stateless request."
+			},
+			mode: {
+				type: "string",
+				description: "Optional Gemini App mode: 'standard' or 'advanced' (default: 'standard')."
+			}
+		},
+		output: {
+			schema: { type: "string" },
+			render: (_args, value) => [{
+				type: "text",
+				text: value
+			}]
+		},
+		timeoutMs: 3e5,
+		async execute(args, exec) {
+			const prompt = typeof args.prompt === "string" ? args.prompt.trim() : "";
+			if (!prompt) throw new Error("gemini_app_ask: prompt must be a non-empty string");
+			const rawMode = typeof args.mode === "string" ? args.mode.trim().toLowerCase() : "";
+			if (rawMode !== "" && rawMode !== "standard" && rawMode !== "advanced") throw new Error(`gemini_app_ask: invalid mode "${args.mode}", expected "standard" or "advanced"`);
+			const cfg = deps.cfg();
+			const timeoutMs = cfg.geminiAppTimeoutMs || 12e4;
+			const clientConfig = {
+				endpoint: cfg.geminiAppEndpoint,
+				token: cfg.geminiAppToken,
+				timeoutMs,
+				defaultModel: cfg.geminiAppDefaultModel
+			};
+			const messages = [];
+			if (typeof args.system === "string" && args.system.trim() !== "") messages.push({
+				role: "system",
+				content: args.system.trim()
+			});
+			messages.push({
+				role: "user",
+				content: prompt
+			});
+			const request = buildProcessQueryRequest({
+				model: rawMode === "advanced" ? "gemini-app-advanced" : "gemini-app-default",
+				messages
+			}, clientConfig);
+			const client = new GeminiAppClient(clientConfig, deps.transport);
+			const controller = new AbortController();
+			let timeoutTimer;
+			if (timeoutMs > 0) timeoutTimer = setTimeout(() => {
+				controller.abort(/* @__PURE__ */ new Error(`gemini_app_ask timed out after ${timeoutMs}ms`));
+			}, timeoutMs);
+			const combinedSignal = exec?.signal ? AbortSignal.any([exec.signal, controller.signal]) : controller.signal;
+			try {
+				return (await client.processQuery(request, combinedSignal)).text;
+			} catch (err) {
+				if (err instanceof GeminiAppError) {
+					deps.log?.(`[gemini_app_ask] failed [${err.code}]: ${err.message}`);
+					throw new Error(`gemini_app_ask failed [${err.code}]: ${err.message}`);
+				}
+				const message = err instanceof Error ? err.message : String(err);
+				deps.log?.(`[gemini_app_ask] failed: ${message}`);
+				throw new Error(`gemini_app_ask failed: ${message}`);
+			} finally {
+				if (timeoutTimer) clearTimeout(timeoutTimer);
+			}
+		}
+	});
+}
+//#endregion
 //#region packages/core/src/account-models.ts
 /**
 * account-models.ts — the normalized "which grayscale models does this account actually
@@ -31516,10 +32022,13 @@ function familyQuotaSummary(info) {
 }
 /**
 * Normalize one account's recorded model entitlements. Read-only: `account` is never mutated,
-* every returned object is freshly built, and no clock or I/O is touched.
+* every returned object is freshly built, and no I/O is touched.
 */
-function describeAccountModels(account, poolBroadcastModels) {
+function describeAccountModels(account, poolBroadcastModels, now = Date.now()) {
 	const quotas = account.quotas ?? {};
+	const cooldowns = account.cooldowns ?? {};
+	const modelCooldowns = account.modelCooldowns ?? {};
+	const modelQuotas = account.modelQuotas ?? {};
 	const byFamily = /* @__PURE__ */ new Map();
 	const bucketFor = (family) => {
 		let bucket = byFamily.get(family);
@@ -31565,14 +32074,50 @@ function describeAccountModels(account, poolBroadcastModels) {
 	const familyModels = [];
 	let total = 0;
 	for (const family of MODEL_FAMILY_ORDER) {
+		const familyCd = cooldowns[family];
+		const familyCooldownUntil = familyCd && typeof familyCd === "object" ? (() => {
+			const until = finiteNumber(familyCd.cooldownUntil);
+			return until !== void 0 && until > now ? until : void 0;
+		})() : void 0;
+		let quota = familyQuotaSummary(quotas[family]);
+		if (familyCooldownUntil !== void 0) quota = {
+			...quota ?? {},
+			remainingFraction: 0,
+			rateLimitedUntil: familyCooldownUntil,
+			available: false
+		};
+		else if (quota?.remainingFraction === 0) quota.available = false;
+		const familyExhausted = quota?.remainingFraction === 0;
 		const bucket = byFamily.get(family);
-		const models = bucket ? [...bucket.values()].sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0) : [];
+		const models = bucket ? [...bucket.values()].sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0).map((entry) => {
+			const mq = modelQuotas[entry.id];
+			if (mq && typeof mq === "object") {
+				const mqRemaining = finiteNumber(mq.remainingFraction);
+				if (mqRemaining !== void 0 && (entry.remainingFraction === void 0 || mqRemaining < entry.remainingFraction)) entry.remainingFraction = mqRemaining;
+				const mqReset = trimmedString(mq.resetTime);
+				if (mqReset !== void 0 && (entry.resetTime === void 0 || mqRemaining === 0)) entry.resetTime = mqReset;
+			}
+			const modelCd = modelCooldowns[entry.id];
+			const modelCooldownUntil = modelCd && typeof modelCd === "object" ? (() => {
+				const until = finiteNumber(modelCd.cooldownUntil);
+				return until !== void 0 && until > now ? until : void 0;
+			})() : void 0;
+			const effectiveCooldownUntil = familyCooldownUntil !== void 0 && modelCooldownUntil !== void 0 ? Math.max(familyCooldownUntil, modelCooldownUntil) : familyCooldownUntil ?? modelCooldownUntil;
+			if (effectiveCooldownUntil !== void 0) {
+				entry.remainingFraction = 0;
+				entry.rateLimitedUntil = effectiveCooldownUntil;
+				entry.available = false;
+			} else if (familyExhausted || entry.remainingFraction === 0) {
+				entry.remainingFraction = 0;
+				entry.available = false;
+			}
+			return entry;
+		}) : [];
 		const described = {
 			family,
 			known: models.length > 0,
 			models
 		};
-		const quota = familyQuotaSummary(quotas[family]);
 		if (quota !== void 0) described.quota = quota;
 		total += models.length;
 		familyModels.push(described);
@@ -31654,6 +32199,94 @@ async function handleAccountModels(req, deps) {
 //#endregion
 //#region packages/core/src/oneshot.ts
 const INLINE_MAX_BYTES = 262144;
+function parseDurationStringMs(raw) {
+	if (typeof raw === "number" && Number.isFinite(raw) && raw > 0) return raw;
+	if (typeof raw !== "string") return void 0;
+	const s = raw.trim();
+	if (!s) return void 0;
+	const match = s.match(/^(\d+(?:\.\d+)?)\s*(ms|s|m|h)$/i);
+	if (match) {
+		const val = Number(match[1]);
+		const unit = match[2].toLowerCase();
+		if (!Number.isFinite(val) || val <= 0) return void 0;
+		if (unit === "ms") return Math.ceil(val);
+		if (unit === "s") return Math.ceil(val * 1e3);
+		if (unit === "m") return Math.ceil(val * 6e4);
+		if (unit === "h") return Math.ceil(val * 36e5);
+	}
+	const sec = Number(s);
+	if (Number.isFinite(sec) && sec > 0) return Math.ceil(sec * 1e3);
+}
+function parseRetryAfterHeaderMs(headerVal) {
+	if (!headerVal) return void 0;
+	const trimmed = headerVal.trim();
+	if (!trimmed) return void 0;
+	const sec = Number(trimmed);
+	if (Number.isFinite(sec) && sec > 0) return Math.ceil(sec * 1e3);
+	const dateMs = Date.parse(trimmed);
+	if (!Number.isNaN(dateMs) && dateMs > Date.now()) return dateMs - Date.now();
+}
+function parseRateLimit429(headers, errText, fallbackModelId) {
+	let retryAfterMs = parseRetryAfterHeaderMs(headers.get("retry-after"));
+	let modelId = fallbackModelId;
+	let resetTime;
+	let hasQuotaExhausted = false;
+	let hasRateLimitExceeded = false;
+	let hasResourceExhausted = false;
+	const scanText = (text) => {
+		if (/\bQUOTA_EXHAUSTED\b/i.test(text)) hasQuotaExhausted = true;
+		if (/\bRATE_LIMIT_EXCEEDED\b/i.test(text)) hasRateLimitExceeded = true;
+		if (/\bRESOURCE_EXHAUSTED\b/i.test(text)) hasResourceExhausted = true;
+	};
+	scanText(errText);
+	try {
+		const parsed = JSON.parse(errText);
+		const errObj = parsed.error && typeof parsed.error === "object" ? parsed.error : parsed;
+		if (typeof errObj.status === "string") scanText(errObj.status);
+		if (typeof errObj.reason === "string") scanText(errObj.reason);
+		if (typeof errObj.message === "string") scanText(errObj.message);
+		if (typeof errObj.quotaResetTimeStamp === "string" && errObj.quotaResetTimeStamp.trim()) resetTime = errObj.quotaResetTimeStamp.trim();
+		else if (typeof errObj.resetTime === "string" && errObj.resetTime.trim()) resetTime = errObj.resetTime.trim();
+		if (retryAfterMs === void 0) retryAfterMs = parseDurationStringMs(errObj.retryDelay) ?? parseDurationStringMs(errObj.quotaResetDelay);
+		const details = Array.isArray(errObj.details) ? errObj.details : [];
+		for (const item of details) {
+			if (!item || typeof item !== "object") continue;
+			const d = item;
+			if (typeof d.reason === "string") scanText(d.reason);
+			if (retryAfterMs === void 0) retryAfterMs = parseDurationStringMs(d.retryDelay) ?? parseDurationStringMs(d.quotaResetDelay);
+			if (!resetTime) {
+				if (typeof d.quotaResetTimeStamp === "string" && d.quotaResetTimeStamp.trim()) resetTime = d.quotaResetTimeStamp.trim();
+				else if (typeof d.resetTime === "string" && d.resetTime.trim()) resetTime = d.resetTime.trim();
+			}
+			if (d.metadata && typeof d.metadata === "object") {
+				const meta = d.metadata;
+				if (typeof meta.model === "string" && meta.model.trim()) modelId = meta.model.trim();
+				if (!resetTime) {
+					if (typeof meta.quotaResetTimeStamp === "string" && meta.quotaResetTimeStamp.trim()) resetTime = meta.quotaResetTimeStamp.trim();
+					else if (typeof meta.resetTime === "string" && meta.resetTime.trim()) resetTime = meta.resetTime.trim();
+				}
+				if (retryAfterMs === void 0) retryAfterMs = parseDurationStringMs(meta.retryDelay) ?? parseDurationStringMs(meta.quotaResetDelay);
+			}
+		}
+	} catch {}
+	if (retryAfterMs === void 0 && resetTime) {
+		const parsedReset = Date.parse(resetTime);
+		if (!Number.isNaN(parsedReset) && parsedReset > Date.now()) retryAfterMs = parsedReset - Date.now();
+	}
+	let quotaExhausted;
+	if (hasQuotaExhausted) quotaExhausted = true;
+	else if (hasRateLimitExceeded) quotaExhausted = false;
+	else if (hasResourceExhausted) quotaExhausted = true;
+	return {
+		retryAfterMs,
+		modelId,
+		quotaExhausted,
+		resetTime
+	};
+}
+function isAuthLevel403(errText) {
+	return /invalid_grant|UNAUTHENTICATED|API_KEY_INVALID|CREDENTIALS_INVALID|ACCOUNT_DISABLED|TOS_VIOLATION|VALIDATION_REQUIRED/i.test(errText);
+}
 function looksTextual(head) {
 	if (head === "") return true;
 	let suspicious = 0;
@@ -31748,12 +32381,27 @@ async function runAgyOnce(deps, req) {
 		};
 		const streamResult = await streamGenerateContent(token, requestBody, abortController.signal, proxyUrl, endpoints);
 		if (!streamResult.response.ok) {
+			const status = streamResult.response.status;
 			const errText = await streamResult.response.text().catch(() => "");
+			if (deps.pool && account) {
+				if (status === 429) {
+					const info = parseRateLimit429(streamResult.response.headers, errText, wireModel);
+					deps.pool.recordFailure(account.id, family, "rate_limited", info.retryAfterMs, {
+						modelId: info.modelId,
+						quotaExhausted: info.quotaExhausted,
+						resetTime: info.resetTime
+					});
+				} else if (status === 401) deps.pool.markAuthRequired(account.id, `Auth failed (401): ${errText}`);
+				else if (status === 403) {
+					if (isAuthLevel403(errText)) deps.pool.markAuthRequired(account.id, `Auth failed (403): ${errText}`);
+					else deps.pool.recordModelUnsupported(account.id, family, wireModel, `HTTP 403: ${errText}`);
+				}
+			}
 			return {
 				ok: false,
 				text: "",
 				conversationId: null,
-				error: `CloudCode API error HTTP ${streamResult.response.status}: ${errText}`,
+				error: `CloudCode API error HTTP ${status}: ${errText}`,
 				durationMs: Date.now() - startTime
 			};
 		}
@@ -31761,14 +32409,25 @@ async function runAgyOnce(deps, req) {
 		for await (const chunk of mapSseStreamToChunks$1(streamResult.response, abortController.signal)) if (chunk.type === "text-delta") fullText += chunk.text;
 		else if (chunk.type === "finish") {
 			const finishReason = chunk.reason;
-			if (finishReason?.kind === "error") return {
-				ok: false,
-				text: fullText,
-				conversationId: null,
-				error: finishReason.failure?.message || "Stream error",
-				durationMs: Date.now() - startTime
-			};
+			if (finishReason?.kind === "error") {
+				const errMsg = finishReason.failure?.message || "Stream error";
+				if (deps.pool && account) {
+					if (looksLikeRateLimit(errMsg)) deps.pool.recordFailure(account.id, family, "rate_limited", void 0, {
+						modelId: wireModel,
+						quotaExhausted: /QUOTA_EXHAUSTED|quota/i.test(errMsg)
+					});
+					else deps.pool.recordFailure(account.id, family, errMsg, void 0, { modelId: wireModel });
+				}
+				return {
+					ok: false,
+					text: fullText,
+					conversationId: null,
+					error: errMsg,
+					durationMs: Date.now() - startTime
+				};
+			}
 		}
+		if (deps.pool && account) deps.pool.recordSuccess(account.id, family, wireModel);
 		return {
 			ok: true,
 			text: fullText,
@@ -31981,6 +32640,7 @@ const HELP = [
 	"- `/ccl models` — refresh and list discovered models",
 	"- `/ccl effort <low|medium|high|default>` — default reasoning effort",
 	"- `/ccl gemini-token <token>` — configure Google OAuth bearer token for Gemini App (Robin)",
+	"- `/ccl gemini-offload <on|off>` — toggle offloading tool-free tasks to Gemini App",
 	"- `/ccl doctor` — write a diagnostic report and return its path",
 	"- `/ccl help` — this text"
 ].join("\n");
@@ -32078,6 +32738,18 @@ async function handle(deps, raw) {
 			deps.setOverride("geminiAppEnabled", true);
 			return ok("Gemini App token saved and enabled. Provider route `gemini-app` is now active.");
 		}
+		if (sub === "gemini-offload") {
+			const v = arg.trim().toLowerCase();
+			if (v === "on" || v === "true" || v === "1") {
+				deps.setOverride("geminiAppOffloadEnabled", true);
+				return ok("Gemini App offload enabled (`geminiAppOffloadEnabled = true`). Tool-free tasks within context limits will route to Gemini App.");
+			}
+			if (v === "off" || v === "false" || v === "0") {
+				deps.setOverride("geminiAppOffloadEnabled", false);
+				return ok("Gemini App offload disabled (`geminiAppOffloadEnabled = false`).");
+			}
+			return err("usage: /ccl gemini-offload <on|off>");
+		}
 		return ok(HELP);
 	} catch (e) {
 		return err(e instanceof Error ? e.message : String(e));
@@ -32135,7 +32807,7 @@ async function renderStatus(deps) {
 		"- default effort: " + (cfg.defaultEffort !== "" ? cfg.defaultEffort : "model default"),
 		"- catalog: " + cat.source + " (" + cat.models.length + " models)",
 		"- pool accounts: " + accounts.length + " accounts configured",
-		...cfg.geminiAppEnabled ? [`- gemini-app: enabled (endpoint: ${cfg.geminiAppEndpoint}, token: ${cfg.geminiAppToken ? "configured" : "not configured"})`] : [],
+		...cfg.geminiAppEnabled || cfg.geminiAppOffloadEnabled || cfg.geminiAppAskToolEnabled ? [`- gemini-app: ${cfg.geminiAppEnabled ? "enabled" : "disabled"} (endpoint: ${cfg.geminiAppEndpoint}, token: ${cfg.geminiAppToken ? "configured" : "not configured"}, offload: ${cfg.geminiAppOffloadEnabled ? "on" : "off"}, ask-tool: ${cfg.geminiAppAskToolEnabled ? "on" : "off"})`] : [],
 		...reauthNeeded > 0 ? [`- 需要重新授权: ${reauthNeeded} 个账号的 Google 授权 scope 不足，请对这些账号执行 \`${REAUTH_COMMAND}\``] : [],
 		"- last call: " + (last ? (last.ok ? "OK" : "FAIL: " + last.code) + " (" + last.durationMs + "ms, " + last.model + ")" : "(none yet)")
 	].join("\n");
@@ -33914,6 +34586,10 @@ function apply(ctx, entryConfig = {}) {
 		}
 		return null;
 	};
+	const geminiAdapter = new GeminiAppAdapter({
+		getConfig,
+		log
+	});
 	const adapter = new AgyAdapter({
 		getConfig,
 		catalog,
@@ -33924,11 +34600,13 @@ function apply(ctx, entryConfig = {}) {
 		acquire: () => semaphore.acquire(),
 		log,
 		readImage,
+		geminiAppAdapter: geminiAdapter,
 		reauthGuidanceFor: reauthGuidanceResolver((accountId) => pool.getAccounts().find((account) => account.id === accountId)),
 		onRun: (info) => {
 			lastRun = info;
 		}
 	});
+	let onOverrideChanged = null;
 	const setOverride = (key, value) => {
 		const file = overridesPath();
 		const current = readOverrides(file);
@@ -33939,6 +34617,7 @@ function apply(ctx, entryConfig = {}) {
 		} catch (e) {
 			log("failed to persist override: " + String(e));
 		}
+		onOverrideChanged?.();
 	};
 	if (getConfig().enabled) try {
 		ctx.llm.registerAdapter([PROVIDER_ID], adapter);
@@ -33946,16 +34625,18 @@ function apply(ctx, entryConfig = {}) {
 	} catch (e) {
 		log("adapter registration failed: " + String(e));
 	}
-	if (getConfig().geminiAppEnabled) try {
-		const geminiAdapter = new GeminiAppAdapter({
-			getConfig,
-			log
-		});
-		ctx.llm.registerAdapter([GEMINI_APP_PROVIDER_ID], geminiAdapter);
-		log("registered provider route: gemini-app (Google Gemini App / Robin)");
-	} catch (e) {
-		log("gemini-app adapter registration failed: " + String(e));
-	}
+	let geminiAdapterRegistered = false;
+	const syncGeminiAppAdapter = () => {
+		if (geminiAdapterRegistered || !getConfig().geminiAppEnabled) return;
+		try {
+			ctx.llm.registerAdapter([GEMINI_APP_PROVIDER_ID], geminiAdapter);
+			geminiAdapterRegistered = true;
+			log("registered provider route: gemini-app (Google Gemini App / Robin)");
+		} catch (e) {
+			log("gemini-app adapter registration failed: " + String(e));
+		}
+	};
+	syncGeminiAppAdapter();
 	const cmdDeps = {
 		cfg: getConfig,
 		auth: () => auth,
@@ -33978,6 +34659,7 @@ function apply(ctx, entryConfig = {}) {
 	ctx.commands.register(cclCommandDefinition(cmdDeps, "cloudcode"));
 	const toolsSvcRef = { current: null };
 	const askToolDispose = { current: null };
+	const geminiAppAskToolDispose = { current: null };
 	const syncAskTool = () => {
 		const want = getConfig().askTool;
 		if (want && askToolDispose.current === null && toolsSvcRef.current) {
@@ -33993,12 +34675,32 @@ function apply(ctx, entryConfig = {}) {
 			askToolDispose.current = null;
 		}
 	};
+	const syncGeminiAppAskTool = () => {
+		const want = getConfig().geminiAppAskToolEnabled;
+		if (want && geminiAppAskToolDispose.current === null && toolsSvcRef.current) {
+			const reg = toolsSvcRef.current.register(defineGeminiAppAskTool({
+				cfg: getConfig,
+				log
+			}));
+			geminiAppAskToolDispose.current = typeof reg === "function" ? reg : null;
+		} else if (!want && geminiAppAskToolDispose.current !== null) {
+			geminiAppAskToolDispose.current();
+			geminiAppAskToolDispose.current = null;
+		}
+	};
+	onOverrideChanged = () => {
+		syncAskTool();
+		syncGeminiAppAskTool();
+	};
 	ctx.inject(["tools"], (sub) => {
 		toolsSvcRef.current = sub.get("tools");
 		syncAskTool();
+		syncGeminiAppAskTool();
 		return () => {
 			if (askToolDispose.current !== null) askToolDispose.current();
 			askToolDispose.current = null;
+			if (geminiAppAskToolDispose.current !== null) geminiAppAskToolDispose.current();
+			geminiAppAskToolDispose.current = null;
 			toolsSvcRef.current = null;
 		};
 	});
@@ -34066,6 +34768,13 @@ function apply(ctx, entryConfig = {}) {
 					defaultModel: cfg.defaultModel,
 					defaultEffort: cfg.defaultEffort,
 					askTool: cfg.askTool,
+					geminiAppEnabled: cfg.geminiAppEnabled,
+					geminiAppOffloadEnabled: cfg.geminiAppOffloadEnabled,
+					geminiAppAskToolEnabled: cfg.geminiAppAskToolEnabled,
+					geminiAppFreshSessionSingleTurn: cfg.geminiAppFreshSessionSingleTurn,
+					geminiAppOffloadFallbackToAgy: cfg.geminiAppOffloadFallbackToAgy,
+					geminiAppOffloadMaxContextChars: cfg.geminiAppOffloadMaxContextChars,
+					hasGeminiAppToken: await resolveGeminiAppToken({ token: cfg.geminiAppToken }) !== null,
 					auth: authStatus,
 					poolAuth: poolAuth.status(),
 					pool: pool.getPoolData(),
@@ -34285,14 +34994,36 @@ function apply(ctx, entryConfig = {}) {
 					"defaultModel",
 					"defaultEffort",
 					"askTool",
-					"baseUrl"
+					"baseUrl",
+					"geminiAppEnabled",
+					"geminiAppOffloadEnabled",
+					"geminiAppAskToolEnabled",
+					"geminiAppFreshSessionSingleTurn",
+					"geminiAppOffloadFallbackToAgy",
+					"geminiAppOffloadMaxContextChars",
+					"geminiAppToken"
 				].includes(key)) {
 					sendJson(res, 400, { error: "key not settable" });
 					return;
 				}
-				setOverride(key, body.value);
+				if (key === "geminiAppToken") {
+					const token = typeof body.value === "string" ? body.value.trim() : "";
+					if (token.length > 0) {
+						saveGeminiAppToken(token);
+						setOverride("geminiAppToken", token);
+					} else setOverride("geminiAppToken", void 0);
+				} else {
+					setOverride(key, body.value);
+					if (key === "geminiAppOffloadEnabled" && body.value === true && !getConfig().geminiAppEnabled) setOverride("geminiAppEnabled", true);
+				}
 				syncAskTool();
-				sendJson(res, 200, {
+				syncGeminiAppAskTool();
+				syncGeminiAppAdapter();
+				sendJson(res, 200, key === "geminiAppToken" ? {
+					ok: true,
+					key,
+					hasGeminiAppToken: await resolveGeminiAppToken({ token: getConfig().geminiAppToken }) !== null
+				} : {
 					ok: true,
 					key,
 					value: body.value
@@ -34631,6 +35362,7 @@ function apply(ctx, entryConfig = {}) {
 		auth.cancel();
 		poolAuth.cancel();
 		if (askToolDispose.current !== null) askToolDispose.current();
+		if (geminiAppAskToolDispose.current !== null) geminiAppAskToolDispose.current();
 		return () => void 0;
 	});
 }

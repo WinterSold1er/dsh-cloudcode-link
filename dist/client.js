@@ -1502,6 +1502,7 @@ body[data-theme="dark"] {
 				const [auditSessionsLoading, setAuditSessionsLoading] = useState(false);
 				const [auditError, setAuditError] = useState(null);
 				const [cfgDrafts, setCfgDrafts] = useState({});
+				const [geminiAppTokenInput, setGeminiAppTokenInput] = useState("");
 				const flowStartedRef = useRef(false);
 				const pollOkRef = useRef(statusCache !== null);
 				const lastUpdatedRef = useRef(statusCache ? Date.now() : null);
@@ -1792,10 +1793,22 @@ body[data-theme="dark"] {
 					if (await runPoolAction(`config:${key}`, "/config", {
 						key,
 						value
-					}, `${key} 已保存`)) setStatus((prev) => prev ? {
-						...prev,
-						[key]: value
-					} : prev);
+					}, `${key} 已保存`)) setStatus((prev) => {
+						if (!prev) return prev;
+						if (key === "geminiAppToken") return {
+							...prev,
+							hasGeminiAppToken: typeof value === "string" && value.trim().length > 0
+						};
+						if (key === "geminiAppOffloadEnabled" && value === true) return {
+							...prev,
+							geminiAppOffloadEnabled: true,
+							geminiAppEnabled: true
+						};
+						return {
+							...prev,
+							[key]: value
+						};
+					});
 				};
 				const setPrimary = async (id) => {
 					await runPoolAction("primary", "/pool/primary", { id }, "已设为主用账号");
@@ -2914,14 +2927,59 @@ body[data-theme="dark"] {
 						onClick: () => void setCfg(key, draft.trim())
 					}, "保存"));
 				};
+				const renderSwitchRow = (key, title, subtitle, ariaLabel, onLabel = "已开启", offLabel = "已关闭") => {
+					const checked = status?.[key] === true;
+					return h("div", { style: {
+						display: "flex",
+						gap: "var(--agy-space-2)",
+						alignItems: "center",
+						padding: "10px 0",
+						borderBottom: "1px solid var(--agy-border-subtle)",
+						flexWrap: "wrap"
+					} }, h("div", { style: {
+						width: "210px",
+						flexShrink: 0
+					} }, h("div", { style: {
+						fontSize: "var(--agy-font-sm)",
+						fontWeight: 700,
+						color: "var(--agy-text-primary)"
+					} }, title), h("div", { style: {
+						fontSize: "var(--agy-font-xs)",
+						color: "var(--agy-text-tertiary)",
+						marginTop: "2px"
+					} }, subtitle)), h("button", {
+						className: "agy-btn",
+						role: "switch",
+						"aria-checked": checked,
+						"aria-label": ariaLabel,
+						style: {
+							...S.btnSm,
+							background: checked ? "var(--agy-accent)" : "var(--agy-bg-btn)",
+							color: checked ? "var(--agy-on-accent)" : "var(--agy-text-btn)",
+							border: `1px solid ${checked ? "var(--agy-border-btn-primary)" : "var(--agy-border-btn)"}`
+						},
+						disabled: isBusy,
+						onClick: () => void setCfg(String(key), !checked)
+					}, checked ? onLabel : offLabel));
+				};
 				const renderConfigSection = () => {
+					const hasToken = status?.hasGeminiAppToken === true;
 					return h("div", null, h("div", {
 						className: "agy-rise",
 						style: S.card
 					}, h("div", {
 						style: S.panelCaption,
 						marginBottom: "var(--agy-space-1)"
-					}, "可写配置（POST /config）"), renderConfigRow("defaultModel", "默认模型 (defaultModel)", status?.defaultModel ?? "当前值将在状态轮询后回填"), renderConfigRow("defaultEffort", "默认 Effort (defaultEffort)", status?.defaultEffort ?? "例如 low / medium / high"), renderConfigRow("baseUrl", "上游地址 (baseUrl)", "高级：仅在你明确需要切换上游时填写"), h("div", { style: {
+					}, "可写配置（POST /config）"), renderConfigRow("defaultModel", "默认模型 (defaultModel)", status?.defaultModel ?? "当前值将在状态轮询后回填"), renderConfigRow("defaultEffort", "默认 Effort (defaultEffort)", status?.defaultEffort ?? "例如 low / medium / high"), renderConfigRow("baseUrl", "上游地址 (baseUrl)", "高级：仅在你明确需要切换上游时填写"), renderSwitchRow("askTool", "Ask 工具注册 (askTool)", "在 DSH 中注册 agy ask 工具开关", "切换 Ask 工具注册", "已注册", "未注册")), h("div", {
+						className: "agy-rise",
+						style: {
+							...S.card,
+							marginTop: "var(--agy-space-3)"
+						}
+					}, h("div", {
+						style: S.panelCaption,
+						marginBottom: "var(--agy-space-1)"
+					}, "Gemini App (Robin) 双轨分流"), renderSwitchRow("geminiAppOffloadEnabled", "无关工具任务分流至 Gemini App", "启用后将无工具调用请求自动分流至 Gemini App API（并同步启用 geminiAppEnabled）", "切换无关工具任务分流至 Gemini App"), renderSwitchRow("geminiAppAskToolEnabled", "委派工具 (gemini_app_ask)", "在主 Agent 会话中注册 gemini_app_ask 工具，供主动委派独立无工具子任务", "切换委派工具 gemini_app_ask"), renderSwitchRow("geminiAppFreshSessionSingleTurn", "小上下文单轮裁剪", "开启后在上下文较小时仅保留 system 与最后一条 user 消息起新会话", "切换小上下文单轮裁剪"), renderSwitchRow("geminiAppOffloadFallbackToAgy", "失败自动回退 AGY", "Gemini App 首包前失败时自动无缝回退至 AGY 账号池", "切换失败自动回退 AGY"), h("div", { style: {
 						display: "flex",
 						gap: "var(--agy-space-2)",
 						alignItems: "center",
@@ -2934,24 +2992,30 @@ body[data-theme="dark"] {
 						fontSize: "var(--agy-font-sm)",
 						fontWeight: 700,
 						color: "var(--agy-text-primary)"
-					} }, "Ask 工具注册 (askTool)"), h("div", { style: {
+					} }, "Gemini App Token"), h("div", { style: {
 						fontSize: "var(--agy-font-xs)",
-						color: "var(--agy-text-tertiary)",
+						color: hasToken ? "var(--agy-text-success, #22c55e)" : "var(--agy-text-tertiary)",
 						marginTop: "2px"
-					} }, "在 DSH 中注册 agy ask 工具开关")), h("button", {
-						className: "agy-btn",
-						role: "switch",
-						"aria-checked": status?.askTool === true,
-						"aria-label": "切换 Ask 工具注册",
+					} }, hasToken ? "状态：已配置" : "状态：未配置")), h("input", {
+						type: "password",
+						value: geminiAppTokenInput,
+						placeholder: hasToken ? "已配置（输入新 Token 可覆盖，留空保存可清除）" : "粘贴 ya29.m.* Assistant OAuth Token",
+						"aria-label": "Gemini App Token",
 						style: {
-							...S.btnSm,
-							background: status?.askTool === true ? "var(--agy-accent)" : "var(--agy-bg-btn)",
-							color: status?.askTool === true ? "var(--agy-on-accent)" : "var(--agy-text-btn)",
-							border: `1px solid ${status?.askTool === true ? "var(--agy-border-btn-primary)" : "var(--agy-border-btn)"}`
+							...S.input,
+							flex: "1 1 240px",
+							minWidth: "200px"
 						},
+						onChange: (e) => setGeminiAppTokenInput(e.target.value)
+					}), h("button", {
+						className: "agy-btn",
+						style: S.btnSm,
 						disabled: isBusy,
-						onClick: () => void setCfg("askTool", !(status?.askTool === true))
-					}, status?.askTool === true ? "已注册" : "未注册"))));
+						onClick: () => {
+							const val = geminiAppTokenInput.trim();
+							setCfg("geminiAppToken", val).then(() => setGeminiAppTokenInput(""));
+						}
+					}, "保存"))));
 				};
 				const SECTIONS = [
 					{

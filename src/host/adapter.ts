@@ -33,6 +33,8 @@ import { convertMessages, type ImageReader } from './message-converter.ts'
 import { mapSseStreamToChunks } from './sse-mapper.ts'
 import type { StatsCollector, RequestMetricStatus } from './stats.ts'
 import { describeAccountAuth, reauthGuidance } from './account-health.ts'
+import type { GeminiAppAdapter } from './gemini-app-adapter.ts'
+import { streamWithGeminiAppOffload } from './gemini-app-offload.ts'
 
 /**
  * Connect-phase budget for ONE upstream attempt.
@@ -291,6 +293,8 @@ export interface AgyAdapterDeps {
    * byte-identical requestId. The connect/deadline timers always use the real clock.
    */
   now?: () => number
+  /** Optional Gemini App adapter for transparent offloading of tool-free tasks. */
+  geminiAppAdapter?: GeminiAppAdapter
 }
 
 export class AgyAdapter extends LlmAdapter {
@@ -455,6 +459,19 @@ export class AgyAdapter extends LlmAdapter {
   }
 
   async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+    if (this.deps.geminiAppAdapter) {
+      yield* streamWithGeminiAppOffload(options, {
+        getConfig: this.deps.getConfig,
+        geminiAdapter: this.deps.geminiAppAdapter,
+        fallbackToAgy: (opts) => this.streamAgy(opts),
+        log: this.deps.log,
+      })
+      return
+    }
+    yield* this.streamAgy(options)
+  }
+
+  private async *streamAgy(options: GenerateOptions): AsyncIterable<StreamChunk> {
     const startTime = Date.now()
     const releaseGlobal = this.deps.acquire ? await this.deps.acquire() : null
 

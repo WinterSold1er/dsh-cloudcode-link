@@ -11,6 +11,8 @@ import { dshHome, overridesPath, readOverrides, resolveConfig, stateDir } from '
 import { PROVIDER_ID, GEMINI_APP_PROVIDER_ID, type PluginConfig } from './common/types.ts'
 import { AgyAdapter } from './host/adapter.ts'
 import { GeminiAppAdapter } from './host/gemini-app-adapter.ts'
+import { defineGeminiAppAskTool } from './host/gemini-app-ask-tool.ts'
+import { resolveGeminiAppToken, saveGeminiAppToken } from './host/gemini-app.ts'
 import { describePoolAuthHealth, reauthGuidanceResolver } from './host/account-health.ts'
 import { handleAccountModels } from './host/account-models.ts'
 import { defineAgyAskTool } from './host/ask-tool.ts'
@@ -226,6 +228,11 @@ export function apply(ctx: Context, entryConfig: Record<string, unknown> = {}): 
     return null
   }
 
+  const geminiAdapter = new GeminiAppAdapter({
+    getConfig,
+    log,
+  })
+
   const adapter = new AgyAdapter({
     getConfig,
     catalog,
@@ -236,6 +243,7 @@ export function apply(ctx: Context, entryConfig: Record<string, unknown> = {}): 
     acquire: () => semaphore.acquire(),
     log,
     readImage,
+    geminiAppAdapter: geminiAdapter,
     // The failover loop must not guess whether a 403 means "this account does not serve this
     // model" or "this account's Google grant is missing a scope". It asks this resolver, which
     // answers from the account's own recorded grant and returns undefined otherwise.
@@ -247,6 +255,7 @@ export function apply(ctx: Context, entryConfig: Record<string, unknown> = {}): 
     },
   })
 
+  let onOverrideChanged: (() => void) | null = null
   const setOverride = (key: string, value: unknown): void => {
     const file = overridesPath()
     const current = readOverrides(file)
@@ -257,6 +266,7 @@ export function apply(ctx: Context, entryConfig: Record<string, unknown> = {}): 
     } catch (e) {
       log('failed to persist override: ' + String(e))
     }
+    onOverrideChanged?.()
   }
 
   // ---- llm registration (dormant-safe) ----
@@ -269,18 +279,18 @@ export function apply(ctx: Context, entryConfig: Record<string, unknown> = {}): 
     }
   }
 
-  if (getConfig().geminiAppEnabled) {
+  let geminiAdapterRegistered = false
+  const syncGeminiAppAdapter = (): void => {
+    if (geminiAdapterRegistered || !getConfig().geminiAppEnabled) return
     try {
-      const geminiAdapter = new GeminiAppAdapter({
-        getConfig,
-        log,
-      })
       ctx.llm.registerAdapter([GEMINI_APP_PROVIDER_ID], geminiAdapter)
+      geminiAdapterRegistered = true
       log('registered provider route: ' + GEMINI_APP_PROVIDER_ID + ' (Google Gemini App / Robin)')
     } catch (e) {
       log('gemini-app adapter registration failed: ' + String(e))
     }
   }
+  syncGeminiAppAdapter()
 
   // ---- /ccl (and /cloudcode alias) command ----
   const cmdDeps = {
@@ -304,9 +314,10 @@ export function apply(ctx: Context, entryConfig: Record<string, unknown> = {}): 
   ctx.commands.register(cclCommandDefinition(cmdDeps, 'ccl'))
   ctx.commands.register(cclCommandDefinition(cmdDeps, 'cloudcode'))
 
-  // ---- tool registration (agy_ask) ----
+  // ---- tool registration (agy_ask & gemini_app_ask) ----
   const toolsSvcRef: { current: { register: (t: unknown) => unknown } | null } = { current: null }
   const askToolDispose = { current: null as null | (() => void) }
+  const geminiAppAskToolDispose = { current: null as null | (() => void) }
   const syncAskTool = (): void => {
     const want = getConfig().askTool
     if (want && askToolDispose.current === null && toolsSvcRef.current) {
@@ -319,13 +330,32 @@ export function apply(ctx: Context, entryConfig: Record<string, unknown> = {}): 
       askToolDispose.current = null
     }
   }
+  const syncGeminiAppAskTool = (): void => {
+    const want = getConfig().geminiAppAskToolEnabled
+    if (want && geminiAppAskToolDispose.current === null && toolsSvcRef.current) {
+      const reg = toolsSvcRef.current.register(
+        defineGeminiAppAskTool({ cfg: getConfig, log }),
+      ) as unknown as () => void
+      geminiAppAskToolDispose.current = typeof reg === 'function' ? reg : null
+    } else if (!want && geminiAppAskToolDispose.current !== null) {
+      geminiAppAskToolDispose.current()
+      geminiAppAskToolDispose.current = null
+    }
+  }
+  onOverrideChanged = () => {
+    syncAskTool()
+    syncGeminiAppAskTool()
+  }
 
   ctx.inject(['tools'], (sub) => {
     toolsSvcRef.current = sub.get('tools') as { register: (t: unknown) => unknown }
     syncAskTool()
+    syncGeminiAppAskTool()
     return () => {
       if (askToolDispose.current !== null) askToolDispose.current()
       askToolDispose.current = null
+      if (geminiAppAskToolDispose.current !== null) geminiAppAskToolDispose.current()
+      geminiAppAskToolDispose.current = null
       toolsSvcRef.current = null
     }
   })
@@ -390,6 +420,13 @@ export function apply(ctx: Context, entryConfig: Record<string, unknown> = {}): 
           defaultModel: cfg.defaultModel,
           defaultEffort: cfg.defaultEffort,
           askTool: cfg.askTool,
+          geminiAppEnabled: cfg.geminiAppEnabled,
+          geminiAppOffloadEnabled: cfg.geminiAppOffloadEnabled,
+          geminiAppAskToolEnabled: cfg.geminiAppAskToolEnabled,
+          geminiAppFreshSessionSingleTurn: cfg.geminiAppFreshSessionSingleTurn,
+          geminiAppOffloadFallbackToAgy: cfg.geminiAppOffloadFallbackToAgy,
+          geminiAppOffloadMaxContextChars: cfg.geminiAppOffloadMaxContextChars,
+          hasGeminiAppToken: (await resolveGeminiAppToken({ token: cfg.geminiAppToken })) !== null,
           auth: authStatus,
           poolAuth: poolAuth.status(),
           pool: pool.getPoolData(),
@@ -598,14 +635,47 @@ export function apply(ctx: Context, entryConfig: Record<string, unknown> = {}): 
         }
         const body = await readBody(req)
         const key = typeof body.key === 'string' ? body.key : ''
-        const allowed = ['defaultModel', 'defaultEffort', 'askTool', 'baseUrl']
+        const allowed = [
+          'defaultModel',
+          'defaultEffort',
+          'askTool',
+          'baseUrl',
+          'geminiAppEnabled',
+          'geminiAppOffloadEnabled',
+          'geminiAppAskToolEnabled',
+          'geminiAppFreshSessionSingleTurn',
+          'geminiAppOffloadFallbackToAgy',
+          'geminiAppOffloadMaxContextChars',
+          'geminiAppToken',
+        ]
         if (!allowed.includes(key)) {
           sendJson(res as RawRes, 400, { error: 'key not settable' })
           return
         }
-        setOverride(key, body.value)
+        if (key === 'geminiAppToken') {
+          const token = typeof body.value === 'string' ? body.value.trim() : ''
+          if (token.length > 0) {
+            saveGeminiAppToken(token)
+            setOverride('geminiAppToken', token)
+          } else {
+            setOverride('geminiAppToken', undefined)
+          }
+        } else {
+          setOverride(key, body.value)
+          if (key === 'geminiAppOffloadEnabled' && body.value === true && !getConfig().geminiAppEnabled) {
+            setOverride('geminiAppEnabled', true)
+          }
+        }
         syncAskTool()
-        sendJson(res as RawRes, 200, { ok: true, key, value: body.value })
+        syncGeminiAppAskTool()
+        syncGeminiAppAdapter()
+        sendJson(
+          res as RawRes,
+          200,
+          key === 'geminiAppToken'
+            ? { ok: true, key, hasGeminiAppToken: (await resolveGeminiAppToken({ token: getConfig().geminiAppToken })) !== null }
+            : { ok: true, key, value: body.value },
+        )
       })()
     })
 
@@ -973,6 +1043,7 @@ export function apply(ctx: Context, entryConfig: Record<string, unknown> = {}): 
     auth.cancel()
     void poolAuth.cancel()
     if (askToolDispose.current !== null) askToolDispose.current()
+    if (geminiAppAskToolDispose.current !== null) geminiAppAskToolDispose.current()
     return () => undefined
   })
 }
