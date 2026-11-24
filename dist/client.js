@@ -4,6 +4,233 @@ window.__ModuleLoader__.load({
 		var module = { exports: {} };
 		var exports = module.exports;
 		Object.defineProperty(exports, Symbol.toStringTag, { value: "Module" });
+		//#region src/client/account-models.ts
+		const EMPTY_PANEL = {
+			status: "idle",
+			payload: null,
+			source: "quota-fallback",
+			error: null,
+			refreshError: null,
+			fetchedAt: null
+		};
+		const QUOTA_FAMILY_ORDER = [
+			"google",
+			"anthropic",
+			"openai"
+		];
+		/**
+		* Build the same payload shape from the quota data embedded in status.pool, so the panel
+		* can degrade gracefully when /pool/account-models is unavailable. The UI always labels
+		* this source as a fallback.
+		*/
+		function buildQuotaFallbackPayload(acc) {
+			const familyModels = [];
+			for (const family of QUOTA_FAMILY_ORDER) {
+				const quota = acc.quotas[family];
+				if (!quota || !Array.isArray(quota.models) || quota.models.length === 0) continue;
+				const models = quota.models.filter((m) => typeof m.modelId === "string" && m.modelId.trim() !== "").map((m) => ({
+					id: m.modelId,
+					name: m.displayName || m.modelId,
+					family,
+					remainingFraction: m.remainingFraction,
+					resetTime: m.resetTime
+				}));
+				if (models.length === 0) continue;
+				familyModels.push({
+					family,
+					known: true,
+					models
+				});
+			}
+			return {
+				ok: true,
+				id: acc.id,
+				alias: acc.alias,
+				email: acc.email,
+				known: familyModels.length > 0,
+				total: familyModels.reduce((n, g) => n + g.models.length, 0),
+				refreshedAt: null,
+				familyModels
+			};
+		}
+		function selectPanelPayload(panel, acc) {
+			if (panel?.payload) return {
+				payload: panel.payload,
+				usingFallback: panel.source !== "api"
+			};
+			return {
+				payload: buildQuotaFallbackPayload(acc),
+				usingFallback: true
+			};
+		}
+		/** Discovered model ids for one account (last payload if any, quota fallback otherwise). */
+		function accountModelIds(acc, panel) {
+			const { payload } = selectPanelPayload(panel, acc);
+			const ids = [];
+			for (const group of payload.familyModels) for (const model of group.models) ids.push(model.id);
+			return ids;
+		}
+		/**
+		* Panel state after a failed initial GET: the previous payload and its source are kept
+		* (an empty panel stays an empty panel); the error is recorded for the visible strip.
+		*/
+		function markPanelLoadFailure(prev, error, now) {
+			return {
+				...prev,
+				status: "error",
+				payload: prev.payload,
+				source: prev.source,
+				error,
+				refreshError: null,
+				fetchedAt: now
+			};
+		}
+		/** Panel state after a failed POST refresh: same payload preservation plus the refreshError marker. */
+		function markPanelRefreshFailure(prev, error, now) {
+			return {
+				...prev,
+				status: "error",
+				payload: prev.payload,
+				source: prev.source,
+				error,
+				refreshError: error,
+				fetchedAt: now
+			};
+		}
+		/** Panel state after a successful fetch (GET or refresh): the fresh payload becomes the panel's truth. */
+		function markPanelSuccess(prev, payload, refreshError, now) {
+			return {
+				...prev,
+				status: "ok",
+				payload,
+				source: "api",
+				error: null,
+				refreshError,
+				fetchedAt: now
+			};
+		}
+		/** A loaded panel is considered fresh for this long before on-demand rediscovery re-triggers. */
+		const PANEL_TTL_MS = 6e4;
+		/**
+		* Which accounts the auto-load effect should (re)load right now:
+		* - panels never loaded (missing / idle), and
+		* - healthy panels whose data exceeded the TTL.
+		* 'loading' and 'error' panels are deliberately excluded: a broken endpoint is retried
+		* only by an explicit user action, never implicitly on every status-poll reference change.
+		*/
+		function collectStalePanelAccounts(panels, accounts, now, ttlMs = PANEL_TTL_MS) {
+			return accounts.filter((acc) => {
+				const panel = panels[acc.id];
+				if (!panel || panel.status === "idle") return true;
+				if (panel.status === "loading" || panel.status === "error") return false;
+				return panel.fetchedAt !== null && now - panel.fetchedAt > ttlMs;
+			});
+		}
+		/** Single source of truth for the expandable model panel's DOM id (aria-controls wiring). */
+		function modelsPanelDomId(accId) {
+			return `models-panel-${accId}`;
+		}
+		/** Human-readable reset window: absolute clock + remaining countdown, weekly vs 5h aware. */
+		function formatQuotaWindow(resetTimeStr, nowMs = Date.now()) {
+			if (!resetTimeStr) return { resetText: "" };
+			try {
+				const d = new Date(resetTimeStr);
+				const diffMs = d.getTime() - nowMs;
+				if (!Number.isFinite(diffMs) || diffMs <= 0) return { resetText: "" };
+				const totalMins = Math.ceil(diffMs / 6e4);
+				const days = Math.floor(totalMins / 1440);
+				const hours = Math.floor(totalMins % 1440 / 60);
+				const mins = totalMins % 60;
+				const isWeekly = days >= 1;
+				const countdown = days > 0 ? `${days}d${hours}h` : hours > 0 ? `${hours}h${mins}m` : `${mins}m`;
+				const hh = d.getHours().toString().padStart(2, "0");
+				const mm = d.getMinutes().toString().padStart(2, "0");
+				return { resetText: isWeekly ? `${d.getMonth() + 1}/${d.getDate()} ${hh}:${mm} (${countdown})` : `${hh}:${mm} (${countdown})` };
+			} catch {
+				return { resetText: "" };
+			}
+		}
+		/** Size of the discovered-model union across all accounts (the denominator of coverage). */
+		function computeModelUnion(panels, accounts) {
+			const union = /* @__PURE__ */ new Set();
+			for (const acc of accounts) for (const id of accountModelIds(acc, panels[acc.id])) union.add(id);
+			return union.size;
+		}
+		/** Model ids that at least one *other* account also supports. */
+		function computeOtherAccountModelIds(panels, accounts, accId) {
+			const others = /* @__PURE__ */ new Set();
+			for (const acc of accounts) {
+				if (acc.id === accId) continue;
+				for (const id of accountModelIds(acc, panels[acc.id])) others.add(id);
+			}
+			return others;
+		}
+		//#endregion
+		//#region src/client/api.ts
+		const API_PREFIX = "/plugins/cloudcode-link";
+		const LEGACY_API_PREFIX = "/plugins/agy-link";
+		function getOrigin() {
+			return globalThis.location?.origin ?? "";
+		}
+		function resolveApiPath(subPath) {
+			if (subPath.startsWith("/plugins/cloudcode-link") || subPath.startsWith("/plugins/agy-link")) return subPath;
+			const normalized = subPath.startsWith("/") ? subPath : `/${subPath}`;
+			return `${API_PREFIX}${normalized}`;
+		}
+		/**
+		* Primary prefix, then a 404-only fallback to the legacy prefix (older host builds).
+		* Failure is visible: null means "no usable response" and every caller surfaces it in the UI.
+		*/
+		async function fetchWithFallback(path, init) {
+			const g = globalThis;
+			if (typeof g.fetch !== "function") return null;
+			const base = getOrigin();
+			const fullUrl = `${base}${path}`;
+			try {
+				const res = await g.fetch(fullUrl, init);
+				if (res && res.status === 404 && path.startsWith("/plugins/cloudcode-link")) {
+					const legacy = `${base}${LEGACY_API_PREFIX}${path.slice(23)}`;
+					return await g.fetch(legacy, init) ?? null;
+				}
+				return res ?? null;
+			} catch {
+				return null;
+			}
+		}
+		async function parseJsonResponse(res) {
+			if (!res) return {
+				ok: false,
+				status: 0,
+				data: null,
+				error: "网络请求失败或服务不可达"
+			};
+			let data = null;
+			try {
+				data = await res.json();
+			} catch {
+				data = null;
+			}
+			const dataObj = data && typeof data === "object" ? data : null;
+			const serverError = typeof dataObj?.error === "string" ? dataObj.error : void 0;
+			const ok = res.ok && dataObj?.ok !== false;
+			return {
+				ok,
+				status: res.status,
+				data,
+				error: ok ? void 0 : serverError ?? `HTTP ${res.status}`
+			};
+		}
+		async function getJson(subPath) {
+			return parseJsonResponse(await fetchWithFallback(resolveApiPath(subPath)));
+		}
+		async function postJson(subPath, body) {
+			return parseJsonResponse(await fetchWithFallback(resolveApiPath(subPath), {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify(body ?? {})
+			}));
+		}
+		//#endregion
 		//#region src/client/brand-icons.ts
 		const BRAND_PATHS = {
 			gemini: "M11.04 19.32Q12 21.51 12 24q0-2.49.93-4.68.96-2.19 2.58-3.81t3.81-2.55Q21.51 12 24 12q-2.49 0-4.68-.93a12.3 12.3 0 0 1-3.81-2.58 12.3 12.3 0 0 1-2.58-3.81Q12 2.49 12 0q0 2.49-.96 4.68-.93 2.19-2.55 3.81a12.3 12.3 0 0 1-3.81 2.58Q2.49 12 0 12q2.49 0 4.68.96 2.19.93 3.81 2.55t2.55 3.81",
@@ -138,6 +365,7 @@ window.__ModuleLoader__.load({
 	--agy-bg-card-primary: #eef5ff;
 	--agy-bg-header: var(--dsw-alias-bg-layer-2, #fbfcfe);
 	--agy-bg-subbox: var(--dsw-alias-bg-layer-3, #f4f6f9);
+	--agy-bg-subtle: var(--dsw-alias-bg-layer-3, #f4f6f9);
 	--agy-bg-box: var(--dsw-alias-bg-layer-3, #f7f9fb);
 	--agy-bg-input: var(--dsw-alias-bg-layer-1, #ffffff);
 	--agy-bg-btn: var(--dsw-alias-bg-layer-2, #ffffff);
@@ -152,6 +380,7 @@ window.__ModuleLoader__.load({
 	--agy-border-card-primary: #9ec3f5;
 	--agy-border-box: var(--dsw-alias-border-l1, #e3e8ef);
 	--agy-border-subbox: var(--dsw-alias-border-l2, #dbe2ea);
+	--agy-border-subtle: var(--dsw-alias-border-l2, #dbe2ea);
 	--agy-border-divider: var(--dsw-alias-border-l2, #e6ebf1);
 	--agy-border-btn: #d4dce6;
 	--agy-border-btn-primary: #7fa9e8;
@@ -202,8 +431,13 @@ window.__ModuleLoader__.load({
 	--agy-tint-warn: rgba(180, 83, 9, 0.12);
 	--agy-tint-danger: rgba(220, 38, 38, 0.12);
 	--agy-tint-neutral: rgba(100, 116, 139, 0.14);
+	--agy-tint-primary: rgba(37, 99, 235, 0.08);
+	--agy-accent-border: rgba(37, 99, 235, 0.28);
 
 	/* --- quota gradients --- */
+	--agy-quota-high-bar: #16a34a;
+	--agy-quota-med-bar: #d97706;
+	--agy-quota-low-bar: #dc2626;
 	--agy-quota-high-grad: linear-gradient(90deg, #047857, #10b981);
 	--agy-quota-med-grad: linear-gradient(90deg, #b45309, #f59e0b);
 	--agy-quota-low-grad: linear-gradient(90deg, #b91c1c, #ef4444);
@@ -299,6 +533,12 @@ window.__ModuleLoader__.load({
 	--agy-shadow-card: var(--agy-shadow-1);
 	--agy-shadow-card-hover: var(--agy-shadow-2);
 	--agy-shadow-card-primary: 0 0 0 1px var(--agy-border-card-primary), var(--agy-shadow-2);
+
+	/* --- Awwwards-grade layered surfaces & hairline borders --- */
+	--agy-surface-elevated: var(--dsw-alias-bg-layer-1, #ffffff);
+	--agy-surface-subtle: var(--dsw-alias-bg-layer-3, #f7f9fb);
+	--agy-hairline: rgba(15, 23, 42, 0.08);
+	--agy-hairline-strong: rgba(15, 23, 42, 0.14);
 }
 
 body[data-ds-dark-theme],
@@ -309,6 +549,7 @@ body[data-theme="dark"] {
 	--agy-bg-card-primary: #172232;
 	--agy-bg-header: var(--dsw-alias-bg-layer-2, #191c22);
 	--agy-bg-subbox: var(--dsw-alias-bg-layer-3, #1e2229);
+	--agy-bg-subtle: var(--dsw-alias-bg-layer-3, #1e2229);
 	--agy-bg-box: var(--dsw-alias-bg-layer-3, #1b1f26);
 	--agy-bg-input: var(--dsw-alias-bg-layer-1, #12151a);
 	--agy-bg-btn: var(--dsw-alias-bg-layer-3, #21252d);
@@ -322,6 +563,7 @@ body[data-theme="dark"] {
 	--agy-border-card-primary: #3c5a80;
 	--agy-border-box: var(--dsw-alias-border-l1, #2b323d);
 	--agy-border-subbox: var(--dsw-alias-border-l2, #333a45);
+	--agy-border-subtle: var(--dsw-alias-border-l2, #333a45);
 	--agy-border-divider: var(--dsw-alias-border-l2, #292f38);
 	--agy-border-btn: #39414d;
 	--agy-border-btn-primary: #4a6fa5;
@@ -357,6 +599,8 @@ body[data-theme="dark"] {
 	--agy-accent-hover: #93c5fd;
 	--agy-accent-soft-bg: rgba(96, 165, 250, 0.14);
 	--agy-accent-soft-border: rgba(96, 165, 250, 0.4);
+	--agy-tint-primary: rgba(96, 165, 250, 0.12);
+	--agy-accent-border: rgba(96, 165, 250, 0.32);
 	--agy-on-accent: #0b1220;
 	--agy-focus-ring: #60a5fa;
 
@@ -365,6 +609,9 @@ body[data-theme="dark"] {
 	--agy-strong-danger: #f87171;
 	--agy-strong-neutral: #98a2b1;
 
+	--agy-quota-high-bar: #4ade80;
+	--agy-quota-med-bar: #fbbf24;
+	--agy-quota-low-bar: #f87171;
 	--agy-quota-high-grad: linear-gradient(90deg, #059669, #34d399);
 	--agy-quota-med-grad: linear-gradient(90deg, #d97706, #fbbf24);
 	--agy-quota-low-grad: linear-gradient(90deg, #dc2626, #f87171);
@@ -402,6 +649,12 @@ body[data-theme="dark"] {
 
 	--agy-modal-backdrop: rgba(5, 8, 12, 0.62);
 	--agy-shadow-card-primary: 0 0 0 1px var(--agy-border-card-primary), 0 4px 14px rgba(0, 0, 0, 0.35);
+
+	/* --- Awwwards-grade layered surfaces & hairline borders (dark) --- */
+	--agy-surface-elevated: var(--dsw-alias-bg-layer-2, #191c22);
+	--agy-surface-subtle: var(--dsw-alias-bg-layer-3, #1e2229);
+	--agy-hairline: rgba(255, 255, 255, 0.08);
+	--agy-hairline-strong: rgba(255, 255, 255, 0.15);
 }
 /* agy-tokens:end */
 
@@ -417,6 +670,11 @@ body[data-theme="dark"] {
 
 @keyframes agy-rise {
 	from { opacity: 0; transform: translateY(10px); }
+	to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes agyFadeSlideIn {
+	from { opacity: 0; transform: translateY(6px); }
 	to { opacity: 1; transform: translateY(0); }
 }
 
@@ -457,6 +715,10 @@ body[data-theme="dark"] {
 	animation-delay: calc(var(--i, 0) * var(--agy-stagger));
 }
 
+.agy-fade-slide-in {
+	animation: agyFadeSlideIn var(--agy-dur-base) var(--agy-ease-out) both;
+}
+
 .agy-btn {
 	font-family: inherit;
 	transition: background var(--agy-dur-fast) var(--agy-ease-out),
@@ -467,10 +729,12 @@ body[data-theme="dark"] {
 
 .agy-btn:hover:not(:disabled) {
 	transform: translateY(-1px);
+	box-shadow: var(--agy-shadow-1);
 }
 
 .agy-btn:active:not(:disabled) {
-	transform: translateY(0);
+	transform: translateY(0) scale(0.985);
+	box-shadow: none;
 }
 
 .agy-btn:disabled {
@@ -954,238 +1218,331 @@ body[data-theme="dark"] {
 				border: "1px solid var(--agy-auth-box-border)",
 				borderRadius: "var(--agy-radius-lg)",
 				marginBottom: "var(--agy-space-3)"
+			},
+			kpiCard: {
+				padding: "var(--agy-space-3) var(--agy-space-4)",
+				background: "var(--agy-surface-elevated)",
+				border: "1px solid var(--agy-hairline)",
+				borderRadius: "var(--agy-radius-lg)",
+				boxShadow: "var(--agy-shadow-card)",
+				display: "flex",
+				flexDirection: "column",
+				gap: "4px",
+				minWidth: 0
+			},
+			kpiLabel: {
+				fontSize: "var(--agy-font-xs)",
+				fontWeight: 600,
+				letterSpacing: "0.02em",
+				color: "var(--agy-text-tertiary)"
+			},
+			kpiValue: {
+				fontSize: "var(--agy-font-xl)",
+				fontWeight: 700,
+				lineHeight: 1.2,
+				fontVariantNumeric: "tabular-nums",
+				color: "var(--agy-text-primary)"
+			},
+			kpiSub: {
+				fontSize: "var(--agy-font-xs)",
+				color: "var(--agy-text-secondary)",
+				fontVariantNumeric: "tabular-nums"
+			},
+			strip: {
+				display: "flex",
+				alignItems: "center",
+				justifyContent: "space-between",
+				gap: "var(--agy-space-2)",
+				padding: "9px var(--agy-space-3)",
+				borderRadius: "var(--agy-radius-md)",
+				fontSize: "var(--agy-font-sm)",
+				marginBottom: "var(--agy-space-2)"
+			},
+			emptyState: {
+				padding: "var(--agy-space-5)",
+				textAlign: "center",
+				border: "1px dashed var(--agy-border-divider)",
+				borderRadius: "var(--agy-radius-lg)",
+				background: "var(--agy-surface-subtle)"
+			},
+			badgeOk: {
+				background: "var(--agy-ok-bg)",
+				color: "var(--agy-ok-text)",
+				border: "1px solid var(--agy-ok-border)"
+			},
+			badgeWarn: {
+				background: "var(--agy-warn-bg)",
+				color: "var(--agy-warn-text)",
+				border: "1px solid var(--agy-warn-border)"
+			},
+			badgeDanger: {
+				background: "var(--agy-danger-bg)",
+				color: "var(--agy-danger-text)",
+				border: "1px solid var(--agy-danger-border)"
+			},
+			badgeInfo: {
+				background: "var(--agy-info-bg)",
+				color: "var(--agy-info-text)",
+				border: "1px solid var(--agy-info-border)"
+			},
+			badgeNeutral: {
+				background: "var(--agy-bg-subbox)",
+				color: "var(--agy-text-secondary)",
+				border: "1px solid var(--agy-border-subbox)"
 			}
 		};
 		//#endregion
-		//#region src/client/account-models.ts
-		const EMPTY_PANEL = {
-			status: "idle",
-			payload: null,
-			source: "quota-fallback",
-			error: null,
-			refreshError: null,
-			fetchedAt: null
-		};
-		const QUOTA_FAMILY_ORDER = [
-			"google",
-			"anthropic",
-			"openai"
-		];
-		function parsePayload(raw) {
-			if (!raw || typeof raw !== "object") return null;
-			const data = raw;
-			const familyModels = Array.isArray(data.familyModels) ? data.familyModels : [];
-			return {
-				ok: typeof data.ok === "boolean" ? data.ok : true,
-				id: typeof data.id === "string" ? data.id : void 0,
-				alias: typeof data.alias === "string" ? data.alias : void 0,
-				email: typeof data.email === "string" ? data.email : void 0,
-				known: data.known === true,
-				total: typeof data.total === "number" ? data.total : familyModels.reduce((n, g) => n + g.models.length, 0),
-				refreshedAt: typeof data.refreshedAt === "number" ? data.refreshedAt : null,
-				familyModels,
-				refreshError: typeof data.refreshError === "string" ? data.refreshError : void 0
-			};
-		}
-		async function readResult(res) {
-			if (!res) return {
-				payload: null,
-				error: "network_unreachable",
-				status: null
-			};
-			if (res.status === 404) return {
-				payload: null,
-				error: "account_not_found",
-				status: 404
-			};
-			let body = null;
-			try {
-				body = await res.json();
-			} catch {
-				return {
-					payload: null,
-					error: "bad_json",
-					status: res.status
-				};
-			}
-			if (!res.ok) return {
-				payload: null,
-				error: body && typeof body === "object" && typeof body.error === "string" ? body.error : `http_${res.status}`,
-				status: res.status
-			};
-			const payload = parsePayload(body);
-			if (!payload) return {
-				payload: null,
-				error: "bad_payload",
-				status: res.status
-			};
-			return {
-				payload,
-				error: null,
-				status: res.status
-			};
-		}
-		/** GET the discovered model list for one account. */
-		async function fetchAccountModels(fetchJson, apiPrefix, id) {
-			return readResult(await fetchJson(`${apiPrefix}/pool/account-models?id=${encodeURIComponent(id)}`));
-		}
-		/** POST a forced rediscovery for one account; on failure callers keep the previous panel data. */
-		async function postAccountModelsRefresh(fetchJson, apiPrefix, id) {
-			return readResult(await fetchJson(`${apiPrefix}/pool/account-models`, {
-				method: "POST",
-				headers: { "Content-Type": "application/json" },
-				body: JSON.stringify({
-					id,
-					refresh: true
-				})
+		//#region src/client/components/ui.ts
+		const { createElement: h$7 } = require("react");
+		/** Inline brand logo (Gemini / Claude / OpenAI) as a crisp SVG mark. */
+		function brandIcon(key, size = 13) {
+			return h$7("svg", {
+				viewBox: "0 0 24 24",
+				width: size,
+				height: size,
+				"aria-hidden": true,
+				style: {
+					display: "inline-block",
+					verticalAlign: "-2px",
+					flexShrink: 0
+				}
+			}, h$7("path", {
+				d: BRAND_PATHS[key],
+				fill: BRAND_COLORS[key]
 			}));
 		}
-		/**
-		* Build the same payload shape from the quota data embedded in status.pool, so the panel
-		* can degrade gracefully when /pool/account-models is unavailable. The UI always labels
-		* this source as a fallback.
-		*/
-		function buildQuotaFallbackPayload(acc) {
-			const familyModels = [];
-			for (const family of QUOTA_FAMILY_ORDER) {
-				const quota = acc.quotas[family];
-				if (!quota || !Array.isArray(quota.models) || quota.models.length === 0) continue;
-				const models = quota.models.filter((m) => typeof m.modelId === "string" && m.modelId.trim() !== "").map((m) => ({
-					id: m.modelId,
-					name: m.displayName || m.modelId,
-					family,
-					remainingFraction: m.remainingFraction,
-					resetTime: m.resetTime
-				}));
-				if (models.length === 0) continue;
-				familyModels.push({
-					family,
-					known: true,
-					models
-				});
-			}
+		/** Clean outline/filled SVG icon (Lucide-style), zero emoji dependency. */
+		function uiIcon(name, size = 12, color = "currentColor") {
+			const p = UI_PATHS[name];
+			const isFilled = name === "star";
+			return h$7("svg", {
+				viewBox: "0 0 24 24",
+				width: size,
+				height: size,
+				"aria-hidden": true,
+				style: {
+					display: "inline-block",
+					verticalAlign: "-1.5px",
+					flexShrink: 0
+				}
+			}, h$7("path", {
+				d: p,
+				fill: isFilled ? color : "none",
+				stroke: isFilled ? "none" : color,
+				"stroke-width": isFilled ? void 0 : 2,
+				"stroke-linecap": isFilled ? void 0 : "round",
+				"stroke-linejoin": isFilled ? void 0 : "round"
+			}));
+		}
+		function renderStrip(kind, text, onRetry) {
+			const isError = kind === "error";
+			const isWarn = kind === "warn";
+			const isOk = kind === "ok" || kind === "success";
+			const bg = isError ? "var(--agy-danger-bg)" : isWarn ? "var(--agy-warn-bg)" : isOk ? "var(--agy-ok-bg)" : "var(--agy-info-bg)";
+			const border = isError ? "var(--agy-danger-border)" : isWarn ? "var(--agy-warn-border)" : isOk ? "var(--agy-ok-border)" : "var(--agy-info-border)";
+			const color = isError ? "var(--agy-danger-text)" : isWarn ? "var(--agy-warn-text)" : isOk ? "var(--agy-ok-text)" : "var(--agy-info-text)";
+			return h$7("div", {
+				role: "alert",
+				className: "agy-fade-slide-in",
+				style: {
+					...S.strip,
+					background: bg,
+					border: `1px solid ${border}`,
+					color
+				}
+			}, h$7("span", null, text), onRetry ? h$7("button", {
+				type: "button",
+				className: "agy-btn",
+				style: S.btnSm,
+				onClick: onRetry,
+				"aria-label": "重试加载"
+			}, uiIcon("refresh", 12), " 重试") : null);
+		}
+		function renderEmptyState(icon, title, desc, action) {
+			return h$7("div", {
+				className: "agy-fade-slide-in",
+				style: S.emptyState
+			}, icon ? h$7("div", { style: {
+				display: "inline-flex",
+				alignItems: "center",
+				justifyContent: "center",
+				width: "32px",
+				height: "32px",
+				borderRadius: "var(--agy-radius-md)",
+				background: "var(--agy-bg-box)",
+				border: "1px solid var(--agy-hairline)",
+				color: "var(--agy-text-tertiary)",
+				marginBottom: "var(--agy-space-2)"
+			} }, uiIcon(icon, 16)) : null, h$7("div", { style: {
+				color: "var(--agy-text-primary)",
+				fontSize: "var(--agy-font-md)",
+				fontWeight: 600,
+				lineHeight: 1.5
+			} }, title), desc ? h$7("div", { style: {
+				color: "var(--agy-text-secondary)",
+				fontSize: "var(--agy-font-sm)",
+				lineHeight: 1.6,
+				marginTop: "4px"
+			} }, desc) : null, action ? h$7("div", { style: { marginTop: "var(--agy-space-3)" } }, action) : null);
+		}
+		function renderKpiCard(label, value, sub, accent) {
+			return h$7("div", {
+				className: "agy-card-hover",
+				style: {
+					...S.kpiCard,
+					flex: "1 1 150px"
+				}
+			}, h$7("div", { style: S.kpiLabel }, label), h$7("div", {
+				className: "agy-num",
+				style: {
+					...S.kpiValue,
+					color: accent ?? "var(--agy-text-primary)"
+				}
+			}, String(value)), sub ? h$7("div", {
+				className: "agy-num",
+				style: S.kpiSub
+			}, sub) : null);
+		}
+		function quotaTone(pct) {
+			if (pct < 10) return {
+				bar: "var(--agy-quota-low-bar)",
+				text: "var(--agy-quota-low-text)"
+			};
+			if (pct <= 30) return {
+				bar: "var(--agy-quota-med-bar)",
+				text: "var(--agy-quota-med-text)"
+			};
 			return {
-				ok: true,
-				id: acc.id,
-				alias: acc.alias,
-				email: acc.email,
-				known: familyModels.length > 0,
-				total: familyModels.reduce((n, g) => n + g.models.length, 0),
-				refreshedAt: null,
-				familyModels
+				bar: "var(--agy-quota-high-bar)",
+				text: "var(--agy-quota-high-text)"
 			};
 		}
-		function selectPanelPayload(panel, acc) {
-			if (panel?.payload) return {
-				payload: panel.payload,
-				usingFallback: panel.source !== "api"
+		function formatResetLabel(resetTime) {
+			if (resetTime === void 0 || resetTime === null || resetTime === "") return "";
+			const { resetText } = formatQuotaWindow(typeof resetTime === "number" ? new Date(resetTime).toISOString() : resetTime);
+			return resetText ? `↻ ${resetText}` : "";
+		}
+		function renderQuotaBar(label, fraction, resetTime, weeklyFraction, weeklyResetTime) {
+			const pct = typeof fraction === "number" && Number.isFinite(fraction) ? Math.max(0, Math.min(100, Math.round(fraction * 100))) : null;
+			const tone = pct !== null ? quotaTone(pct) : null;
+			const resetLabel = formatResetLabel(resetTime);
+			const weeklyPct = typeof weeklyFraction === "number" && Number.isFinite(weeklyFraction) ? Math.max(0, Math.min(100, Math.round(weeklyFraction * 100))) : null;
+			const weeklyTone = weeklyPct !== null ? quotaTone(weeklyPct) : null;
+			const weeklyResetLabel = formatResetLabel(weeklyResetTime);
+			return h$7("div", { style: S.quotaBox }, h$7("div", { style: {
+				display: "flex",
+				alignItems: "center",
+				justifyContent: "space-between",
+				gap: "var(--agy-space-2)",
+				marginBottom: "5px"
+			} }, h$7("span", { style: {
+				fontSize: "var(--agy-font-sm)",
+				fontWeight: 700,
+				color: "var(--agy-text-primary)"
+			} }, label), h$7("span", {
+				className: "agy-num",
+				style: {
+					fontSize: "var(--agy-font-xs)",
+					fontWeight: 600,
+					color: tone ? tone.text : "var(--agy-text-tertiary)"
+				}
+			}, pct !== null ? `${pct}%` : "—")), h$7("div", { style: S.progressBarBg }, pct !== null && tone ? h$7("div", {
+				className: "agy-progress-fill",
+				style: {
+					width: `${pct}%`,
+					height: "100%",
+					borderRadius: "var(--agy-radius-pill)",
+					background: tone.bar
+				}
+			}) : null), resetLabel ? h$7("div", {
+				className: "agy-num",
+				style: {
+					marginTop: "4px",
+					fontSize: "var(--agy-font-xs)",
+					color: "var(--agy-text-tertiary)"
+				}
+			}, resetLabel) : null, weeklyPct !== null && weeklyTone ? h$7("div", { style: {
+				marginTop: "6px",
+				paddingTop: "6px",
+				borderTop: "1px solid var(--agy-hairline)",
+				display: "flex",
+				alignItems: "center",
+				justifyContent: "space-between",
+				gap: "var(--agy-space-2)",
+				fontSize: "var(--agy-font-xs)",
+				color: "var(--agy-text-secondary)"
+			} }, h$7("span", null, "周配额"), h$7("span", {
+				className: "agy-num",
+				style: {
+					color: weeklyTone.text,
+					fontWeight: 600
+				}
+			}, `${weeklyPct}%${weeklyResetLabel ? ` · ${weeklyResetLabel}` : ""}`)) : null);
+		}
+		function renderSegmentedControl(options, value, onChange, ariaLabel) {
+			const enabledOptions = options.filter((o) => !o.disabled);
+			const handleKeyDown = (ev, currentIdx) => {
+				if (!enabledOptions.length) return;
+				const key = ev.key;
+				let nextOpt;
+				if (key === "ArrowRight" || key === "ArrowDown") {
+					ev.preventDefault?.();
+					for (let step = 1; step <= options.length; step++) {
+						const cand = options[(currentIdx + step) % options.length];
+						if (cand && !cand.disabled) {
+							nextOpt = cand;
+							break;
+						}
+					}
+				} else if (key === "ArrowLeft" || key === "ArrowUp") {
+					ev.preventDefault?.();
+					for (let step = 1; step <= options.length; step++) {
+						const cand = options[(currentIdx - step + options.length) % options.length];
+						if (cand && !cand.disabled) {
+							nextOpt = cand;
+							break;
+						}
+					}
+				} else if (key === "Home") {
+					ev.preventDefault?.();
+					nextOpt = enabledOptions[0];
+				} else if (key === "End") {
+					ev.preventDefault?.();
+					nextOpt = enabledOptions[enabledOptions.length - 1];
+				}
+				if (nextOpt && nextOpt.value !== value) onChange(nextOpt.value);
 			};
-			return {
-				payload: buildQuotaFallbackPayload(acc),
-				usingFallback: true
-			};
+			return h$7("div", {
+				role: "radiogroup",
+				"aria-label": ariaLabel,
+				style: S.segGroup
+			}, ...options.map((opt, idx) => {
+				const active = opt.value === value;
+				return h$7("button", {
+					key: opt.value,
+					type: "button",
+					role: "radio",
+					"aria-checked": active,
+					disabled: opt.disabled,
+					tabIndex: active ? 0 : -1,
+					className: "agy-tab",
+					style: active ? {
+						...S.segBtn,
+						...S.segBtnActive
+					} : S.segBtn,
+					onClick: () => {
+						if (!opt.disabled && opt.value !== value) onChange(opt.value);
+					},
+					onKeyDown: (ev) => handleKeyDown(ev, idx)
+				}, opt.label);
+			}));
 		}
-		/** Discovered model ids for one account (last payload if any, quota fallback otherwise). */
-		function accountModelIds(acc, panel) {
-			const { payload } = selectPanelPayload(panel, acc);
-			const ids = [];
-			for (const group of payload.familyModels) for (const model of group.models) ids.push(model.id);
-			return ids;
-		}
-		/**
-		* Panel state after a failed initial GET: the previous payload and its source are kept
-		* (an empty panel stays an empty panel); the error is recorded for the visible strip.
-		*/
-		function markPanelLoadFailure(prev, error, now) {
-			return {
-				...prev,
-				status: "error",
-				payload: prev.payload,
-				source: prev.source,
-				error,
-				refreshError: null,
-				fetchedAt: now
-			};
-		}
-		/** Panel state after a failed POST refresh: same payload preservation plus the refreshError marker. */
-		function markPanelRefreshFailure(prev, error, now) {
-			return {
-				...prev,
-				status: "error",
-				payload: prev.payload,
-				source: prev.source,
-				error,
-				refreshError: error,
-				fetchedAt: now
-			};
-		}
-		/** Panel state after a successful fetch (GET or refresh): the fresh payload becomes the panel's truth. */
-		function markPanelSuccess(prev, payload, refreshError, now) {
-			return {
-				...prev,
-				status: "ok",
-				payload,
-				source: "api",
-				error: null,
-				refreshError,
-				fetchedAt: now
-			};
-		}
-		/** A loaded panel is considered fresh for this long before on-demand rediscovery re-triggers. */
-		const PANEL_TTL_MS = 6e4;
-		/**
-		* Which accounts the auto-load effect should (re)load right now:
-		* - panels never loaded (missing / idle), and
-		* - healthy panels whose data exceeded the TTL.
-		* 'loading' and 'error' panels are deliberately excluded: a broken endpoint is retried
-		* only by an explicit user action, never implicitly on every status-poll reference change.
-		*/
-		function collectStalePanelAccounts(panels, accounts, now, ttlMs = PANEL_TTL_MS) {
-			return accounts.filter((acc) => {
-				const panel = panels[acc.id];
-				if (!panel || panel.status === "idle") return true;
-				if (panel.status === "loading" || panel.status === "error") return false;
-				return panel.fetchedAt !== null && now - panel.fetchedAt > ttlMs;
-			});
-		}
-		/** Single source of truth for the expandable model panel's DOM id (aria-controls wiring). */
-		function modelsPanelDomId(accId) {
-			return `models-panel-${accId}`;
-		}
-		/** Human-readable reset window: absolute clock + remaining countdown, weekly vs 5h aware. */
-		function formatQuotaWindow(resetTimeStr, nowMs = Date.now()) {
-			if (!resetTimeStr) return { resetText: "" };
-			try {
-				const d = new Date(resetTimeStr);
-				const diffMs = d.getTime() - nowMs;
-				if (!Number.isFinite(diffMs) || diffMs <= 0) return { resetText: "" };
-				const totalMins = Math.ceil(diffMs / 6e4);
-				const days = Math.floor(totalMins / 1440);
-				const hours = Math.floor(totalMins % 1440 / 60);
-				const mins = totalMins % 60;
-				const isWeekly = days >= 1;
-				const countdown = days > 0 ? `${days}d${hours}h` : hours > 0 ? `${hours}h${mins}m` : `${mins}m`;
-				const hh = d.getHours().toString().padStart(2, "0");
-				const mm = d.getMinutes().toString().padStart(2, "0");
-				return { resetText: isWeekly ? `${d.getMonth() + 1}/${d.getDate()} ${hh}:${mm} (${countdown})` : `${hh}:${mm} (${countdown})` };
-			} catch {
-				return { resetText: "" };
-			}
-		}
-		/** Size of the discovered-model union across all accounts (the denominator of coverage). */
-		function computeModelUnion(panels, accounts) {
-			const union = /* @__PURE__ */ new Set();
-			for (const acc of accounts) for (const id of accountModelIds(acc, panels[acc.id])) union.add(id);
-			return union.size;
-		}
-		/** Model ids that at least one *other* account also supports. */
-		function computeOtherAccountModelIds(panels, accounts, accId) {
-			const others = /* @__PURE__ */ new Set();
-			for (const acc of accounts) {
-				if (acc.id === accId) continue;
-				for (const id of accountModelIds(acc, panels[acc.id])) others.add(id);
-			}
-			return others;
+		function renderBadge(text, tone = "neutral") {
+			const toneStyle = tone === "ok" ? S.badgeOk : tone === "warn" ? S.badgeWarn : tone === "danger" ? S.badgeDanger : tone === "info" ? S.badgeInfo : tone === "primary" ? S.badgePrimary : S.badgeNeutral;
+			return h$7("span", { style: {
+				...S.badgeBase,
+				...toneStyle
+			} }, text);
 		}
 		//#endregion
 		//#region src/client/poll-state.ts
@@ -1211,20 +1568,6 @@ body[data-theme="dark"] {
 				lastUpdatedAt: prev.lastUpdatedAt
 			};
 		}
-		/**
-		* Seed the config input drafts from the backend status.
-		* - `undefined` means "the user has never touched this field" and gets seeded from status.
-		* - Any string (including one the user cleared to '') is a user edit and is preserved.
-		* - A null status (not loaded yet) must not freeze the drafts to '' — that is exactly what
-		*   used to make the fields never backfill, because '' is not "unedited".
-		*/
-		function seedConfigDrafts(prev, status) {
-			if (!status) return prev;
-			const next = { ...prev };
-			if (next.defaultModel === void 0 && typeof status.defaultModel === "string") next.defaultModel = status.defaultModel;
-			if (next.defaultEffort === void 0 && typeof status.defaultEffort === "string") next.defaultEffort = status.defaultEffort;
-			return next;
-		}
 		function accountAddFlowView(addingAccount, poolAuthPhase) {
 			const flowActive = addingAccount && (poolAuthPhase === "waiting" || poolAuthPhase === "exchanging");
 			return {
@@ -1233,51 +1576,1663 @@ body[data-theme="dark"] {
 			};
 		}
 		//#endregion
-		//#region src/client/index.ts
-		const { createElement: h, useState, useEffect, useRef } = require("react");
+		//#region src/client/sections/AccountsSection.ts
+		const { createElement: h$6 } = require("react");
+		function maskEmail$5(email) {
+			if (!email || typeof email !== "string") return "";
+			const at = email.indexOf("@");
+			if (at <= 2) return email;
+			return `${email.slice(0, 2)}***${email.slice(at)}`;
+		}
+		function accountDisplayName$2(acc, idx) {
+			const isAutoAlias = !acc.alias || /^备用.*账号/i.test(acc.alias) || /^主账号/i.test(acc.alias);
+			if (acc.email) return isAutoAlias ? acc.email : acc.alias;
+			return acc.alias || `账号 ${idx + 1}`;
+		}
+		function AccountsSection(props) {
+			const { status, accounts, isBusy, addingAccount, aliasInput, manualCodeInput, editingProxyId, proxyInput, geminiAppEmailInput, geminiAppCookieInput, geminiAppBusy, onAliasInputChange, onManualCodeInputChange, onToggleAddingAccount, onBeginAddAccount, onCancelAddAccount, onSubmitManualCode, onSetPrimary, onSyncQuota, onClearCooldown, onRemoveAccount, onStartEditProxy, onCancelEditProxy, onProxyInputChange, onSaveProxy, onViewAccountModels, onGeminiAppEmailChange, onGeminiAppCookieChange, onAddGeminiAppAccount, onRemoveGeminiAppAccount } = props;
+			const poolAuth = status?.poolAuth;
+			const poolAuthPhase = poolAuth?.phase ?? "idle";
+			const addFlow = accountAddFlowView(addingAccount, poolAuthPhase);
+			const primaryId = status?.pool?.primaryAccountId;
+			const geminiPool = status?.geminiAppPool ?? {
+				total: 0,
+				accounts: []
+			};
+			const addAccountSection = addingAccount ? h$6("div", {
+				className: "agy-rise",
+				style: S.authModal,
+				role: "region",
+				"aria-label": "添加 Google 账号"
+			}, h$6("div", { style: {
+				display: "flex",
+				justifyContent: "space-between",
+				alignItems: "center",
+				gap: "var(--agy-space-2)",
+				marginBottom: "var(--agy-space-2)"
+			} }, h$6("span", { style: S.panelTitle }, "添加 Google 账号"), h$6("button", {
+				type: "button",
+				className: "agy-btn",
+				style: S.btnSm,
+				onClick: () => void onCancelAddAccount(),
+				disabled: isBusy
+			}, "取消")), poolAuthPhase === "failed" ? renderStrip("error", poolAuth?.message || "授权失败，请重试或手动粘贴授权码") : null, addFlow.flowActive ? h$6("div", { style: { marginBottom: "var(--agy-space-2)" } }, renderStrip("info", poolAuthPhase === "exchanging" ? "正在交换授权令牌，请稍候…" : poolAuth?.message || "请在打开的浏览器窗口中完成 Google 登录授权…"), poolAuth?.url ? h$6("div", { style: {
+				fontSize: "var(--agy-font-xs)",
+				color: "var(--agy-text-tertiary)",
+				wordBreak: "break-all",
+				marginTop: "4px"
+			} }, "授权链接：", h$6("a", {
+				href: poolAuth.url,
+				target: "_blank",
+				rel: "noreferrer",
+				style: { color: "var(--agy-accent)" }
+			}, poolAuth.url)) : null) : null, addFlow.showBrowserStart ? h$6("div", { style: {
+				display: "flex",
+				gap: "var(--agy-space-2)",
+				flexWrap: "wrap",
+				alignItems: "center",
+				marginBottom: "var(--agy-space-2)"
+			} }, h$6("input", {
+				type: "text",
+				style: {
+					...S.input,
+					flex: "1 1 180px"
+				},
+				placeholder: "账号别名（可选，如 主力号）",
+				value: aliasInput,
+				"aria-label": "新账号别名",
+				onChange: (e) => onAliasInputChange(e.target.value)
+			}), h$6("button", {
+				type: "button",
+				className: "agy-btn",
+				style: S.btnPrimary,
+				onClick: () => void onBeginAddAccount(),
+				disabled: isBusy
+			}, uiIcon("plus", 12), " 打开浏览器登录")) : null, h$6("div", { style: {
+				display: "flex",
+				gap: "var(--agy-space-2)",
+				flexWrap: "wrap",
+				alignItems: "center",
+				paddingTop: "var(--agy-space-2)",
+				borderTop: "1px solid var(--agy-border-divider)"
+			} }, h$6("input", {
+				type: "text",
+				style: {
+					...S.input,
+					flex: "1 1 240px"
+				},
+				placeholder: "或手动粘贴回调 URL / 授权码 (code=...)",
+				value: manualCodeInput,
+				"aria-label": "手动粘贴授权码",
+				onChange: (e) => onManualCodeInputChange(e.target.value)
+			}), h$6("button", {
+				type: "button",
+				className: "agy-btn",
+				style: S.btnSmPrimary,
+				onClick: () => void onSubmitManualCode(),
+				disabled: isBusy || !manualCodeInput.trim()
+			}, "提交授权码"))) : null;
+			const renderedAccountCards = accounts.length === 0 ? [renderEmptyState("globe", "暂无 AGY 账号", "点击右上角「添加账号」完成 Google OAuth 授权即可接入。", !addingAccount ? h$6("button", {
+				type: "button",
+				className: "agy-btn",
+				style: S.btnPrimary,
+				onClick: () => onToggleAddingAccount(true)
+			}, uiIcon("plus", 12), " 添加账号") : void 0)] : accounts.map((acc, idx) => {
+				const isPrimary = acc.id === primaryId;
+				const hasCooldown = Object.values(acc.cooldowns ?? {}).some((cd) => {
+					const until = cd?.cooldownUntil;
+					return typeof until === "number" && until > Date.now();
+				});
+				const isAuthRequired = acc.authRequired === true;
+				const isReady = acc.enabled && !isAuthRequired && !hasCooldown;
+				const dotColor = !acc.enabled ? "var(--agy-text-tertiary)" : isAuthRequired ? "var(--agy-strong-danger)" : hasCooldown ? "var(--agy-strong-warn)" : isReady ? "var(--agy-strong-ok)" : "var(--agy-strong-warn)";
+				const displayName = accountDisplayName$2(acc, idx);
+				const quota = acc.quotas ?? {};
+				const isEditingProxy = editingProxyId === acc.id;
+				return h$6("div", {
+					key: acc.id,
+					className: "agy-card-hover agy-rise",
+					style: isPrimary ? S.cardPrimary : S.card
+				}, h$6("div", { style: {
+					display: "flex",
+					justifyContent: "space-between",
+					alignItems: "flex-start",
+					gap: "var(--agy-space-2)",
+					flexWrap: "wrap",
+					marginBottom: "var(--agy-space-2)"
+				} }, h$6("div", { style: {
+					display: "flex",
+					alignItems: "center",
+					gap: "var(--agy-space-2)",
+					flexWrap: "wrap"
+				} }, h$6("span", {
+					"aria-hidden": "true",
+					style: {
+						width: "8px",
+						height: "8px",
+						borderRadius: "50%",
+						background: dotColor,
+						display: "inline-block",
+						flexShrink: 0
+					}
+				}), h$6("span", { style: {
+					fontWeight: 600,
+					fontSize: "var(--agy-font-md)",
+					color: "var(--agy-text-primary)"
+				} }, displayName), acc.email && displayName !== acc.email ? h$6("span", { style: S.muted }, maskEmail$5(acc.email)) : null, isPrimary ? renderBadge("主用", "primary") : null, isAuthRequired ? renderBadge("需重新授权", "danger") : !acc.enabled ? renderBadge("已禁用", "neutral") : hasCooldown ? renderBadge("冷却中", "warn") : isReady ? renderBadge("就绪", "ok") : renderBadge("未就绪", "warn"), acc.proxyUrl ? h$6("span", {
+					className: "agy-num",
+					style: {
+						fontSize: "var(--agy-font-xs)",
+						color: "var(--agy-text-tertiary)"
+					}
+				}, `代理: ${acc.proxyUrl}`) : null), h$6("div", { style: {
+					display: "flex",
+					gap: "var(--agy-space-1)",
+					flexWrap: "wrap"
+				} }, !isPrimary ? h$6("button", {
+					type: "button",
+					className: "agy-btn",
+					style: S.btnSm,
+					onClick: () => void onSetPrimary(acc.id),
+					disabled: isBusy
+				}, "设为主用") : null, h$6("button", {
+					type: "button",
+					className: "agy-btn",
+					style: S.btnSm,
+					onClick: () => void onSyncQuota(acc.id),
+					disabled: isBusy
+				}, uiIcon("refresh", 12), " 同步额度"), hasCooldown ? h$6("button", {
+					type: "button",
+					className: "agy-btn",
+					style: {
+						...S.btnSm,
+						background: "var(--agy-warn-btn-bg)",
+						color: "var(--agy-warn-btn-text)",
+						border: "1px solid var(--agy-warn-btn-border)"
+					},
+					onClick: () => void onClearCooldown(acc.id),
+					disabled: isBusy
+				}, "清冷却") : null, h$6("button", {
+					type: "button",
+					className: "agy-btn",
+					style: S.btnSm,
+					onClick: () => isEditingProxy ? onCancelEditProxy() : onStartEditProxy(acc.id, acc.proxyUrl ?? ""),
+					disabled: isBusy
+				}, isEditingProxy ? "取消代理" : "编辑代理"), h$6("button", {
+					type: "button",
+					className: "agy-btn",
+					style: S.btnSmPrimary,
+					onClick: () => onViewAccountModels(acc.id),
+					"aria-label": `查看 ${displayName} 的模型与配额`
+				}, uiIcon("layers", 12), " 查看模型"), h$6("button", {
+					type: "button",
+					className: "agy-btn",
+					style: {
+						...S.btnSm,
+						color: "var(--agy-danger-text)",
+						borderColor: "var(--agy-danger-border)"
+					},
+					onClick: () => void onRemoveAccount(acc.id),
+					disabled: isBusy
+				}, "移除"))), isEditingProxy ? h$6("div", { style: {
+					display: "flex",
+					gap: "var(--agy-space-2)",
+					alignItems: "center",
+					flexWrap: "wrap",
+					padding: "var(--agy-space-2)",
+					marginBottom: "var(--agy-space-2)",
+					background: "var(--agy-bg-subtle)",
+					borderRadius: "var(--agy-radius-md)",
+					border: "1px solid var(--agy-border-subtle)"
+				} }, h$6("input", {
+					type: "text",
+					style: {
+						...S.input,
+						flex: "1 1 220px"
+					},
+					placeholder: "http://127.0.0.1:7890 或 socks5://...（留空清除）",
+					value: proxyInput,
+					"aria-label": `${displayName} 代理地址`,
+					onChange: (e) => onProxyInputChange(e.target.value)
+				}), h$6("button", {
+					type: "button",
+					className: "agy-btn",
+					style: S.btnSmPrimary,
+					onClick: () => void onSaveProxy(acc.id),
+					disabled: isBusy
+				}, "保存代理"), h$6("button", {
+					type: "button",
+					className: "agy-btn",
+					style: S.btnSm,
+					onClick: onCancelEditProxy
+				}, "取消")) : null, h$6("div", { style: {
+					display: "grid",
+					gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))",
+					gap: "var(--agy-space-2)"
+				} }, renderQuotaBar("Gemini", quota.google?.remainingFraction, quota.google?.resetTime), renderQuotaBar("Claude", quota.anthropic?.remainingFraction, quota.anthropic?.resetTime), renderQuotaBar("GPT-OSS", quota.openai?.remainingFraction, quota.openai?.resetTime)));
+			});
+			const geminiAppAccountsCard = h$6("div", {
+				className: "agy-rise",
+				style: {
+					...S.card,
+					marginTop: "var(--agy-space-3)"
+				}
+			}, h$6("div", { style: {
+				display: "flex",
+				justifyContent: "space-between",
+				alignItems: "center",
+				gap: "var(--agy-space-2)",
+				flexWrap: "wrap",
+				marginBottom: "var(--agy-space-2)"
+			} }, h$6("div", { style: {
+				display: "flex",
+				alignItems: "center",
+				gap: "var(--agy-space-2)"
+			} }, h$6("span", { style: S.panelTitle }, "Gemini App (Robin) 账号池"), h$6("span", {
+				className: "agy-num",
+				style: S.muted
+			}, `已登录 ${geminiPool.total} 个账号`))), h$6("div", { style: {
+				display: "flex",
+				gap: "var(--agy-space-2)",
+				flexWrap: "wrap",
+				alignItems: "center",
+				marginBottom: "var(--agy-space-2)"
+			} }, h$6("input", {
+				type: "text",
+				style: {
+					...S.input,
+					flex: "1 1 180px"
+				},
+				placeholder: "账号邮箱 / 备注（可选）",
+				value: geminiAppEmailInput,
+				"aria-label": "Gemini App 账号邮箱",
+				onChange: (e) => onGeminiAppEmailChange(e.target.value)
+			}), h$6("input", {
+				type: "password",
+				style: {
+					...S.input,
+					flex: "2 1 260px"
+				},
+				placeholder: "粘贴 oauth_token、MasterToken (aas_et/...) 或 Access Token (ya29....)",
+				value: geminiAppCookieInput,
+				"aria-label": "Gemini App Cookie",
+				onChange: (e) => onGeminiAppCookieChange(e.target.value)
+			}), h$6("button", {
+				type: "button",
+				className: "agy-btn",
+				style: S.btnSmPrimary,
+				onClick: () => void onAddGeminiAppAccount(),
+				disabled: geminiAppBusy || !geminiAppCookieInput.trim()
+			}, uiIcon("plus", 12), " 添加账号")), geminiPool.accounts.length > 0 ? h$6("div", { style: {
+				display: "flex",
+				flexDirection: "column",
+				gap: "var(--agy-space-1)"
+			} }, ...geminiPool.accounts.map((ga) => h$6("div", {
+				key: ga.id,
+				style: {
+					display: "flex",
+					justifyContent: "space-between",
+					alignItems: "center",
+					gap: "var(--agy-space-2)",
+					padding: "8px 10px",
+					borderRadius: "var(--agy-radius-md)",
+					background: "var(--agy-bg-subtle)",
+					border: "1px solid var(--agy-border-subtle)"
+				}
+			}, h$6("div", { style: {
+				display: "flex",
+				alignItems: "center",
+				gap: "var(--agy-space-2)",
+				flexWrap: "wrap"
+			} }, h$6("span", { style: {
+				fontWeight: 500,
+				fontSize: "var(--agy-font-sm)",
+				color: "var(--agy-text-primary)"
+			} }, ga.email || ga.id), renderBadge(ga.status || "ready", ga.status === "ready" ? "ok" : "warn")), h$6("button", {
+				type: "button",
+				className: "agy-btn",
+				style: {
+					...S.btnSm,
+					color: "var(--agy-danger-text)",
+					borderColor: "var(--agy-danger-border)"
+				},
+				onClick: () => void onRemoveGeminiAppAccount(ga.id),
+				disabled: geminiAppBusy
+			}, "删除")))) : h$6("div", { style: {
+				fontSize: "var(--agy-font-xs)",
+				color: "var(--agy-text-tertiary)"
+			} }, "暂无 Gemini App 账号，添加后可用于无工具任务双轨分流。"));
+			return h$6("div", { className: "agy-rise" }, h$6("div", { style: {
+				display: "flex",
+				justifyContent: "space-between",
+				alignItems: "flex-end",
+				gap: "var(--agy-space-3)",
+				flexWrap: "wrap",
+				marginBottom: "var(--agy-space-3)"
+			} }, h$6("div", null, h$6("div", { style: {
+				fontSize: "var(--agy-font-xs)",
+				fontWeight: 600,
+				letterSpacing: "0.08em",
+				textTransform: "uppercase",
+				color: "var(--agy-text-tertiary)",
+				marginBottom: "2px"
+			} }, "ACCOUNTS"), h$6("div", { style: S.panelTitle }, "账号池管理"), h$6("div", { style: {
+				fontSize: "var(--agy-font-sm)",
+				color: "var(--agy-text-secondary)",
+				marginTop: "2px"
+			} }, "管理 Google OAuth 主备账号、代理路由与 Gemini App 账号池")), !addingAccount ? h$6("button", {
+				type: "button",
+				className: "agy-btn",
+				style: S.btnPrimary,
+				onClick: () => onToggleAddingAccount(true),
+				disabled: isBusy
+			}, uiIcon("plus", 12), " 添加账号") : null), addAccountSection, ...renderedAccountCards, geminiAppAccountsCard);
+		}
+		//#endregion
+		//#region src/client/sections/ConfigSection.ts
+		const { createElement: h$5, useState: useState$3, useCallback: useCallback$1 } = require("react");
+		function ConfigSection(props) {
+			const { status, isBusy, onSaveConfig, onNavigateModels } = props;
+			const [cfgDrafts, setCfgDrafts] = useState$3({});
+			const [geminiAppTokenInput, setGeminiAppTokenInput] = useState$3("");
+			const hasToken = status?.hasGeminiAppToken === true;
+			const handleSaveDraft = useCallback$1((key) => {
+				const val = (cfgDrafts[key] ?? "").trim();
+				onSaveConfig(key, val);
+			}, [cfgDrafts, onSaveConfig]);
+			const renderConfigRow = (key, label, hint, isLast = false) => {
+				const draft = cfgDrafts[key] ?? "";
+				return h$5("div", {
+					key,
+					style: {
+						display: "flex",
+						gap: "var(--agy-space-2)",
+						alignItems: "center",
+						padding: "10px 0",
+						borderBottom: isLast ? "none" : "1px solid var(--agy-border-divider)",
+						flexWrap: "wrap"
+					}
+				}, h$5("div", { style: {
+					width: "210px",
+					flexShrink: 0
+				} }, h$5("div", { style: {
+					fontSize: "var(--agy-font-sm)",
+					fontWeight: 700,
+					color: "var(--agy-text-primary)"
+				} }, label), h$5("div", { style: {
+					fontSize: "var(--agy-font-xs)",
+					color: "var(--agy-text-tertiary)",
+					marginTop: "2px"
+				} }, hint)), h$5("input", {
+					className: "agy-input",
+					style: {
+						...S.input,
+						maxWidth: "380px"
+					},
+					value: draft,
+					placeholder: key === "baseUrl" ? "留空则不修改（后端不回显该值）" : hint,
+					"aria-label": label,
+					onChange: (e) => setCfgDrafts((prev) => ({
+						...prev,
+						[key]: e.target.value
+					}))
+				}), h$5("button", {
+					className: "agy-btn",
+					style: S.btnSmPrimary,
+					disabled: isBusy || key !== "baseUrl" && draft.trim() === "",
+					onClick: () => handleSaveDraft(key)
+				}, "保存"));
+			};
+			const renderSwitchRow = (key, title, subtitle, ariaLabel, onLabel = "已开启", offLabel = "已关闭", isLast = false) => {
+				const checked = status?.[key] === true;
+				return h$5("div", {
+					key: String(key),
+					style: {
+						display: "flex",
+						gap: "var(--agy-space-2)",
+						alignItems: "center",
+						padding: "10px 0",
+						borderBottom: isLast ? "none" : "1px solid var(--agy-border-subtle)",
+						flexWrap: "wrap"
+					}
+				}, h$5("div", { style: {
+					width: "210px",
+					flexShrink: 0
+				} }, h$5("div", { style: {
+					fontSize: "var(--agy-font-sm)",
+					fontWeight: 700,
+					color: "var(--agy-text-primary)"
+				} }, title), h$5("div", { style: {
+					fontSize: "var(--agy-font-xs)",
+					color: "var(--agy-text-tertiary)",
+					marginTop: "2px"
+				} }, subtitle)), h$5("button", {
+					className: "agy-btn",
+					role: "switch",
+					"aria-checked": checked,
+					"aria-label": ariaLabel,
+					style: {
+						...S.btnSm,
+						background: checked ? "var(--agy-accent)" : "var(--agy-bg-btn)",
+						color: checked ? "var(--agy-on-accent)" : "var(--agy-text-btn)",
+						border: `1px solid ${checked ? "var(--agy-border-btn-primary)" : "var(--agy-border-btn)"}`,
+						transition: "background 160ms ease, color 160ms ease, border-color 160ms ease"
+					},
+					disabled: isBusy,
+					onClick: () => void onSaveConfig(String(key), !checked)
+				}, checked ? onLabel : offLabel));
+			};
+			return h$5("div", null, h$5("div", {
+				className: "agy-rise",
+				role: "note",
+				style: {
+					display: "flex",
+					alignItems: "center",
+					justifyContent: "space-between",
+					gap: "var(--agy-space-2)",
+					padding: "10px var(--agy-space-3)",
+					borderRadius: "var(--agy-radius-md)",
+					background: "var(--agy-info-bg)",
+					border: "1px solid var(--agy-info-border)",
+					color: "var(--agy-info-text)",
+					fontSize: "var(--agy-font-sm)",
+					marginBottom: "var(--agy-space-3)",
+					flexWrap: "wrap"
+				}
+			}, h$5("span", null, "默认模型与推理强度已整合至「模型」页，可直接在模型目录中一键切换。"), onNavigateModels ? h$5("button", {
+				className: "agy-btn",
+				style: S.btnSm,
+				onClick: onNavigateModels,
+				"aria-label": "前往模型页设置默认模型与推理强度"
+			}, uiIcon("layers", 12), " 前往「模型」页") : null), h$5("div", {
+				className: "agy-rise",
+				style: S.card
+			}, h$5("div", { style: {
+				...S.panelCaption,
+				marginBottom: "var(--agy-space-1)"
+			} }, "基础连接与工具（POST /config）"), renderConfigRow("baseUrl", "上游地址 (baseUrl)", "高级：仅在你明确需要切换上游时填写"), renderSwitchRow("askTool", "Ask 工具注册 (askTool)", "在 DSH 中注册 agy ask 工具开关", "切换 Ask 工具注册", "已注册", "未注册", true)), h$5("div", {
+				className: "agy-rise",
+				style: {
+					...S.card,
+					marginTop: "var(--agy-space-3)"
+				}
+			}, h$5("div", { style: {
+				...S.panelCaption,
+				marginBottom: "var(--agy-space-1)"
+			} }, "Gemini App (Robin) 双轨分流"), renderSwitchRow("geminiAppOffloadEnabled", "无关工具任务分流至 Gemini App", "启用后将无工具调用请求自动分流至 Gemini App API（并同步启用 geminiAppEnabled）", "切换无关工具任务分流至 Gemini App"), renderSwitchRow("geminiAppAskToolEnabled", "专家委派工具 (expert_ask)", "在主 Agent 会话中注册 expert_ask 工具并启用“脑手分离”委派规则，将思考、编码、审查、写作与推理任务交给 Robin API", "切换专家委派工具 expert_ask"), renderSwitchRow("geminiAppFreshSessionSingleTurn", "小上下文单轮裁剪", "开启后在上下文较小时仅保留 system 与最后一条 user 消息起新会话", "切换小上下文单轮裁剪"), renderSwitchRow("geminiAppOffloadFallbackToAgy", "失败自动回退 AGY", "Gemini App 首包前失败时自动无缝回退至 AGY 账号池", "切换失败自动回退 AGY"), h$5("div", { style: {
+				display: "flex",
+				gap: "var(--agy-space-2)",
+				alignItems: "center",
+				padding: "10px 0",
+				flexWrap: "wrap"
+			} }, h$5("div", { style: {
+				width: "210px",
+				flexShrink: 0
+			} }, h$5("div", { style: {
+				fontSize: "var(--agy-font-sm)",
+				fontWeight: 700,
+				color: "var(--agy-text-primary)"
+			} }, "Gemini App Token"), h$5("div", { style: {
+				fontSize: "var(--agy-font-xs)",
+				color: hasToken ? "var(--agy-strong-ok)" : "var(--agy-text-tertiary)",
+				marginTop: "2px"
+			} }, hasToken ? "状态：已配置（已脱敏）" : "状态：未配置")), h$5("input", {
+				type: "password",
+				className: "agy-input",
+				value: geminiAppTokenInput,
+				placeholder: hasToken ? "已配置（输入新 Token 可覆盖）" : "粘贴 ya29.m.* Assistant OAuth Token",
+				"aria-label": "Gemini App Token",
+				style: {
+					...S.input,
+					flex: "1 1 240px",
+					minWidth: "200px"
+				},
+				onChange: (e) => setGeminiAppTokenInput(e.target.value)
+			}), h$5("button", {
+				className: "agy-btn",
+				style: S.btnSmPrimary,
+				disabled: isBusy || geminiAppTokenInput.trim() === "",
+				onClick: () => {
+					const val = geminiAppTokenInput.trim();
+					onSaveConfig("geminiAppToken", val).then((ok) => {
+						if (ok === true) setGeminiAppTokenInput("");
+					});
+				}
+			}, hasToken ? "更新" : "保存"), hasToken ? h$5("button", {
+				className: "agy-btn",
+				style: S.btnSm,
+				disabled: isBusy,
+				"aria-label": "清除 Gemini App Token",
+				onClick: () => {
+					onSaveConfig("geminiAppToken", "").then((ok) => {
+						if (ok === true) setGeminiAppTokenInput("");
+					});
+				}
+			}, "清除") : null)));
+		}
+		//#endregion
+		//#region src/client/sections/DiagnosticsSection.ts
+		const { createElement: h$4 } = require("react");
+		const win$2 = globalThis;
+		function formatNumber$1(n) {
+			return Number.isFinite(n) ? n.toLocaleString("en-US") : "0";
+		}
+		function formatClock$2(ms) {
+			if (!ms) return "—";
+			try {
+				return new Date(ms).toLocaleTimeString("zh-CN", { hour12: false });
+			} catch {
+				return "—";
+			}
+		}
+		function maskEmail$4(email) {
+			if (!email) return "";
+			const at = email.indexOf("@");
+			if (at <= 1) return email;
+			const local = email.slice(0, at);
+			const domain = email.slice(at + 1);
+			return `${local.slice(0, Math.min(2, local.length))}***@${domain}`;
+		}
+		function DiagnosticsSection(props) {
+			const { status, pollOk, lastUpdatedAt, poolAuthPhase, isBusy, onRefresh } = props;
+			const catalog = status?.catalog ?? {};
+			const lastRun = status?.lastRun ?? {};
+			const endpointErrors = Array.isArray(catalog.endpointErrors) ? catalog.endpointErrors.length : 0;
+			const accounts = status?.pool?.accounts ?? [];
+			const primaryId = status?.pool?.primaryAccountId;
+			const primaryAcc = accounts.find((a) => a.id === primaryId);
+			const primaryLabel = primaryAcc ? maskEmail$4(primaryAcc.email) || primaryAcc.alias || primaryAcc.id : primaryId ?? "未设置";
+			const origin = win$2.location?.origin ?? "";
+			const renderDiagRow = (label, value, mono = true, isLast = false) => h$4("div", { style: {
+				display: "flex",
+				gap: "var(--agy-space-3)",
+				padding: "8px 0",
+				borderBottom: isLast ? "none" : "1px solid var(--agy-border-divider)",
+				flexWrap: "wrap"
+			} }, h$4("span", { style: {
+				width: "170px",
+				color: "var(--agy-text-tertiary)",
+				fontSize: "var(--agy-font-sm)",
+				flexShrink: 0
+			} }, label), h$4("span", {
+				className: mono ? "agy-num" : void 0,
+				style: {
+					color: "var(--agy-text-primary)",
+					fontSize: "var(--agy-font-sm)",
+					wordBreak: "break-all",
+					flex: 1,
+					fontVariantNumeric: mono ? "tabular-nums" : void 0
+				}
+			}, value));
+			return h$4("div", null, !pollOk ? renderStrip("warn", `轮询中断：以下为 ${formatClock$2(lastUpdatedAt)} 的最后一次成功拉取`) : null, h$4("div", {
+				className: "agy-rise",
+				style: S.card
+			}, renderDiagRow("运行状态", status ? status.enabled === false ? "已停用" : "运行中" : "未加载", false), renderDiagRow("插件版本", status?.version ?? "未上报"), renderDiagRow("休眠原因", status?.dormantReason ?? "无", false), renderDiagRow("主用账号", primaryLabel, false), renderDiagRow("默认模型 / 强度", `${status?.defaultModel ?? "未配置"}${status?.defaultEffort ? ` (${status.defaultEffort})` : ""}`), renderDiagRow("构建校验 (distSha256)", status?.distSha256 ? `${String(status.distSha256).slice(0, 16)}…` : "未上报"), renderDiagRow("上游目录", `${catalog.source ?? "—"} · ${formatNumber$1(catalog.count ?? 0)} 个模型${endpointErrors > 0 ? ` · ${endpointErrors} 条端点错误` : ""}`, false), renderDiagRow("目录最近错误", catalog.lastError ?? "无", false), renderDiagRow("最近一次运行", lastRun.ok === void 0 ? "无记录" : `${lastRun.ok ? "成功" : `失败 (code ${lastRun.code ?? "—"})`} · ${lastRun.durationMs ?? "—"}ms · ${lastRun.model ?? "—"}`, false), renderDiagRow("授权阶段", `auth: ${status?.auth?.phase ?? "—"} · poolAuth: ${poolAuthPhase}`, false), renderDiagRow("工作区", status?.workspaceRoot ?? "未上报"), renderDiagRow("数据通道与轮询周期", `${origin || "同源"}${API_PREFIX} · 3s 状态轮询 / 10s 统计轮询`, true, true)), h$4("div", { style: {
+				display: "flex",
+				gap: "var(--agy-space-2)",
+				marginTop: "var(--agy-space-3)"
+			} }, h$4("button", {
+				className: "agy-btn",
+				style: S.btnSmPrimary,
+				onClick: () => void onRefresh(),
+				disabled: isBusy,
+				"aria-label": "立即刷新状态"
+			}, uiIcon("refresh", 12), " 立即刷新状态")));
+		}
+		//#endregion
+		//#region src/client/sections/ModelsSection.ts
+		const { createElement: h$3, useState: useState$2, useEffect: useEffect$2 } = require("react");
+		const FAMILY_BRAND = {
+			google: "gemini",
+			anthropic: "claude",
+			openai: "openai"
+		};
+		const FAMILY_LABEL = {
+			google: "Gemini",
+			anthropic: "Claude",
+			openai: "GPT-OSS",
+			unknown: "其他"
+		};
+		const EFFORT_PRESETS = [
+			"low",
+			"medium",
+			"high",
+			"xhigh"
+		];
+		function maskEmail$3(email) {
+			if (!email || typeof email !== "string") return "";
+			const at = email.indexOf("@");
+			if (at <= 2) return email;
+			return `${email.slice(0, 2)}***${email.slice(at)}`;
+		}
+		function accountDisplayName$1(acc, idx) {
+			const isAutoAlias = !acc.alias || /^备用.*账号/i.test(acc.alias) || /^主账号/i.test(acc.alias);
+			if (acc.email) return isAutoAlias ? acc.email : acc.alias;
+			return acc.alias || `账号 ${idx + 1}`;
+		}
+		function collectUnionModels(panels, accounts) {
+			const map = /* @__PURE__ */ new Map();
+			for (const acc of accounts) {
+				const { payload } = selectPanelPayload(panels[acc.id], acc);
+				for (const group of payload.familyModels) for (const m of group.models) if (!map.has(m.id)) map.set(m.id, {
+					id: m.id,
+					name: m.name || m.id,
+					family: m.family
+				});
+			}
+			return Array.from(map.values()).sort((a, b) => a.id.localeCompare(b.id));
+		}
+		function renderSkeletonRow$1(widthPct, height = 14) {
+			return h$3("div", { style: {
+				width: `${widthPct}%`,
+				height: `${height}px`,
+				borderRadius: "var(--agy-radius-sm)",
+				background: "var(--agy-bg-subtle)",
+				marginBottom: "8px"
+			} });
+		}
+		function ModelsSection(props) {
+			const { status, accounts, modelPanels, expandedModels, modelQueries, familyFilters, isBusy, onToggleExpand, onQueryChange, onFamilyFilterChange, onLoadModelsPanel, onRefreshModelsPanel, onSaveConfig } = props;
+			const currentDefaultModel = status?.defaultModel ?? "";
+			const currentDefaultEffort = status?.defaultEffort ?? "";
+			const [modelDraft, setModelDraft] = useState$2(currentDefaultModel);
+			const [effortDraft, setEffortDraft] = useState$2(currentDefaultEffort);
+			const [savingModel, setSavingModel] = useState$2(false);
+			const [savingEffort, setSavingEffort] = useState$2(false);
+			const [modelFeedback, setModelFeedback] = useState$2(null);
+			const [effortFeedback, setEffortFeedback] = useState$2(null);
+			const [globalQuery, setGlobalQuery] = useState$2("");
+			const [globalFamily, setGlobalFamily] = useState$2("all");
+			useEffect$2(() => {
+				if (currentDefaultModel && !modelDraft) setModelDraft(currentDefaultModel);
+			}, [currentDefaultModel]);
+			useEffect$2(() => {
+				if (currentDefaultEffort && !effortDraft) setEffortDraft(currentDefaultEffort);
+			}, [currentDefaultEffort]);
+			const unionModels = collectUnionModels(modelPanels, accounts);
+			const modelUnionTotal = computeModelUnion(modelPanels, accounts);
+			const primaryId = status?.pool?.primaryAccountId;
+			const handleSaveModel = async (nextModel) => {
+				const trimmed = nextModel.trim();
+				if (!trimmed) return;
+				setSavingModel(true);
+				setModelFeedback(null);
+				try {
+					if (await onSaveConfig("defaultModel", trimmed)) {
+						setModelDraft(trimmed);
+						setModelFeedback(`已保存默认模型：${trimmed}`);
+					} else setModelFeedback("保存失败，请检查网络或配置");
+				} catch (err) {
+					setModelFeedback(`保存失败：${err instanceof Error ? err.message : String(err)}`);
+				} finally {
+					setSavingModel(false);
+				}
+			};
+			const handleSaveEffort = async (nextEffort) => {
+				const trimmed = nextEffort.trim();
+				if (!trimmed) return;
+				setSavingEffort(true);
+				setEffortFeedback(null);
+				try {
+					if (await onSaveConfig("defaultEffort", trimmed)) {
+						setEffortDraft(trimmed);
+						setEffortFeedback(`已保存推理强度：${trimmed}`);
+					} else setEffortFeedback("保存失败，请检查网络或配置");
+				} catch (err) {
+					setEffortFeedback(`保存失败：${err instanceof Error ? err.message : String(err)}`);
+				} finally {
+					setSavingEffort(false);
+				}
+			};
+			const isPresetEffort = EFFORT_PRESETS.includes(effortDraft);
+			const defaultConfigCard = h$3("div", {
+				className: "agy-rise",
+				style: {
+					...S.card,
+					marginBottom: "var(--agy-space-4)"
+				},
+				role: "region",
+				"aria-label": "默认模型与推理配置"
+			}, h$3("div", { style: {
+				display: "flex",
+				justifyContent: "space-between",
+				alignItems: "flex-start",
+				gap: "var(--agy-space-2)",
+				flexWrap: "wrap",
+				marginBottom: "var(--agy-space-3)"
+			} }, h$3("div", null, h$3("div", { style: S.panelCaption }, "默认模型与推理配置"), h$3("div", { style: {
+				fontSize: "var(--agy-font-xs)",
+				color: "var(--agy-text-tertiary)",
+				marginTop: "2px"
+			} }, "写入插件配置（POST /config），新会话与未显式指定模型的请求将使用此默认值")), h$3("div", { style: {
+				display: "flex",
+				gap: "var(--agy-space-1)",
+				flexWrap: "wrap"
+			} }, currentDefaultModel ? renderBadge(`当前模型: ${currentDefaultModel}`, "primary") : renderBadge("未设置默认模型", "warn"), currentDefaultEffort ? renderBadge(`Effort: ${currentDefaultEffort}`, "info") : null)), h$3("div", { style: {
+				paddingBottom: "var(--agy-space-3)",
+				marginBottom: "var(--agy-space-3)",
+				borderBottom: "1px solid var(--agy-border-divider)"
+			} }, h$3("div", { style: {
+				fontSize: "var(--agy-font-sm)",
+				fontWeight: 600,
+				color: "var(--agy-text-primary)",
+				marginBottom: "6px"
+			} }, "默认模型 (defaultModel)"), h$3("div", { style: {
+				display: "flex",
+				gap: "var(--agy-space-2)",
+				flexWrap: "wrap",
+				alignItems: "center"
+			} }, unionModels.length > 0 ? h$3("select", {
+				style: {
+					...S.input,
+					flex: "1 1 220px",
+					cursor: "pointer"
+				},
+				value: unionModels.some((m) => m.id === modelDraft) ? modelDraft : "",
+				"aria-label": "从已发现模型中选择默认模型",
+				onChange: (e) => {
+					if (e.target.value) setModelDraft(e.target.value);
+				}
+			}, h$3("option", { value: "" }, `从已发现并集选择 (${unionModels.length} 个)…`), ...unionModels.map((m) => h$3("option", {
+				key: m.id,
+				value: m.id
+			}, `${m.id}${m.name && m.name !== m.id ? ` (${m.name})` : ""}`))) : null, h$3("input", {
+				type: "text",
+				style: {
+					...S.input,
+					flex: "1 1 220px"
+				},
+				placeholder: currentDefaultModel || "输入任意模型 ID，如 claude-sonnet-4-5",
+				value: modelDraft,
+				"aria-label": "自定义默认模型 ID",
+				onChange: (e) => setModelDraft(e.target.value)
+			}), h$3("button", {
+				type: "button",
+				className: "agy-btn",
+				style: S.btnPrimary,
+				disabled: isBusy || savingModel || !modelDraft.trim(),
+				onClick: () => void handleSaveModel(modelDraft)
+			}, savingModel ? "保存中…" : "保存模型")), modelFeedback ? h$3("div", {
+				role: "status",
+				style: {
+					fontSize: "var(--agy-font-xs)",
+					color: modelFeedback.startsWith("保存失败") ? "var(--agy-danger-text)" : "var(--agy-ok-text)",
+					marginTop: "6px"
+				}
+			}, modelFeedback) : null), h$3("div", null, h$3("div", { style: {
+				fontSize: "var(--agy-font-sm)",
+				fontWeight: 600,
+				color: "var(--agy-text-primary)",
+				marginBottom: "6px"
+			} }, "默认推理强度 (defaultEffort)"), h$3("div", { style: {
+				display: "flex",
+				gap: "var(--agy-space-2)",
+				flexWrap: "wrap",
+				alignItems: "center"
+			} }, renderSegmentedControl(EFFORT_PRESETS.map((lvl) => ({
+				value: lvl,
+				label: lvl
+			})), isPresetEffort ? effortDraft : "", (next) => {
+				setEffortDraft(next);
+				handleSaveEffort(next);
+			}, "默认推理强度预设"), h$3("input", {
+				type: "text",
+				style: {
+					...S.input,
+					flex: "1 1 160px",
+					maxWidth: "220px"
+				},
+				placeholder: currentDefaultEffort || "自定义 effort 值",
+				value: effortDraft,
+				"aria-label": "自定义推理强度",
+				onChange: (e) => setEffortDraft(e.target.value)
+			}), h$3("button", {
+				type: "button",
+				className: "agy-btn",
+				style: S.btnSm,
+				disabled: isBusy || savingEffort || !effortDraft.trim(),
+				onClick: () => void handleSaveEffort(effortDraft)
+			}, savingEffort ? "保存中…" : "保存")), effortFeedback ? h$3("div", {
+				role: "status",
+				style: {
+					fontSize: "var(--agy-font-xs)",
+					color: effortFeedback.startsWith("保存失败") ? "var(--agy-danger-text)" : "var(--agy-ok-text)",
+					marginTop: "6px"
+				}
+			}, effortFeedback) : null));
+			const renderModelPanel = (acc, idx) => {
+				const panel = modelPanels[acc.id] ?? EMPTY_PANEL;
+				const expanded = !!expandedModels[acc.id];
+				const { payload, usingFallback } = selectPanelPayload(panel, acc);
+				const displayName = accountDisplayName$1(acc, idx);
+				const isPrimary = acc.id === primaryId;
+				const ids = payload.familyModels.flatMap((g) => g.models.map((m) => m.id));
+				const ownIdSet = new Set(ids);
+				const others = computeOtherAccountModelIds(modelPanels, accounts, acc.id);
+				const uniqueToThisCount = accounts.length > 1 ? ids.filter((id) => !others.has(id)).length : 0;
+				const effectiveQuery = (modelQueries[acc.id] ?? globalQuery).trim().toLowerCase();
+				const effectiveFamily = familyFilters[acc.id] ?? globalFamily;
+				const filteredGroups = payload.familyModels.filter((g) => effectiveFamily === "all" || g.family === effectiveFamily).map((g) => ({
+					...g,
+					models: g.models.filter((m) => {
+						if (!effectiveQuery) return true;
+						return m.id.toLowerCase().includes(effectiveQuery) || m.name && m.name.toLowerCase().includes(effectiveQuery);
+					})
+				})).filter((g) => g.models.length > 0);
+				const statusStrips = [];
+				if (panel.status === "error" && panel.error) statusStrips.push(renderStrip("error", `模型端点不可用：${panel.error}（${panel.payload ? "下方为最近一次成功发现的模型数据，失败不会清空" : "下方为最近一次额度同步的兜底模型数据"}）`, () => void onLoadModelsPanel(acc.id)));
+				if (panel.refreshError) statusStrips.push(renderStrip("warn", `刷新失败：${panel.refreshError} · 已保留旧模型数据`));
+				const renderModelRow = (m) => {
+					const isUnique = accounts.length > 1 && !others.has(m.id);
+					const pct = typeof m.remainingFraction === "number" && Number.isFinite(m.remainingFraction) ? Math.max(0, Math.min(100, Math.round(m.remainingFraction * 100))) : null;
+					const win = formatQuotaWindow(m.resetTime);
+					const barColor = pct === null ? "var(--agy-text-tertiary)" : pct >= 50 ? "var(--agy-strong-ok)" : pct >= 20 ? "var(--agy-strong-warn)" : "var(--agy-strong-danger)";
+					return h$3("div", {
+						key: m.id,
+						style: {
+							display: "flex",
+							justifyContent: "space-between",
+							alignItems: "center",
+							gap: "var(--agy-space-2)",
+							flexWrap: "wrap",
+							padding: "8px 10px",
+							borderRadius: "var(--agy-radius-md)",
+							background: isUnique ? "var(--agy-tint-primary)" : "var(--agy-bg-subtle)",
+							border: isUnique ? "1px solid var(--agy-accent-border)" : "1px solid var(--agy-border-subtle)"
+						}
+					}, h$3("div", { style: {
+						display: "flex",
+						alignItems: "center",
+						gap: "var(--agy-space-2)",
+						flexWrap: "wrap",
+						minWidth: "200px",
+						flex: "1 1 240px"
+					} }, h$3("span", {
+						className: "agy-num",
+						style: {
+							fontWeight: 600,
+							fontSize: "var(--agy-font-sm)",
+							color: "var(--agy-text-primary)"
+						}
+					}, m.id), m.name && m.name !== m.id ? h$3("span", { style: {
+						fontSize: "var(--agy-font-xs)",
+						color: "var(--agy-text-tertiary)"
+					} }, m.name) : null, isUnique ? renderBadge("仅此账号", "primary") : null), h$3("div", { style: {
+						display: "flex",
+						alignItems: "center",
+						gap: "var(--agy-space-2)",
+						minWidth: "160px"
+					} }, pct !== null ? h$3("div", { style: {
+						display: "flex",
+						alignItems: "center",
+						gap: "8px",
+						width: "140px"
+					} }, h$3("div", { style: {
+						...S.progressBarBg,
+						flex: 1
+					} }, h$3("div", { style: {
+						width: `${pct}%`,
+						height: "100%",
+						background: barColor,
+						borderRadius: "inherit",
+						transition: "width 240ms ease"
+					} })), h$3("span", {
+						className: "agy-num",
+						style: {
+							fontSize: "var(--agy-font-xs)",
+							color: "var(--agy-text-secondary)",
+							width: "36px",
+							textAlign: "right"
+						}
+					}, `${pct}%`)) : h$3("span", { style: {
+						fontSize: "var(--agy-font-xs)",
+						color: "var(--agy-text-tertiary)"
+					} }, "无配额数据"), win.resetText ? h$3("span", {
+						className: "agy-num",
+						style: {
+							fontSize: "var(--agy-font-xs)",
+							color: "var(--agy-text-tertiary)"
+						}
+					}, win.resetText) : null));
+				};
+				const panelBody = !expanded ? null : panel.status === "loading" && !panel.payload ? h$3("div", {
+					id: modelsPanelDomId(acc.id),
+					role: "region",
+					"aria-label": `${displayName} 的模型清单`,
+					style: { paddingTop: "var(--agy-space-2)" }
+				}, renderSkeletonRow$1(70, 16), renderSkeletonRow$1(85), renderSkeletonRow$1(55)) : h$3("div", {
+					id: modelsPanelDomId(acc.id),
+					role: "region",
+					"aria-label": `${displayName} 的模型清单`,
+					style: { paddingTop: "var(--agy-space-2)" }
+				}, ...statusStrips, h$3("div", { style: {
+					display: "flex",
+					gap: "var(--agy-space-2)",
+					flexWrap: "wrap",
+					alignItems: "center",
+					marginBottom: "var(--agy-space-2)"
+				} }, h$3("input", {
+					type: "text",
+					style: {
+						...S.input,
+						flex: "1 1 180px"
+					},
+					placeholder: "搜索此账号模型 ID / 名称…",
+					value: modelQueries[acc.id] ?? "",
+					"aria-label": `搜索 ${displayName} 的模型`,
+					onChange: (e) => onQueryChange(acc.id, e.target.value)
+				}), h$3("div", { style: {
+					display: "flex",
+					gap: "4px",
+					flexWrap: "wrap"
+				} }, [
+					"all",
+					"google",
+					"anthropic",
+					"openai",
+					"unknown"
+				].map((fam) => {
+					return h$3("button", {
+						key: fam,
+						type: "button",
+						className: "agy-btn",
+						style: effectiveFamily === fam ? S.btnSmPrimary : S.btnSm,
+						onClick: () => onFamilyFilterChange(acc.id, fam)
+					}, fam === "all" ? "全部" : FAMILY_LABEL[fam]);
+				}))), filteredGroups.length === 0 ? h$3("div", { style: {
+					fontSize: "var(--agy-font-sm)",
+					color: "var(--agy-text-tertiary)",
+					padding: "var(--agy-space-2) 0"
+				} }, ownIdSet.size === 0 ? "暂无已发现模型，可点击「刷新发现模型」拉取。" : "没有匹配当前筛选条件的模型。") : h$3("div", { style: {
+					display: "flex",
+					flexDirection: "column",
+					gap: "var(--agy-space-3)"
+				} }, ...filteredGroups.map((group) => h$3("div", { key: group.family }, h$3("div", { style: {
+					display: "flex",
+					alignItems: "center",
+					gap: "6px",
+					marginBottom: "6px"
+				} }, group.family !== "unknown" ? brandIcon(FAMILY_BRAND[group.family], 13) : null, h$3("span", { style: {
+					fontSize: "var(--agy-font-xs)",
+					fontWeight: 600,
+					color: "var(--agy-text-secondary)"
+				} }, FAMILY_LABEL[group.family]), h$3("span", {
+					className: "agy-num",
+					style: {
+						fontSize: "var(--agy-font-xs)",
+						color: "var(--agy-text-tertiary)"
+					}
+				}, `(${group.models.length})`)), h$3("div", { style: {
+					display: "flex",
+					flexDirection: "column",
+					gap: "6px"
+				} }, ...group.models.map(renderModelRow))))));
+				return h$3("div", {
+					key: acc.id,
+					className: "agy-card-hover agy-rise",
+					style: isPrimary ? S.cardPrimary : S.card
+				}, h$3("div", { style: {
+					display: "flex",
+					justifyContent: "space-between",
+					alignItems: "center",
+					gap: "var(--agy-space-2)",
+					flexWrap: "wrap"
+				} }, h$3("div", { style: {
+					display: "flex",
+					alignItems: "center",
+					gap: "var(--agy-space-2)",
+					flexWrap: "wrap"
+				} }, h$3("span", { style: {
+					fontWeight: 600,
+					fontSize: "var(--agy-font-md)",
+					color: "var(--agy-text-primary)"
+				} }, displayName), acc.email && displayName !== acc.email ? h$3("span", { style: S.muted }, maskEmail$3(acc.email)) : null, isPrimary ? renderBadge("主用", "primary") : null, h$3("span", {
+					className: "agy-num",
+					style: S.muted
+				}, `${ownIdSet.size} 个模型`), usingFallback ? renderBadge("额度兜底", "warn") : renderBadge("API 发现", "ok"), uniqueToThisCount > 0 ? renderBadge(`独有 ${uniqueToThisCount}`, "info") : null), h$3("div", { style: {
+					display: "flex",
+					gap: "var(--agy-space-1)",
+					flexWrap: "wrap"
+				} }, h$3("button", {
+					type: "button",
+					className: "agy-btn",
+					style: S.btnSm,
+					disabled: isBusy || panel.status === "loading",
+					onClick: () => void onRefreshModelsPanel(acc.id),
+					"aria-label": `刷新 ${displayName} 的发现模型`
+				}, uiIcon("refresh", 12), panel.status === "loading" ? " 刷新中…" : " 刷新发现模型"), h$3("button", {
+					type: "button",
+					className: "agy-btn",
+					style: expanded ? S.btnSmPrimary : S.btnSm,
+					"aria-expanded": expanded,
+					"aria-controls": modelsPanelDomId(acc.id),
+					onClick: () => onToggleExpand(acc.id)
+				}, expanded ? "收起" : "展开模型"))), panelBody);
+			};
+			return h$3("div", { className: "agy-rise" }, h$3("div", { style: {
+				display: "flex",
+				justifyContent: "space-between",
+				alignItems: "flex-end",
+				gap: "var(--agy-space-3)",
+				flexWrap: "wrap",
+				marginBottom: "var(--agy-space-3)"
+			} }, h$3("div", null, h$3("div", { style: {
+				fontSize: "var(--agy-font-xs)",
+				fontWeight: 600,
+				letterSpacing: "0.08em",
+				textTransform: "uppercase",
+				color: "var(--agy-text-tertiary)",
+				marginBottom: "2px"
+			} }, "MODELS & ROUTING"), h$3("div", { style: S.panelTitle }, "模型与默认配置"), h$3("div", { style: {
+				fontSize: "var(--agy-font-sm)",
+				color: "var(--agy-text-secondary)",
+				marginTop: "2px"
+			} }, "统一管理默认模型、推理强度与各账号实时发现的模型配额"))), defaultConfigCard, h$3("div", { style: {
+				display: "flex",
+				justifyContent: "space-between",
+				alignItems: "center",
+				gap: "var(--agy-space-2)",
+				flexWrap: "wrap",
+				marginBottom: "var(--agy-space-2)"
+			} }, h$3("span", { style: S.panelCaption }, "账号模型目录与配额"), h$3("span", {
+				className: "agy-num",
+				style: {
+					fontSize: "var(--agy-font-xs)",
+					color: "var(--agy-text-tertiary)"
+				}
+			}, `已发现模型并集 ${modelUnionTotal} 个 · 灰度差异以并集为基准`)), accounts.length > 0 ? h$3("div", { style: {
+				display: "flex",
+				gap: "var(--agy-space-2)",
+				flexWrap: "wrap",
+				alignItems: "center",
+				marginBottom: "var(--agy-space-3)"
+			} }, h$3("input", {
+				type: "text",
+				style: {
+					...S.input,
+					flex: "1 1 220px"
+				},
+				placeholder: "全局搜索模型 ID / 名称…",
+				value: globalQuery,
+				"aria-label": "全局搜索模型",
+				onChange: (e) => setGlobalQuery(e.target.value)
+			}), h$3("div", { style: {
+				display: "flex",
+				gap: "4px",
+				flexWrap: "wrap"
+			} }, [
+				"all",
+				"google",
+				"anthropic",
+				"openai",
+				"unknown"
+			].map((fam) => {
+				return h$3("button", {
+					key: fam,
+					type: "button",
+					className: "agy-btn",
+					style: globalFamily === fam ? S.btnSmPrimary : S.btnSm,
+					onClick: () => setGlobalFamily(fam)
+				}, fam === "all" ? "全部家族" : FAMILY_LABEL[fam]);
+			}))) : null, accounts.length === 0 ? renderEmptyState("layers", "暂无账号模型数据", "请先在「账号」页添加至少一个 Google 账号。") : h$3("div", null, ...accounts.map((acc, idx) => renderModelPanel(acc, idx))));
+		}
+		//#endregion
+		//#region src/client/sections/OverviewSection.ts
+		const { createElement: h$2 } = require("react");
+		function maskEmail$2(email) {
+			if (!email || typeof email !== "string") return "";
+			const at = email.indexOf("@");
+			if (at <= 2) return email;
+			return `${email.slice(0, 2)}***${email.slice(at)}`;
+		}
+		function formatClock$1(ms) {
+			if (!ms) return "—";
+			try {
+				return new Date(ms).toLocaleTimeString("zh-CN", { hour12: false });
+			} catch {
+				return "—";
+			}
+		}
+		function accountDisplayName(acc, idx) {
+			const isAutoAlias = !acc.alias || /^备用.*账号/i.test(acc.alias) || /^主账号/i.test(acc.alias);
+			if (acc.email) return isAutoAlias ? acc.email : acc.alias;
+			return acc.alias || `账号 ${idx + 1}`;
+		}
+		function OverviewSection(props) {
+			const { status, accounts, pollOk, lastUpdatedAt, onNavigate, onBeginAddAccount, onRefreshStatus } = props;
+			if (accounts.length === 0 && !status) return renderEmptyState("refresh", "插件状态还在加载中", "正在连接 CloudCode Link 后端服务…");
+			if (accounts.length === 0) return renderEmptyState("plus", "还没有添加任何账号", "添加第一个 Google 账号后即可开始使用模型配额与路由。", h$2("button", {
+				type: "button",
+				className: "agy-btn",
+				style: S.btnPrimary,
+				onClick: onBeginAddAccount
+			}, uiIcon("plus", 12), " 添加第一个账号"));
+			const dormant = status?.dormantReason;
+			const primaryId = status?.pool?.primaryAccountId;
+			const primaryAcc = accounts.find((a) => a.id === primaryId) ?? accounts[0];
+			const primaryLabel = primaryAcc ? primaryAcc.email ? maskEmail$2(primaryAcc.email) : primaryAcc.alias || primaryAcc.id : "未指定";
+			const readyCount = accounts.filter((a) => {
+				const inCooldown = Object.values(a.cooldowns ?? {}).some((cd) => {
+					const until = cd?.cooldownUntil;
+					return typeof until === "number" && until > Date.now();
+				});
+				return a.enabled && !a.authRequired && !inCooldown;
+			}).length;
+			const cooldownCount = accounts.filter((a) => Object.values(a.cooldowns ?? {}).some((cd) => {
+				const until = cd?.cooldownUntil;
+				return typeof until === "number" && until > Date.now();
+			})).length;
+			const lastRun = status?.lastRun;
+			const lastRunValue = lastRun ? lastRun.ok ? "成功" : "失败" : "暂无";
+			const lastRunSub = lastRun?.durationMs != null ? `${lastRun.durationMs} ms${lastRun.model ? ` · ${lastRun.model}` : ""}` : lastRun?.model || "等待首次调用";
+			return h$2("div", { className: "agy-rise" }, h$2("div", { style: {
+				display: "flex",
+				justifyContent: "space-between",
+				alignItems: "flex-end",
+				gap: "var(--agy-space-3)",
+				flexWrap: "wrap",
+				marginBottom: "var(--agy-space-3)"
+			} }, h$2("div", null, h$2("div", { style: {
+				fontSize: "var(--agy-font-xs)",
+				fontWeight: 600,
+				letterSpacing: "0.08em",
+				textTransform: "uppercase",
+				color: "var(--agy-text-tertiary)",
+				marginBottom: "2px"
+			} }, "OVERVIEW"), h$2("div", { style: S.panelTitle }, "运行总览"), h$2("div", { style: {
+				fontSize: "var(--agy-font-sm)",
+				color: "var(--agy-text-secondary)",
+				marginTop: "2px"
+			} }, "账号池健康度、配额水位与当前默认路由")), h$2("div", { style: {
+				display: "flex",
+				gap: "var(--agy-space-2)",
+				flexWrap: "wrap"
+			} }, h$2("button", {
+				type: "button",
+				className: "agy-btn",
+				style: S.btnSm,
+				onClick: () => onNavigate("accounts")
+			}, uiIcon("globe", 12), " 管理账号"), h$2("button", {
+				type: "button",
+				className: "agy-btn",
+				style: S.btnSmPrimary,
+				onClick: () => onNavigate("models")
+			}, uiIcon("layers", 12), " 模型与默认配置"))), dormant ? renderStrip("warn", `插件处于休眠状态：${dormant}`) : null, !pollOk ? renderStrip("warn", `轮询中断：页面展示的是 ${formatClock$1(lastUpdatedAt)} 拉取的最后一次数据`, onRefreshStatus) : null, status?.catalog?.lastError ? renderStrip("warn", `模型目录同步告警：${status.catalog.lastError}`) : null, h$2("div", { style: {
+				display: "flex",
+				gap: "var(--agy-space-3)",
+				flexWrap: "wrap",
+				marginBottom: "var(--agy-space-4)"
+			} }, renderKpiCard("可用账号", `${readyCount} / ${accounts.length}`, cooldownCount > 0 ? `主用：${primaryLabel} · ${cooldownCount} 个冷却中` : `主用：${primaryLabel}`, readyCount > 0 ? "var(--agy-strong-ok)" : "var(--agy-strong-warn)"), renderKpiCard("默认模型", status?.defaultModel || "未设置", `推理强度：${status?.defaultEffort || "默认"}`), renderKpiCard("模型目录", `${status?.catalog?.count ?? 0} 个`, `来源：${status?.catalog?.source || "—"}`), renderKpiCard("最近请求", lastRunValue, lastRunSub, lastRun ? lastRun.ok ? "var(--agy-strong-ok)" : "var(--agy-strong-danger)" : void 0)), h$2("div", { style: {
+				display: "flex",
+				justifyContent: "space-between",
+				alignItems: "center",
+				marginBottom: "var(--agy-space-2)"
+			} }, h$2("span", { style: S.panelCaption }, "账号配额水位"), h$2("span", {
+				className: "agy-num",
+				style: {
+					fontSize: "var(--agy-font-xs)",
+					color: "var(--agy-text-tertiary)"
+				}
+			}, `共 ${accounts.length} 个账号 · 更新于 ${formatClock$1(lastUpdatedAt)}`)), ...accounts.map((acc, idx) => {
+				const isPrimary = acc.id === primaryId;
+				const hasCooldown = Object.values(acc.cooldowns ?? {}).some((cd) => {
+					const until = cd?.cooldownUntil;
+					return typeof until === "number" && until > Date.now();
+				});
+				const isAuthRequired = acc.authRequired === true;
+				const isReady = acc.enabled && !isAuthRequired && !hasCooldown;
+				const displayName = accountDisplayName(acc, idx);
+				const quota = acc.quotas ?? {};
+				return h$2("div", {
+					key: acc.id,
+					className: "agy-card-hover",
+					style: isPrimary ? S.cardPrimary : S.card
+				}, h$2("div", { style: {
+					display: "flex",
+					justifyContent: "space-between",
+					alignItems: "center",
+					gap: "var(--agy-space-2)",
+					flexWrap: "wrap",
+					marginBottom: "var(--agy-space-2)"
+				} }, h$2("div", { style: {
+					display: "flex",
+					alignItems: "center",
+					gap: "var(--agy-space-2)",
+					flexWrap: "wrap"
+				} }, h$2("span", { style: {
+					fontWeight: 600,
+					fontSize: "var(--agy-font-md)",
+					color: "var(--agy-text-primary)"
+				} }, displayName), acc.email && displayName !== acc.email ? h$2("span", { style: S.muted }, maskEmail$2(acc.email)) : null, isPrimary ? renderBadge("主用", "primary") : null, isAuthRequired ? renderBadge("需重新授权", "danger") : !acc.enabled ? renderBadge("已禁用", "neutral") : hasCooldown ? renderBadge("冷却中", "warn") : isReady ? renderBadge("就绪", "ok") : renderBadge("未就绪", "warn")), h$2("button", {
+					type: "button",
+					className: "agy-btn",
+					style: S.btnSm,
+					onClick: () => onNavigate("models"),
+					"aria-label": `查看 ${displayName} 的模型与配额`
+				}, uiIcon("layers", 12), " 查看模型")), h$2("div", { style: {
+					display: "grid",
+					gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))",
+					gap: "var(--agy-space-2)"
+				} }, renderQuotaBar("Gemini", quota.google?.remainingFraction, quota.google?.resetTime), renderQuotaBar("Claude", quota.anthropic?.remainingFraction, quota.anthropic?.resetTime), renderQuotaBar("GPT-OSS", quota.openai?.remainingFraction, quota.openai?.resetTime)));
+			}));
+		}
+		//#endregion
+		//#region src/client/sections/UsageSection.ts
+		const { createElement: h$1, useState: useState$1, useEffect: useEffect$1, useCallback } = require("react");
 		const reactDom = require("react-dom");
-		const win = globalThis;
-		const bodyEl = win.document?.body ?? null;
+		const win$1 = globalThis;
+		const bodyEl = win$1.document?.body ?? null;
 		const portalToBody = (node) => {
 			if (bodyEl && reactDom && typeof reactDom.createPortal === "function") return reactDom.createPortal(node, bodyEl);
 			return node;
 		};
+		const PAGE_SIZE = 20;
+		function numOf(obj, key) {
+			const v = obj ? obj[key] : void 0;
+			return typeof v === "number" && Number.isFinite(v) ? v : null;
+		}
+		function renderSkeletonRow(widthPct, heightPx = 14) {
+			return h$1("div", {
+				className: "agy-skeleton",
+				"aria-hidden": true,
+				style: {
+					width: `${widthPct}%`,
+					height: `${heightPx}px`,
+					marginBottom: "var(--agy-space-2)"
+				}
+			});
+		}
+		function renderStatCard(label, value, sub, valueColor) {
+			return h$1("div", {
+				className: "agy-card-hover",
+				style: {
+					...S.statBox,
+					flex: "1 1 150px"
+				}
+			}, h$1("div", { style: S.statLabel }, label), h$1("div", { style: {
+				...S.statValue,
+				color: valueColor ?? "var(--agy-text-primary)"
+			} }, value), sub ? h$1("div", { style: S.statSub }, sub) : null);
+		}
+		function formatNumber(n) {
+			return Number.isFinite(n) ? n.toLocaleString("en-US") : "0";
+		}
+		function formatCompactTokens(n) {
+			if (!n) return "0";
+			if (n >= 1e6) return (n / 1e6).toFixed(1) + "M";
+			if (n >= 1e3) return (n / 1e3).toFixed(1) + "K";
+			return String(n);
+		}
+		function maskEmail$1(email) {
+			if (!email) return "";
+			const at = email.indexOf("@");
+			if (at <= 1) return email;
+			const local = email.slice(0, at);
+			const domain = email.slice(at + 1);
+			return `${local.slice(0, Math.min(2, local.length))}***@${domain}`;
+		}
+		function AuditDrawer(props) {
+			const { open, onClose, statsOverview, accounts, auditTab, onTabChange, auditRequests, auditTotal, auditPage, onPageChange, auditLoading, auditSessions, auditSessionsTotal, auditSessionsPage, onSessionsPageChange, auditSessionsLoading, auditError, onRefresh } = props;
+			useEffect$1(() => {
+				if (!open || !win$1.addEventListener || !win$1.removeEventListener) return;
+				const onKeyDown = (ev) => {
+					if (ev.key === "Escape") onClose();
+				};
+				win$1.addEventListener("keydown", onKeyDown);
+				return () => win$1.removeEventListener?.("keydown", onKeyDown);
+			}, [open, onClose]);
+			if (!open) return null;
+			const o = statsOverview;
+			const totalRequests = numOf(o, "totalRequests");
+			const totalSuccess = numOf(o, "totalSuccess");
+			const totalFailed = numOf(o, "totalFailed");
+			const cacheHitRate = numOf(o, "cacheHitRate");
+			const cacheColor = cacheHitRate === null ? "var(--agy-text-primary)" : cacheHitRate > .3 ? "var(--agy-strong-ok)" : cacheHitRate >= .1 ? "var(--agy-strong-warn)" : "var(--agy-strong-neutral)";
+			const summaryCards = o ? h$1("div", { style: {
+				display: "flex",
+				gap: "var(--agy-space-2)",
+				flexWrap: "wrap",
+				padding: "var(--agy-space-3) var(--agy-space-4) 0"
+			} }, renderStatCard("请求总数", totalRequests === null ? "—" : formatNumber(totalRequests), `成功 ${totalSuccess === null ? "—" : formatNumber(totalSuccess)} · 失败 ${totalFailed === null ? "—" : formatNumber(totalFailed)}`), renderStatCard("缓存命中率 (Cache Hit %)", cacheHitRate === null ? "—" : `${(cacheHitRate * 100).toFixed(1)}%`, `命中 Token ${numOf(o, "totalCachedTokens") === null ? "—" : formatCompactTokens(numOf(o, "totalCachedTokens") ?? 0)}`, cacheColor), renderStatCard("Token 汇总 (P / C / O)", formatCompactTokens(numOf(o, "totalTokens") ?? 0), `P ${formatCompactTokens(numOf(o, "totalPromptTokens") ?? 0)} / C ${formatCompactTokens(numOf(o, "totalCachedTokens") ?? 0)} / O ${formatCompactTokens(numOf(o, "totalOutputTokens") ?? 0)}`), renderStatCard("平均耗时 / TTFT", numOf(o, "avgLatencyMs") === null ? "—" : `${Math.round(numOf(o, "avgLatencyMs") ?? 0)}ms`, `TTFT ${numOf(o, "avgTtftMs") === null ? "—" : `${Math.round(numOf(o, "avgTtftMs") ?? 0)}ms`} · P90 ${numOf(o, "p90LatencyMs") === null ? "—" : `${Math.round(numOf(o, "p90LatencyMs") ?? 0)}ms`}`)) : h$1("div", { style: {
+				padding: "var(--agy-space-3) var(--agy-space-4) 0",
+				display: "flex",
+				gap: "var(--agy-space-2)",
+				flexWrap: "wrap"
+			} }, [
+				0,
+				1,
+				2,
+				3
+			].map((i) => h$1("div", {
+				key: i,
+				style: { flex: "1 1 150px" }
+			}, renderSkeletonRow(60, 12), renderSkeletonRow(90, 22))));
+			const requestsView = auditLoading && auditRequests.length === 0 ? h$1("div", { style: { padding: "0 var(--agy-space-4)" } }, renderSkeletonRow(95, 20), renderSkeletonRow(95, 20), renderSkeletonRow(95, 20)) : auditError ? h$1("div", { style: { padding: "0 var(--agy-space-4)" } }, renderStrip("error", auditError, onRefresh)) : auditRequests.length === 0 ? h$1("div", { style: { padding: "var(--agy-space-4)" } }, renderEmptyState("activity", "暂无请求审计记录。")) : h$1("table", { className: "agy-table" }, h$1("thead", null, h$1("tr", null, h$1("th", null, "时间"), h$1("th", null, "模型"), h$1("th", null, "账号"), h$1("th", null, "Token (P / C / O)"), h$1("th", null, "耗时 / TTFT"), h$1("th", null, "状态"))), h$1("tbody", null, auditRequests.map((r, i) => {
+				const account = accounts.find((a) => a.id === r.accountId);
+				const statusOk = typeof r.status === "string" && !/fail|error|4\d\d|5\d\d/i.test(r.status);
+				return h$1("tr", { key: r.requestId ?? i }, h$1("td", {
+					className: "agy-num",
+					style: { fontVariantNumeric: "tabular-nums" }
+				}, r.timestamp ?? "—"), h$1("td", null, r.model ?? "—"), h$1("td", null, account ? maskEmail$1(account.email) || account.alias || account.id : r.accountId ?? "未知"), h$1("td", {
+					className: "agy-num",
+					style: { fontVariantNumeric: "tabular-nums" }
+				}, `${formatCompactTokens(r.promptTokens ?? 0)} / ${formatCompactTokens(r.cachedTokens ?? 0)} / ${formatCompactTokens(r.outputTokens ?? 0)}`), h$1("td", {
+					className: "agy-num",
+					style: { fontVariantNumeric: "tabular-nums" }
+				}, `${r.latencyMs === void 0 ? "—" : `${Math.round(r.latencyMs)}ms`} · ${r.ttftMs === void 0 ? "—" : `${Math.round(r.ttftMs)}ms`}`), h$1("td", { style: { color: statusOk ? "var(--agy-strong-ok)" : "var(--agy-strong-danger)" } }, r.status ?? "—"));
+			})));
+			const sessionsView = auditSessionsLoading && auditSessions.length === 0 ? h$1("div", { style: { padding: "0 var(--agy-space-4)" } }, renderSkeletonRow(95, 20), renderSkeletonRow(95, 20), renderSkeletonRow(95, 20)) : auditError ? h$1("div", { style: { padding: "0 var(--agy-space-4)" } }, renderStrip("error", auditError, onRefresh)) : auditSessions.length === 0 ? h$1("div", { style: { padding: "var(--agy-space-4)" } }, renderEmptyState("activity", "暂无会话审计记录。")) : h$1("table", { className: "agy-table" }, h$1("thead", null, h$1("tr", null, h$1("th", null, "更新时间"), h$1("th", null, "会话 ID"), h$1("th", null, "账号"), h$1("th", null, "请求数 (总数 / 成功 / 失败)"), h$1("th", null, "Token (Prompt / 命中缓存 / 命中率)"), h$1("th", null, "状态/详情"))), h$1("tbody", null, auditSessions.map((s, i) => {
+				const account = accounts.find((a) => a.id === s.accountId);
+				const shortId = s.sessionId ? `${s.sessionId.slice(0, 8)}…${s.sessionId.slice(-4)}` : "—";
+				return h$1("tr", { key: s.sessionId ?? i }, h$1("td", {
+					className: "agy-num",
+					style: { fontVariantNumeric: "tabular-nums" }
+				}, s.updatedAt ?? "—"), h$1("td", { title: s.sessionId }, shortId), h$1("td", null, account ? maskEmail$1(account.email) || account.alias || account.id : s.accountId ?? "未知"), h$1("td", {
+					className: "agy-num",
+					style: { fontVariantNumeric: "tabular-nums" }
+				}, `${formatNumber(s.totalRequests ?? 0)} / ${formatNumber(s.totalSuccess ?? 0)} / ${formatNumber(s.totalFailed ?? 0)}`), h$1("td", {
+					className: "agy-num",
+					style: { fontVariantNumeric: "tabular-nums" }
+				}, `${formatCompactTokens(s.totalPromptTokens ?? 0)} / ${formatCompactTokens(s.totalCachedTokens ?? 0)} / ${typeof s.cacheHitRate === "number" ? `${(s.cacheHitRate * 100).toFixed(1)}%` : "—"}`), h$1("td", {
+					title: s.lastError ?? void 0,
+					style: { color: (s.totalFailed ?? 0) > 0 ? "var(--agy-strong-warn)" : "var(--agy-strong-ok)" }
+				}, s.status ?? s.lastError ?? "—"));
+			})));
+			const totalForTab = auditTab === "requests" ? auditTotal : auditSessionsTotal;
+			const pageForTab = auditTab === "requests" ? auditPage : auditSessionsPage;
+			const setPageForTab = (next) => {
+				if (auditTab === "requests") onPageChange(next);
+				else onSessionsPageChange(next);
+			};
+			const canPrev = pageForTab > 0;
+			const canNext = (pageForTab + 1) * PAGE_SIZE < totalForTab;
+			return portalToBody(h$1("div", {
+				className: "agy-drawer-backdrop",
+				onClick: (e) => {
+					if (e.target === e.currentTarget) onClose();
+				}
+			}, h$1("div", {
+				className: "agy-drawer",
+				role: "dialog",
+				"aria-modal": true,
+				"aria-label": "请求审计与会话统计"
+			}, h$1("div", { style: {
+				display: "flex",
+				alignItems: "center",
+				justifyContent: "space-between",
+				gap: "var(--agy-space-2)",
+				padding: "var(--agy-space-3) var(--agy-space-4)",
+				borderBottom: "1px solid var(--agy-drawer-border)"
+			} }, h$1("div", { style: S.panelTitle }, "请求审计与会话统计 (Audit Log)"), h$1("div", { style: {
+				display: "flex",
+				gap: "5px"
+			} }, h$1("button", {
+				className: "agy-btn",
+				style: {
+					...S.btnSm,
+					background: "var(--agy-drawer-btn-bg)",
+					color: "var(--agy-drawer-btn-text)",
+					border: "1px solid var(--agy-drawer-btn-border)"
+				},
+				onClick: onRefresh,
+				"aria-label": "刷新审计数据"
+			}, uiIcon("refresh", 12), " 刷新"), h$1("button", {
+				className: "agy-btn",
+				style: {
+					...S.btnSm,
+					background: "var(--agy-drawer-btn-bg)",
+					color: "var(--agy-drawer-btn-text)",
+					border: "1px solid var(--agy-drawer-btn-border)"
+				},
+				onClick: onClose,
+				"aria-label": "关闭审计抽屉"
+			}, uiIcon("x", 12)))), summaryCards, h$1("div", { style: {
+				padding: "var(--agy-space-3) var(--agy-space-4) 0",
+				display: "flex",
+				gap: "var(--agy-space-2)",
+				alignItems: "center",
+				flexWrap: "wrap"
+			} }, h$1("div", {
+				style: S.segGroup,
+				role: "tablist",
+				"aria-label": "审计视图切换"
+			}, h$1("button", {
+				role: "tab",
+				"aria-selected": auditTab === "requests",
+				style: auditTab === "requests" ? S.segBtnActive : S.segBtn,
+				onClick: () => onTabChange("requests")
+			}, "按请求明细 (Requests)"), h$1("button", {
+				role: "tab",
+				"aria-selected": auditTab === "sessions",
+				style: auditTab === "sessions" ? S.segBtnActive : S.segBtn,
+				onClick: () => onTabChange("sessions")
+			}, "按会话统计 (Sessions)")), auditLoading || auditSessionsLoading ? h$1("span", { style: {
+				display: "inline-flex",
+				alignItems: "center",
+				gap: "6px",
+				fontSize: "var(--agy-font-xs)",
+				color: "var(--agy-table-faint)"
+			} }, h$1("span", {
+				className: "agy-spinner",
+				"aria-hidden": true
+			}), "加载中…") : null), h$1("div", { style: {
+				flex: 1,
+				overflow: "auto",
+				padding: "var(--agy-space-2) 0"
+			} }, auditTab === "requests" ? requestsView : sessionsView), h$1("div", { style: {
+				display: "flex",
+				alignItems: "center",
+				justifyContent: "flex-end",
+				gap: "var(--agy-space-2)",
+				padding: "var(--agy-space-3) var(--agy-space-4)",
+				borderTop: "1px solid var(--agy-drawer-border)"
+			} }, h$1("span", {
+				className: "agy-num",
+				style: {
+					fontSize: "var(--agy-font-xs)",
+					color: "var(--agy-table-faint)",
+					marginRight: "auto",
+					fontVariantNumeric: "tabular-nums"
+				}
+			}, `共 ${formatNumber(totalForTab)} 条 · 每页 ${PAGE_SIZE} 条`), h$1("button", {
+				className: "agy-btn",
+				style: {
+					...S.btnSm,
+					background: "var(--agy-drawer-btn-bg)",
+					color: "var(--agy-drawer-btn-text)",
+					border: "1px solid var(--agy-drawer-btn-border)"
+				},
+				disabled: !canPrev,
+				onClick: () => setPageForTab(pageForTab - 1)
+			}, "上一页"), h$1("span", {
+				className: "agy-num",
+				style: {
+					fontSize: "var(--agy-font-xs)",
+					color: "var(--agy-table-soft)",
+					fontVariantNumeric: "tabular-nums"
+				}
+			}, `第 ${pageForTab + 1} 页`), h$1("button", {
+				className: "agy-btn",
+				style: {
+					...S.btnSm,
+					background: "var(--agy-drawer-btn-bg)",
+					color: "var(--agy-drawer-btn-text)",
+					border: "1px solid var(--agy-drawer-btn-border)"
+				},
+				disabled: !canNext,
+				onClick: () => setPageForTab(pageForTab + 1)
+			}, "下一页")))));
+		}
+		function UsageSection(props) {
+			const { statsOverview, statsError, accounts, onRefreshStats } = props;
+			const [showAuditDrawer, setShowAuditDrawer] = useState$1(false);
+			const [auditTab, setAuditTab] = useState$1("requests");
+			const [auditRequests, setAuditRequests] = useState$1([]);
+			const [auditTotal, setAuditTotal] = useState$1(0);
+			const [auditPage, setAuditPage] = useState$1(0);
+			const [auditLoading, setAuditLoading] = useState$1(false);
+			const [auditSessions, setAuditSessions] = useState$1([]);
+			const [auditSessionsTotal, setAuditSessionsTotal] = useState$1(0);
+			const [auditSessionsPage, setAuditSessionsPage] = useState$1(0);
+			const [auditSessionsLoading, setAuditSessionsLoading] = useState$1(false);
+			const [auditError, setAuditError] = useState$1(null);
+			const fetchAuditRequests = useCallback(async (limit, offset) => {
+				setAuditLoading(true);
+				try {
+					const res = await fetchWithFallback(`${API_PREFIX}/stats/requests?limit=${limit}&offset=${offset}`);
+					if (!res || !res.ok) {
+						setAuditError("请求明细加载失败（后端未返回可用数据）");
+						return;
+					}
+					const data = await res.json();
+					setAuditRequests(data.requests ?? []);
+					setAuditTotal(typeof data.total === "number" ? data.total : data.requests?.length ?? 0);
+					setAuditError(null);
+				} catch {
+					setAuditError("请求明细加载失败（网络异常）");
+				} finally {
+					setAuditLoading(false);
+				}
+			}, []);
+			const fetchAuditSessions = useCallback(async (limit, offset) => {
+				setAuditSessionsLoading(true);
+				try {
+					const res = await fetchWithFallback(`${API_PREFIX}/stats/sessions?limit=${limit}&offset=${offset}`);
+					if (!res || !res.ok) {
+						setAuditError("会话统计加载失败（后端未返回可用数据）");
+						return;
+					}
+					const data = await res.json();
+					setAuditSessions(data.sessions ?? []);
+					setAuditSessionsTotal(typeof data.total === "number" ? data.total : data.sessions?.length ?? 0);
+					setAuditError(null);
+				} catch {
+					setAuditError("会话统计加载失败（网络异常）");
+				} finally {
+					setAuditSessionsLoading(false);
+				}
+			}, []);
+			useEffect$1(() => {
+				if (!showAuditDrawer) return;
+				if (auditTab === "requests") fetchAuditRequests(PAGE_SIZE, auditPage * PAGE_SIZE);
+				else fetchAuditSessions(PAGE_SIZE, auditSessionsPage * PAGE_SIZE);
+			}, [
+				showAuditDrawer,
+				auditTab,
+				auditPage,
+				auditSessionsPage,
+				fetchAuditRequests,
+				fetchAuditSessions
+			]);
+			const handleRefreshAudit = useCallback(() => {
+				if (auditTab === "requests") fetchAuditRequests(PAGE_SIZE, auditPage * PAGE_SIZE);
+				else fetchAuditSessions(PAGE_SIZE, auditSessionsPage * PAGE_SIZE);
+			}, [
+				auditTab,
+				auditPage,
+				auditSessionsPage,
+				fetchAuditRequests,
+				fetchAuditSessions
+			]);
+			const cacheHitRate = numOf(statsOverview, "cacheHitRate") ?? 0;
+			const cacheColor = cacheHitRate > .3 ? "var(--agy-strong-ok)" : cacheHitRate >= .1 ? "var(--agy-strong-warn)" : "var(--agy-strong-neutral)";
+			return h$1("div", null, statsError ? renderStrip("error", statsError, () => void onRefreshStats()) : null, h$1("div", { style: {
+				display: "flex",
+				gap: "var(--agy-space-2)",
+				flexWrap: "wrap",
+				marginBottom: "var(--agy-space-3)"
+			} }, statsOverview ? renderStatCard("请求总数", h$1("span", {
+				className: "agy-num",
+				style: { fontVariantNumeric: "tabular-nums" }
+			}, formatNumber(numOf(statsOverview, "totalRequests") ?? 0)), `成功 ${formatNumber(numOf(statsOverview, "totalSuccess") ?? 0)} · 失败 ${formatNumber(numOf(statsOverview, "totalFailed") ?? 0)}`) : h$1("div", { style: {
+				...S.statBox,
+				flex: "1 1 150px"
+			} }, renderSkeletonRow(60, 12), renderSkeletonRow(90, 22)), statsOverview ? renderStatCard("Token 汇总", h$1("span", {
+				className: "agy-num",
+				style: { fontVariantNumeric: "tabular-nums" }
+			}, formatCompactTokens(numOf(statsOverview, "totalTokens") ?? 0)), `Prompt ${formatCompactTokens(numOf(statsOverview, "totalPromptTokens") ?? 0)} · 输出 ${formatCompactTokens(numOf(statsOverview, "totalOutputTokens") ?? 0)}`) : h$1("div", { style: {
+				...S.statBox,
+				flex: "1 1 150px"
+			} }, renderSkeletonRow(60, 12), renderSkeletonRow(90, 22)), statsOverview ? renderStatCard("缓存命中率", h$1("span", {
+				className: "agy-num",
+				style: { fontVariantNumeric: "tabular-nums" }
+			}, `${(cacheHitRate * 100).toFixed(1)}%`), `命中 Token ${formatCompactTokens(numOf(statsOverview, "totalCachedTokens") ?? 0)}`, cacheColor) : h$1("div", { style: {
+				...S.statBox,
+				flex: "1 1 150px"
+			} }, renderSkeletonRow(60, 12), renderSkeletonRow(90, 22)), statsOverview ? renderStatCard("平均延迟 / TTFT", h$1("span", {
+				className: "agy-num",
+				style: { fontVariantNumeric: "tabular-nums" }
+			}, `${Math.round(numOf(statsOverview, "avgLatencyMs") ?? 0)}ms`), `TTFT ${Math.round(numOf(statsOverview, "avgTtftMs") ?? 0)}ms · P90 ${Math.round(numOf(statsOverview, "p90LatencyMs") ?? 0)}ms`) : h$1("div", { style: {
+				...S.statBox,
+				flex: "1 1 150px"
+			} }, renderSkeletonRow(60, 12), renderSkeletonRow(90, 22))), h$1("div", { style: {
+				display: "flex",
+				gap: "var(--agy-space-2)",
+				flexWrap: "wrap"
+			} }, h$1("button", {
+				className: "agy-btn",
+				style: S.btnPrimary,
+				onClick: () => setShowAuditDrawer(true)
+			}, uiIcon("activity", 12), " 打开请求明细与会话统计"), h$1("button", {
+				className: "agy-btn",
+				style: S.btnSm,
+				onClick: () => void onRefreshStats(),
+				"aria-label": "重新加载用量统计"
+			}, uiIcon("refresh", 12), " 重新加载")), h$1(AuditDrawer, {
+				open: showAuditDrawer,
+				onClose: () => setShowAuditDrawer(false),
+				statsOverview,
+				accounts,
+				auditTab,
+				onTabChange: setAuditTab,
+				auditRequests,
+				auditTotal,
+				auditPage,
+				onPageChange: setAuditPage,
+				auditLoading,
+				auditSessions,
+				auditSessionsTotal,
+				auditSessionsPage,
+				onSessionsPageChange: setAuditSessionsPage,
+				auditSessionsLoading,
+				auditError,
+				onRefresh: handleRefreshAudit
+			}));
+		}
+		//#endregion
+		//#region src/client/index.ts
+		const { createElement: h, useState, useEffect, useRef } = require("react");
+		const win = globalThis;
 		const name = "dsh-cloudcode-link-client";
 		const inject = ["slots"];
 		const SETTINGS_SECTION_ID = "agy-link";
 		const SETTINGS_SECTION_LABEL = "CloudCode Link";
-		const base = win.location?.origin ?? "";
-		const API_PREFIX = "/plugins/cloudcode-link";
-		const LEGACY_API_PREFIX = "/plugins/agy-link";
-		/**
-		* Primary prefix, then a 404-only fallback to the legacy prefix (older host builds).
-		* Failure is visible: null means "no usable response" and every caller surfaces it in the UI.
-		*/
-		async function fetchWithFallback(urlPath, options) {
-			if (!win.fetch) return null;
-			const fullUrl = `${base}${urlPath}`;
-			try {
-				const res = await win.fetch(fullUrl, options);
-				if (res && res.status === 404 && urlPath.startsWith(API_PREFIX)) {
-					const legacy = `${base}${LEGACY_API_PREFIX}${urlPath.slice(23)}`;
-					const res2 = await win.fetch(legacy, options);
-					if (res2) return {
-						ok: res2.ok,
-						status: res2.status,
-						json: () => res2.json()
-					};
-					return null;
-				}
-				if (res) return {
-					ok: res.ok,
-					status: res.status,
-					json: () => res.json()
-				};
-				return null;
-			} catch {
-				return null;
+		const SECTIONS = [
+			{
+				key: "overview",
+				label: "概览"
+			},
+			{
+				key: "accounts",
+				label: "账号"
+			},
+			{
+				key: "models",
+				label: "模型"
+			},
+			{
+				key: "usage",
+				label: "用量"
+			},
+			{
+				key: "diagnostics",
+				label: "诊断"
+			},
+			{
+				key: "config",
+				label: "配置"
 			}
-		}
+		];
 		let statusCache = null;
 		async function getStatus() {
 			try {
@@ -1290,26 +3245,6 @@ body[data-theme="dark"] {
 				return null;
 			}
 		}
-		async function postJson(path, body) {
-			try {
-				const res = await fetchWithFallback(path, {
-					method: "POST",
-					headers: { "Content-Type": "application/json" },
-					body: JSON.stringify(body)
-				});
-				if (!res) return null;
-				try {
-					return await res.json();
-				} catch {
-					return { ok: res.ok };
-				}
-			} catch {
-				return null;
-			}
-		}
-		/**
-		* Mask email address for privacy display (e.g. user123@gmail.com -> us***@gmail.com).
-		*/
 		function maskEmail(email) {
 			if (!email || typeof email !== "string") return "";
 			const atIdx = email.indexOf("@");
@@ -1319,76 +3254,16 @@ body[data-theme="dark"] {
 			if (user.length <= 2) return `${user[0]}***${domain}`;
 			return `${user.slice(0, 2)}***${domain}`;
 		}
-		function formatNumber(n) {
-			return Number(n || 0).toLocaleString();
-		}
-		function formatCompactTokens(n) {
-			if (!n) return "0";
-			if (n >= 1e6) return (n / 1e6).toFixed(1) + "M";
-			if (n >= 1e3) return (n / 1e3).toFixed(1) + "K";
-			return String(n);
-		}
 		function formatClock(ms) {
 			if (!ms) return "—";
 			try {
 				return new Date(ms).toLocaleTimeString("zh-CN", { hour12: false });
 			} catch {
-				return new Date(ms).toISOString().slice(11, 19);
+				return "—";
 			}
 		}
-		/** Inline brand logo (Gemini / Claude / OpenAI) as a crisp SVG mark. */
-		function brandIcon(key, size = 13) {
-			return h("svg", {
-				viewBox: "0 0 24 24",
-				width: size,
-				height: size,
-				"aria-hidden": true,
-				style: {
-					display: "inline-block",
-					verticalAlign: "-2px",
-					flexShrink: 0
-				}
-			}, h("path", {
-				d: BRAND_PATHS[key],
-				fill: BRAND_COLORS[key]
-			}));
-		}
-		/** Clean outline/filled SVG icon (Lucide-style), zero emoji dependency. */
-		function uiIcon(key, size = 12, color = "currentColor") {
-			const p = UI_PATHS[key];
-			const isFilled = key === "star";
-			return h("svg", {
-				viewBox: "0 0 24 24",
-				width: size,
-				height: size,
-				"aria-hidden": true,
-				style: {
-					display: "inline-block",
-					verticalAlign: "-1.5px",
-					flexShrink: 0
-				}
-			}, h("path", {
-				d: p,
-				fill: isFilled ? color : "none",
-				stroke: isFilled ? "none" : color,
-				"stroke-width": isFilled ? void 0 : 2,
-				"stroke-linecap": isFilled ? void 0 : "round",
-				"stroke-linejoin": isFilled ? void 0 : "round"
-			}));
-		}
-		const FAMILY_BRAND = {
-			google: "gemini",
-			anthropic: "claude",
-			openai: "openai"
-		};
-		const FAMILY_LABEL = {
-			google: "Gemini",
-			anthropic: "Claude",
-			openai: "GPT-OSS",
-			unknown: "其他"
-		};
 		const agyIconGradientIds = /* @__PURE__ */ new Map();
-		/** CloudCode Link orb mark: gradient core with an orbit ring (product has no public simple-icon). */
+		/** CloudCode Link orb mark: gradient core with an orbit ring. */
 		function agyIcon(size = 14) {
 			let gid = agyIconGradientIds.get(size);
 			if (!gid) {
@@ -1434,13 +3309,7 @@ body[data-theme="dark"] {
 			}));
 		}
 		/**
-		* Settings-nav glyph for the optional `settings.section.icon` seat. The shell owns the nav
-		* button, the row label and its default gear, and mounts this contribution only when the
-		* registration id equals a section id it renders (hence SETTINGS_SECTION_ID below). The
-		* glyph itself stays gradient-free for legibility at the shell's 16px; its geometry and
-		* prop normalization live in brand-icons.ts, and this component is the render path that
-		* consumes them — the aria-hidden is ours to keep even though the shell already hides the
-		* wrapper span, so the mark never adds a second accessible name to the row.
+		* Settings-nav glyph for the optional `settings.section.icon` seat.
 		*/
 		function AgySettingsNavIcon(props) {
 			const { size, active } = settingsNavProps(props);
@@ -1453,72 +3322,44 @@ body[data-theme="dark"] {
 				style: { display: "block" }
 			}, ...settingsNavShapes(active).map((shape) => h(shape.tag, shape.attrs)));
 		}
-		/**
-		* Self-ticking reset countdown. This leaf is the only node that re-renders once per
-		* second; the page tree around it stays put. Renders `↻ HH:MM (XhYm)` while a reset
-		* window is pending, or the empty marker (default `—`) once it is gone.
-		*/
-		function ResetCountdown(props) {
-			const [tick, setTick] = useState(0);
-			useEffect(() => {
-				const timer = setInterval(() => setTick((n) => n + 1), 1e3);
-				return () => clearInterval(timer);
-			}, []);
-			const { resetText } = formatQuotaWindow(props.resetTime);
-			const body = resetText ? `${props.prefix ?? "↻ "}${resetText}` : `${props.emptyPrefix ?? "—"}${props.emptyText ?? ""}`;
-			return h("span", {
-				className: props.className,
-				style: props.style
-			}, `${body}${props.suffix ?? ""}`);
-		}
 		function apply(ctx) {
-			const AgySettingsSection = (props) => {
+			const AgySettingsSection = () => {
 				const [status, setStatus] = useState(statusCache);
 				const [pollOk, setPollOk] = useState(statusCache !== null);
 				const [lastUpdatedAt, setLastUpdatedAt] = useState(statusCache ? Date.now() : null);
 				const [activeSection, setActiveSection] = useState("overview");
-				const [aliasInput, setAliasInput] = useState("");
-				const [proxyInputs, setProxyInputs] = useState({});
-				const [editingProxyId, setEditingProxyId] = useState(null);
-				const [addingAccount, setAddingAccount] = useState(false);
-				const [authCodeInput, setAuthCodeInput] = useState("");
 				const [loadingAction, setLoadingAction] = useState(null);
 				const [toast, setToast] = useState(null);
-				const [expandedModels, setExpandedModels] = useState({});
-				const [modelPanels, setModelPanels] = useState({});
-				const [modelQueries, setModelQueries] = useState({});
-				const [familyFilters, setFamilyFilters] = useState({});
 				const [statsOverview, setStatsOverview] = useState(null);
 				const [statsError, setStatsError] = useState(null);
-				const [showAuditDrawer, setShowAuditDrawer] = useState(false);
-				const [auditTab, setAuditTab] = useState("requests");
-				const [auditRequests, setAuditRequests] = useState([]);
-				const [auditTotal, setAuditTotal] = useState(0);
-				const [auditPage, setAuditPage] = useState(0);
-				const [auditLoading, setAuditLoading] = useState(false);
-				const [auditSessions, setAuditSessions] = useState([]);
-				const [auditSessionsTotal, setAuditSessionsTotal] = useState(0);
-				const [auditSessionsPage, setAuditSessionsPage] = useState(0);
-				const [auditSessionsLoading, setAuditSessionsLoading] = useState(false);
-				const [auditError, setAuditError] = useState(null);
-				const [cfgDrafts, setCfgDrafts] = useState({});
-				const [geminiAppTokenInput, setGeminiAppTokenInput] = useState("");
-				const [addingGeminiAppAccount, setAddingGeminiAppAccount] = useState(false);
+				const [modelPanels, setModelPanels] = useState({});
+				const [expandedModels, setExpandedModels] = useState({});
+				const [modelQueries, setModelQueries] = useState({});
+				const [familyFilters, setFamilyFilters] = useState({});
+				const [addingAccount, setAddingAccount] = useState(false);
+				const [aliasInput, setAliasInput] = useState("");
+				const [manualCodeInput, setManualCodeInput] = useState("");
+				const [editingProxyId, setEditingProxyId] = useState(null);
+				const [proxyInput, setProxyInput] = useState("");
 				const [geminiAppEmailInput, setGeminiAppEmailInput] = useState("");
-				const [geminiAppCredInput, setGeminiAppCredInput] = useState("");
+				const [geminiAppCookieInput, setGeminiAppCookieInput] = useState("");
 				const [geminiAppBusy, setGeminiAppBusy] = useState(false);
-				const flowStartedRef = useRef(false);
-				const pollOkRef = useRef(statusCache !== null);
-				const lastUpdatedRef = useRef(statusCache ? Date.now() : null);
 				const toastTimerRef = useRef(null);
+				const lastStatusJsonRef = useRef("");
+				const pollOkRef = useRef(pollOk);
+				const lastUpdatedRef = useRef(lastUpdatedAt);
+				pollOkRef.current = pollOk;
+				lastUpdatedRef.current = lastUpdatedAt;
+				const flowStartedRef = useRef(false);
+				const prevPoolPhaseRef = useRef("idle");
 				const tabRefs = useRef({});
-				const showToast = (text, type) => {
+				const showToast = (text, type = "info") => {
 					setToast({
 						text,
 						type
 					});
-					if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
-					toastTimerRef.current = setTimeout(() => setToast(null), 6e3);
+					if (toastTimerRef.current) win.clearTimeout(toastTimerRef.current);
+					toastTimerRef.current = win.setTimeout(() => setToast(null), 4200);
 				};
 				const fetchStatsOverview = async () => {
 					try {
@@ -1528,153 +3369,96 @@ body[data-theme="dark"] {
 							return;
 						}
 						const data = await res.json();
-						if (!data.overview) {
-							setStatsError("用量统计加载失败（响应缺少 overview 字段）");
-							return;
-						}
-						setStatsOverview(data.overview);
+						setStatsOverview(data.overview ?? null);
 						setStatsError(null);
 					} catch {
 						setStatsError("用量统计加载失败（网络异常）");
 					}
 				};
-				const fetchAuditRequests = async (limit, offset) => {
-					setAuditLoading(true);
-					try {
-						const res = await fetchWithFallback(`${API_PREFIX}/stats/requests?limit=${limit}&offset=${offset}`);
-						if (!res || !res.ok) {
-							setAuditError("请求明细加载失败（后端未返回可用数据）");
-							return;
-						}
-						const data = await res.json();
-						setAuditRequests(data.requests ?? []);
-						setAuditTotal(typeof data.total === "number" ? data.total : data.requests?.length ?? 0);
-						setAuditError(null);
-					} catch {
-						setAuditError("请求明细加载失败（网络异常）");
-					} finally {
-						setAuditLoading(false);
-					}
-				};
-				const fetchAuditSessions = async (limit, offset) => {
-					setAuditSessionsLoading(true);
-					try {
-						const res = await fetchWithFallback(`${API_PREFIX}/stats/sessions?limit=${limit}&offset=${offset}`);
-						if (!res || !res.ok) {
-							setAuditError("会话统计加载失败（后端未返回可用数据）");
-							return;
-						}
-						const data = await res.json();
-						setAuditSessions(data.sessions ?? []);
-						setAuditSessionsTotal(typeof data.total === "number" ? data.total : data.sessions?.length ?? 0);
-						setAuditError(null);
-					} catch {
-						setAuditError("会话统计加载失败（网络异常）");
-					} finally {
-						setAuditSessionsLoading(false);
-					}
-				};
+				useEffect(() => {
+					fetchStatsOverview();
+				}, []);
+				useEffect(() => {
+					if (activeSection === "usage") fetchStatsOverview();
+				}, [activeSection]);
 				useEffect(() => {
 					let alive = true;
-					let lastJson = status ? JSON.stringify(status) : "";
-					const tick = async () => {
-						const st = await getStatus();
+					const poll = async () => {
+						const next = await getStatus();
 						if (!alive) return;
-						if (!st) {
-							pollOkRef.current = false;
-							setPollOk(false);
+						const now = Date.now();
+						if (!next) {
+							const failed = applyPollOutcome({
+								pollOk: pollOkRef.current,
+								lastUpdatedAt: lastUpdatedRef.current
+							}, {
+								ok: false,
+								statusChanged: false
+							}, now);
+							pollOkRef.current = failed.pollOk;
+							lastUpdatedRef.current = failed.lastUpdatedAt;
+							setPollOk(failed.pollOk);
 							return;
 						}
-						const json = JSON.stringify(st);
-						const changed = json !== lastJson;
-						if (changed) {
-							lastJson = json;
-							setStatus(st);
-						}
-						const next = applyPollOutcome({
+						const nextJson = JSON.stringify(next);
+						const statusChanged = nextJson !== lastStatusJsonRef.current;
+						const okState = applyPollOutcome({
 							pollOk: pollOkRef.current,
 							lastUpdatedAt: lastUpdatedRef.current
 						}, {
 							ok: true,
-							statusChanged: changed
-						}, Date.now());
-						pollOkRef.current = next.pollOk;
-						lastUpdatedRef.current = next.lastUpdatedAt;
-						setPollOk(next.pollOk);
-						setLastUpdatedAt(next.lastUpdatedAt);
+							statusChanged
+						}, now);
+						pollOkRef.current = okState.pollOk;
+						lastUpdatedRef.current = okState.lastUpdatedAt;
+						setPollOk(okState.pollOk);
+						setLastUpdatedAt(okState.lastUpdatedAt);
+						if (statusChanged) {
+							lastStatusJsonRef.current = nextJson;
+							setStatus(next);
+						}
 					};
-					tick();
-					const timer = setInterval(() => {
-						tick();
+					poll();
+					const timer = win.setInterval(() => {
+						poll();
 					}, 3e3);
-					fetchStatsOverview();
-					const statsTimer = setInterval(() => {
-						fetchStatsOverview();
-					}, 1e4);
 					return () => {
 						alive = false;
-						clearInterval(timer);
-						clearInterval(statsTimer);
+						win.clearInterval(timer);
+						if (toastTimerRef.current) win.clearTimeout(toastTimerRef.current);
 					};
 				}, []);
-				useEffect(() => () => {
-					if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
-				}, []);
+				const poolAuthPhase = status?.poolAuth?.phase ?? "idle";
 				useEffect(() => {
-					if (!showAuditDrawer) return;
-					const onKey = (ev) => {
-						if (ev.key === "Escape") setShowAuditDrawer(false);
-					};
-					win.addEventListener?.("keydown", onKey, true);
-					return () => {
-						win.removeEventListener?.("keydown", onKey, true);
-					};
-				}, [showAuditDrawer]);
-				useEffect(() => {
-					if (!showAuditDrawer) return;
-					fetchAuditRequests(20, auditPage * 20);
-				}, [showAuditDrawer, auditPage]);
-				useEffect(() => {
-					if (!showAuditDrawer || auditTab !== "sessions") return;
-					fetchAuditSessions(20, auditSessionsPage * 20);
-				}, [
-					showAuditDrawer,
-					auditTab,
-					auditSessionsPage
-				]);
-				useEffect(() => {
-					const phase = status?.poolAuth?.phase;
-					if (phase === "waiting" || phase === "exchanging") flowStartedRef.current = true;
-					if (phase === "done" && flowStartedRef.current) {
+					const prev = prevPoolPhaseRef.current;
+					prevPoolPhaseRef.current = poolAuthPhase;
+					if (prev === poolAuthPhase) return;
+					if (poolAuthPhase === "done" && flowStartedRef.current) {
 						flowStartedRef.current = false;
 						setAddingAccount(false);
-						setAuthCodeInput("");
-						showToast("账号已激活入池", "success");
-					} else if (phase === "failed" && flowStartedRef.current) {
+						setAliasInput("");
+						setManualCodeInput("");
+						showToast("账号已激活并加入账号池", "success");
+						getStatus().then((next) => {
+							if (next) setStatus(next);
+						});
+					} else if (poolAuthPhase === "failed" && flowStartedRef.current) {
 						flowStartedRef.current = false;
 						showToast(status?.poolAuth?.message || "账号激活失败，请重试或手动粘贴授权码", "error");
 					}
-				}, [status?.poolAuth?.phase]);
-				useEffect(() => {
-					if (!status) return;
-					setCfgDrafts((prev) => seedConfigDrafts(prev, status));
-				}, [status?.defaultModel, status?.defaultEffort]);
-				const accounts = status?.pool?.accounts ?? [];
-				const isAuthed = status?.auth?.phase === "ok" || accounts.length > 0;
-				const isBusy = typeof loadingAction === "string";
-				const modelUnionTotal = computeModelUnion(modelPanels, accounts);
-				const accountModelIdsOf = (acc) => accountModelIds(acc, modelPanels[acc.id]);
+				}, [poolAuthPhase]);
 				const loadModelsPanel = async (accId) => {
 					setModelPanels((prev) => ({
 						...prev,
 						[accId]: {
 							...prev[accId] ?? EMPTY_PANEL,
-							status: "loading"
+							status: "loading",
+							error: null
 						}
 					}));
-					const result = await fetchAccountModels(fetchWithFallback, API_PREFIX, accId);
-					const payload = result.payload;
-					if (payload && payload.ok !== false) {
+					const result = await getJson(`/pool/account-models?id=${encodeURIComponent(accId)}`);
+					if (result.ok && result.data) {
+						const payload = result.data;
 						setModelPanels((prev) => ({
 							...prev,
 							[accId]: markPanelSuccess(prev[accId] ?? EMPTY_PANEL, payload, payload.refreshError ?? null, Date.now())
@@ -1686,60 +3470,58 @@ body[data-theme="dark"] {
 						[accId]: markPanelLoadFailure(prev[accId] ?? EMPTY_PANEL, result.error ?? "models_endpoint_failed", Date.now())
 					}));
 				};
-				const refreshModelsPanel = async (acc) => {
+				const refreshModelsPanel = async (accId) => {
 					setModelPanels((prev) => ({
 						...prev,
-						[acc.id]: {
-							...prev[acc.id] ?? EMPTY_PANEL,
-							status: "loading"
+						[accId]: {
+							...prev[accId] ?? EMPTY_PANEL,
+							status: "loading",
+							error: null
 						}
 					}));
-					const result = await postAccountModelsRefresh(fetchWithFallback, API_PREFIX, acc.id);
-					const payload = result.payload;
-					if (payload && payload.ok !== false) {
+					const result = await postJson(`${API_PREFIX}/pool/account-models`, {
+						id: accId,
+						refresh: true
+					});
+					if (result.ok && result.data) {
+						const payload = result.data;
 						setModelPanels((prev) => ({
 							...prev,
-							[acc.id]: markPanelSuccess(prev[acc.id] ?? EMPTY_PANEL, payload, payload.refreshError ?? null, Date.now())
+							[accId]: markPanelSuccess(prev[accId] ?? EMPTY_PANEL, payload, payload.refreshError ?? null, Date.now())
 						}));
 						if (payload.refreshError) showToast(`刷新未完成：${payload.refreshError}（旧清单已保留）`, "warn");
-						else showToast("模型清单已刷新", "success");
+						else showToast(`已刷新模型清单（${payload.total} 个）`, "success");
 						return;
 					}
 					setModelPanels((prev) => ({
 						...prev,
-						[acc.id]: markPanelRefreshFailure(prev[acc.id] ?? EMPTY_PANEL, result.error ?? "models_refresh_failed", Date.now())
+						[accId]: markPanelRefreshFailure(prev[accId] ?? EMPTY_PANEL, result.error ?? "models_refresh_failed", Date.now())
 					}));
 					showToast("模型刷新失败，已保留上一次发现的模型数据", "error");
 				};
 				const ensureModelsLoaded = (accId) => {
-					const panel = modelPanels[accId];
-					if (!panel || panel.status === "idle") loadModelsPanel(accId);
+					const cur = modelPanels[accId];
+					if (!cur || cur.status === "idle") loadModelsPanel(accId);
 				};
-				const accountIdsFingerprint = accounts.map((acc) => acc.id).join("|");
+				const accounts = status?.pool?.accounts ?? [];
 				useEffect(() => {
 					if (activeSection !== "models") return;
 					const stale = collectStalePanelAccounts(modelPanels, accounts, Date.now());
-					if (stale.length === 0) return;
-					(async () => {
-						for (const acc of stale) await loadModelsPanel(acc.id);
-					})();
-				}, [activeSection, accountIdsFingerprint]);
-				const refresh = async () => {
-					setLoadingAction("status");
+					for (const acc of stale) loadModelsPanel(acc.id);
+				}, [activeSection, accounts.map((a) => a.id).join(",")]);
+				const refreshStatusNow = async () => {
+					setLoadingAction("refresh");
 					try {
-						const st = await getStatus();
-						if (!st) {
-							pollOkRef.current = false;
+						const next = await getStatus();
+						if (next) {
+							setStatus(next);
+							setPollOk(true);
+							setLastUpdatedAt(Date.now());
+							showToast("状态已刷新", "success");
+						} else {
 							setPollOk(false);
 							showToast("状态刷新失败：暂时联系不上后端，页面保留的是上次成功拉取的数据", "error");
-							return;
 						}
-						pollOkRef.current = true;
-						lastUpdatedRef.current = Date.now();
-						setPollOk(true);
-						setLastUpdatedAt(lastUpdatedRef.current);
-						setStatus(st);
-						showToast("状态已刷新", "success");
 					} finally {
 						setLoadingAction(null);
 					}
@@ -1748,158 +3530,182 @@ body[data-theme="dark"] {
 					setLoadingAction(label);
 					try {
 						const res = await postJson(`${API_PREFIX}${path}`, payload);
-						if (!res || res.ok === false) {
-							const reason = res && typeof res.error === "string" ? res.error : "后端未响应";
-							showToast(`${okText}失败：${reason}`, "error");
-							return null;
+						if (!res.ok) {
+							showToast(`${okText}失败：${res.error ?? "后端未响应"}`, "error");
+							return;
 						}
+						const next = await getStatus();
+						if (next) setStatus(next);
 						showToast(okText, "success");
-						return res;
 					} finally {
 						setLoadingAction(null);
 					}
 				};
-				const handleBeginAddAccount = async () => {
-					setLoadingAction("begin-add");
+				const beginAddAccount = async () => {
+					setAddingAccount(true);
+					setLoadingAction("add-start");
+					flowStartedRef.current = true;
 					try {
-						const trimmed = aliasInput.trim();
-						const res = await postJson(`${API_PREFIX}/pool/begin-add`, trimmed ? { alias: trimmed } : {});
-						if (!res) {
-							showToast("无法联系后端，添加流程未启动", "error");
+						const res = await postJson(`${API_PREFIX}/pool/begin-add`, { alias: aliasInput.trim() || void 0 });
+						if (!res.ok) {
+							flowStartedRef.current = false;
+							showToast(`添加流程启动失败：${res.error ?? "无法联系后端"}`, "error");
 							return;
 						}
-						if (res.ok === false) {
-							showToast(`添加流程启动失败：${typeof res.error === "string" ? res.error : "未知原因"}`, "error");
-							return;
-						}
-						setAddingAccount(true);
-						if (res.browserOpened === false) showToast("未自动打开浏览器，请在添加面板中使用手动授权链接", "warn");
-						else showToast("已发起浏览器授权，请在打开的 Google 登录页完成授权", "info");
+						if (res.data?.browserOpened === false) showToast("未自动打开浏览器，请在添加面板中使用手动授权链接", "warn");
+						else showToast("已打开浏览器授权，完成后将自动入池", "info");
+						const next = await getStatus();
+						if (next) setStatus(next);
 					} finally {
 						setLoadingAction(null);
 					}
 				};
-				const handleCompleteAddAccount = async () => {
-					const code = authCodeInput.trim();
+				const cancelAddAccount = async () => {
+					flowStartedRef.current = false;
+					setAddingAccount(false);
+					setManualCodeInput("");
+					await postJson(`${API_PREFIX}/pool/cancel-add`, {});
+					const next = await getStatus();
+					if (next) setStatus(next);
+				};
+				const submitManualCode = async () => {
+					const code = manualCodeInput.trim();
 					if (!code) {
 						showToast("请先粘贴授权码或回调链接", "warn");
 						return;
 					}
-					if (await runPoolAction("complete-add", "/pool/complete-add", { code }, "手动激活请求已提交")) setAuthCodeInput("");
+					setLoadingAction("add-complete");
+					try {
+						const res = await postJson(`${API_PREFIX}/pool/complete-add`, { code });
+						if (!res.ok) {
+							showToast(`手动激活失败：${res.error ?? "授权码无效或已过期"}`, "error");
+							return;
+						}
+						flowStartedRef.current = false;
+						setAddingAccount(false);
+						setAliasInput("");
+						setManualCodeInput("");
+						const next = await getStatus();
+						if (next) setStatus(next);
+						showToast("账号已激活并加入账号池", "success");
+					} finally {
+						setLoadingAction(null);
+					}
 				};
-				const handleCancelAddAccount = async () => {
-					flowStartedRef.current = false;
-					setAddingAccount(false);
-					setAuthCodeInput("");
-					await runPoolAction("cancel-add", "/pool/cancel-add", {}, "添加流程已取消");
+				const saveConfig = async (key, value) => {
+					setLoadingAction(`cfg-${key}`);
+					try {
+						const res = await postJson(`${API_PREFIX}/config`, {
+							key,
+							value
+						});
+						if (!res.ok) {
+							showToast(`保存 ${key} 失败：${res.error ?? "后端未响应"}`, "error");
+							return false;
+						}
+						const next = await getStatus();
+						if (next) setStatus(next);
+						showToast(`已更新 ${key}`, "success");
+						return true;
+					} catch (err) {
+						showToast(`保存 ${key} 失败：${err instanceof Error ? err.message : "网络异常"}`, "error");
+						return false;
+					} finally {
+						setLoadingAction(null);
+					}
 				};
-				const setCfg = async (key, value) => {
-					if (await runPoolAction(`config:${key}`, "/config", {
-						key,
-						value
-					}, `${key} 已保存`)) setStatus((prev) => {
-						if (!prev) return prev;
-						if (key === "geminiAppToken") return {
-							...prev,
-							hasGeminiAppToken: typeof value === "string" && value.trim().length > 0
-						};
-						if (key === "geminiAppOffloadEnabled" && value === true) return {
-							...prev,
-							geminiAppOffloadEnabled: true,
-							geminiAppEnabled: true
-						};
-						return {
-							...prev,
-							[key]: value
-						};
-					});
+				const addGeminiAppAccount = async () => {
+					const cred = geminiAppCookieInput.trim();
+					if (!cred) {
+						showToast("请粘贴 oauth_token、MasterToken 或 Access Token", "error");
+						return;
+					}
+					setGeminiAppBusy(true);
+					try {
+						const payload = {};
+						const email = geminiAppEmailInput.trim();
+						if (email) payload.email = email;
+						if (cred.startsWith("aas_et/")) payload.masterToken = cred;
+						else if (cred.startsWith("ya29.")) payload.accessToken = cred;
+						else payload.oauthToken = cred;
+						const res = await postJson(`${API_PREFIX}/gemini-app/pool/login`, payload);
+						if (!res.ok) {
+							showToast(res.error ?? "登录失败", "error");
+							return;
+						}
+						setGeminiAppEmailInput("");
+						setGeminiAppCookieInput("");
+						const next = await getStatus();
+						if (next) setStatus(next);
+						showToast("Gemini App 账号已添加", "success");
+					} finally {
+						setGeminiAppBusy(false);
+					}
 				};
-				const setPrimary = async (id) => {
-					await runPoolAction("primary", "/pool/primary", { id }, "已设为主用账号");
+				const removeGeminiAppAccount = async (id) => {
+					setGeminiAppBusy(true);
+					try {
+						const res = await postJson(`${API_PREFIX}/gemini-app/pool/remove`, { id });
+						if (!res.ok) {
+							showToast(res.error ?? "删除失败", "error");
+							return;
+						}
+						const next = await getStatus();
+						if (next) setStatus(next);
+						showToast("已移除 Gemini App 账号", "success");
+					} finally {
+						setGeminiAppBusy(false);
+					}
 				};
-				const removeAccount = async (id) => {
-					await runPoolAction("remove", "/pool/remove", { id }, "账号已移除");
-				};
-				const refreshQuota = async (id) => {
-					await runPoolAction("quota", "/pool/refresh-quota", id ? { id } : {}, "额度已刷新");
-				};
-				const saveProxy = async (id) => {
-					const proxyUrl = (proxyInputs[id] ?? "").trim();
-					if (await runPoolAction("proxy", "/pool/proxy", {
-						id,
-						proxyUrl
-					}, proxyUrl ? "代理已保存" : "已改用全局代理")) setEditingProxyId(null);
-				};
-				const clearCooldown = async (id) => {
-					await runPoolAction("cooldown", "/pool/clear-cooldown", id ? { id } : {}, "本地冷却已清除");
-				};
-				const toggleExpand = (accId) => {
-					const next = !expandedModels[accId];
+				const handleViewAccountModels = (accId) => {
+					setActiveSection("models");
 					setExpandedModels((prev) => ({
 						...prev,
-						[accId]: next
+						[accId]: true
 					}));
-					if (next) ensureModelsLoaded(accId);
+					ensureModelsLoaded(accId);
+					win.setTimeout(() => {
+						(win.document?.getElementById?.(modelsPanelDomId(accId)))?.scrollIntoView?.({
+							behavior: "smooth",
+							block: "nearest"
+						});
+					}, 60);
 				};
-				const renderSkeletonRow = (widthPct, heightPx = 14) => h("div", {
-					className: "agy-skeleton",
-					"aria-hidden": true,
-					style: {
-						width: `${widthPct}%`,
-						height: `${heightPx}px`,
-						marginBottom: "var(--agy-space-2)"
-					}
-				});
-				const renderSkeletonCard = () => h("div", { style: S.card }, renderSkeletonRow(35, 18), renderSkeletonRow(80), renderSkeletonRow(60), h("span", { className: "agy-sr-only" }, "正在加载"));
-				const renderEmptyState = (text, action) => h("div", { style: {
-					padding: "var(--agy-space-5)",
-					textAlign: "center",
-					border: "1px dashed var(--agy-border-divider)",
-					borderRadius: "var(--agy-radius-lg)",
-					background: "var(--agy-bg-subbox)"
-				} }, h("div", { style: {
-					color: "var(--agy-text-secondary)",
-					fontSize: "var(--agy-font-md)",
-					lineHeight: 1.6
-				} }, text), action ? h("div", { style: { marginTop: "var(--agy-space-3)" } }, action) : null);
-				const renderStrip = (kind, text, retry) => h("div", {
-					role: "alert",
-					style: {
-						display: "flex",
-						alignItems: "center",
-						justifyContent: "space-between",
-						gap: "var(--agy-space-2)",
-						padding: "9px var(--agy-space-3)",
-						borderRadius: "var(--agy-radius-md)",
-						background: kind === "error" ? "var(--agy-danger-bg)" : kind === "warn" ? "var(--agy-warn-bg)" : "var(--agy-info-bg)",
-						border: `1px solid ${kind === "error" ? "var(--agy-danger-border)" : kind === "warn" ? "var(--agy-warn-border)" : "var(--agy-info-border)"}`,
-						color: kind === "error" ? "var(--agy-danger-text)" : kind === "warn" ? "var(--agy-warn-text)" : "var(--agy-info-text)",
-						fontSize: "var(--agy-font-sm)",
-						marginBottom: "var(--agy-space-2)"
-					}
-				}, h("span", null, text), retry ? h("button", {
-					className: "agy-btn",
-					style: S.btnSm,
-					onClick: retry,
-					"aria-label": "重试加载"
-				}, uiIcon("refresh", 12), "重试") : null);
-				const numOf = (obj, key) => {
-					const v = obj ? obj[key] : void 0;
-					return typeof v === "number" && Number.isFinite(v) ? v : null;
+				const onNavKeyDown = (ev) => {
+					const idx = SECTIONS.findIndex((s) => s.key === activeSection);
+					let next = idx;
+					if (ev.key === "ArrowRight") next = (idx + 1) % SECTIONS.length;
+					else if (ev.key === "ArrowLeft") next = (idx - 1 + SECTIONS.length) % SECTIONS.length;
+					else if (ev.key === "Home") next = 0;
+					else if (ev.key === "End") next = SECTIONS.length - 1;
+					else return;
+					ev.preventDefault?.();
+					const key = SECTIONS[next].key;
+					setActiveSection(key);
+					tabRefs.current[key]?.focus?.();
 				};
-				const renderStatCard = (label, value, sub, valueColor) => h("div", {
-					className: "agy-card-hover",
-					style: {
-						...S.statBox,
-						flex: "1 1 150px"
-					}
-				}, h("div", { style: S.statLabel }, label), h("div", { style: {
-					...S.statValue,
-					color: valueColor ?? "var(--agy-text-primary)"
-				} }, value), sub ? h("div", { style: S.statSub }, sub) : null);
+				const navBar = h("nav", {
+					style: S.navBar,
+					role: "tablist",
+					"aria-label": `${SETTINGS_SECTION_LABEL} 设置分区`,
+					onKeyDown: onNavKeyDown
+				}, ...SECTIONS.map((s) => h("button", {
+					key: s.key,
+					id: `agy-tab-${s.key}`,
+					ref: (node) => {
+						tabRefs.current[s.key] = node;
+					},
+					className: "agy-tab",
+					role: "tab",
+					"aria-selected": activeSection === s.key,
+					"aria-controls": `agy-panel-${s.key}`,
+					tabIndex: activeSection === s.key ? 0 : -1,
+					style: activeSection === s.key ? S.navTabActive : S.navTab,
+					onClick: () => setActiveSection(s.key)
+				}, s.label)));
 				const renderToastBanner = () => {
 					if (!toast) return null;
-					const tone = {
+					const p = {
 						success: {
 							bg: "var(--agy-toast-success-bg)",
 							border: "var(--agy-toast-success-border)",
@@ -1924,1335 +3730,45 @@ body[data-theme="dark"] {
 					return h("div", {
 						role: "status",
 						"aria-live": "polite",
-						className: "agy-rise",
 						style: {
-							...S.noticeBanner,
-							background: tone.bg,
-							border: `1px solid ${tone.border}`,
-							color: tone.text
+							padding: "9px 14px",
+							borderRadius: "var(--agy-radius-md)",
+							background: p.bg,
+							border: `1px solid ${p.border}`,
+							color: p.text,
+							fontSize: "var(--agy-font-sm)",
+							fontWeight: 600,
+							display: "flex",
+							justifyContent: "space-between",
+							alignItems: "center",
+							gap: "var(--agy-space-2)"
 						}
 					}, h("span", null, toast.text), h("button", {
 						className: "agy-btn",
 						style: {
-							...S.btnSm,
 							background: "transparent",
-							border: "none"
+							border: "none",
+							color: p.text,
+							cursor: "pointer",
+							padding: "2px 4px"
 						},
 						onClick: () => setToast(null),
 						"aria-label": "关闭提示"
 					}, uiIcon("x", 12)));
 				};
-				const quotaGradientFor = (pct, cooling) => {
-					if (cooling) return "var(--agy-quota-cool-grad)";
-					if (pct < 10) return "var(--agy-quota-low-grad)";
-					if (pct <= 30) return "var(--agy-quota-med-grad)";
-					return "var(--agy-quota-high-grad)";
-				};
-				const quotaTextFor = (pct, cooling) => {
-					if (cooling) return "var(--agy-quota-none-text)";
-					if (pct < 10) return "var(--agy-quota-low-text)";
-					if (pct <= 30) return "var(--agy-quota-med-text)";
-					return "var(--agy-quota-high-text)";
-				};
-				const renderQuotaBar = (label, familyKey, acc) => {
-					const info = acc.quotas[familyKey];
-					const cd = acc.cooldowns[familyKey];
-					const cooling = !!(cd && cd.cooldownUntil > Date.now());
-					const pct5h = typeof info?.remainingFraction === "number" ? Math.max(0, Math.min(100, Math.round(info.remainingFraction * 100))) : -1;
-					const pctWeekly = typeof info?.weeklyFraction === "number" ? Math.max(0, Math.min(100, Math.round(info.weeklyFraction * 100))) : -1;
-					const cdNote = cooling ? " · 本地冷却中" : "";
-					const line = (windowLabel, pct, resetTime) => {
-						if (pct < 0) return h("div", { style: {
-							display: "flex",
-							alignItems: "center",
-							gap: "var(--agy-space-2)",
-							marginBottom: "5px"
-						} }, h("span", { style: {
-							width: "56px",
-							color: "var(--agy-text-tertiary)",
-							fontSize: "var(--agy-font-xs)"
-						} }, windowLabel), h("span", {
-							className: "agy-num",
-							style: {
-								...S.muted,
-								fontSize: "var(--agy-font-xs)"
-							}
-						}, `未同步${cdNote}`));
-						return h("div", { style: {
-							display: "flex",
-							alignItems: "center",
-							gap: "var(--agy-space-2)",
-							marginBottom: "5px"
-						} }, h("span", { style: {
-							width: "56px",
-							color: "var(--agy-text-tertiary)",
-							fontSize: "var(--agy-font-xs)"
-						} }, windowLabel), h("div", {
-							style: S.progressBarBg,
-							"aria-hidden": true
-						}, h("div", {
-							className: "agy-progress-fill",
-							style: {
-								width: `${pct}%`,
-								height: "100%",
-								borderRadius: "var(--agy-radius-pill)",
-								background: quotaGradientFor(pct, cooling)
-							}
-						})), h("span", {
-							className: "agy-num",
-							style: {
-								fontSize: "var(--agy-font-xs)",
-								fontWeight: 700,
-								color: quotaTextFor(pct, cooling),
-								minWidth: "38px",
-								textAlign: "right"
-							}
-						}, `${pct}%`), h(ResetCountdown, {
-							resetTime,
-							suffix: cdNote,
-							className: "agy-num",
-							style: {
-								fontSize: "var(--agy-font-xs)",
-								color: "var(--agy-text-tertiary)",
-								minWidth: "128px"
-							}
-						}));
-					};
-					return h("div", { style: S.quotaBox }, h("div", { style: {
-						display: "flex",
-						alignItems: "center",
-						gap: "6px",
-						marginBottom: "5px"
-					} }, brandIcon(FAMILY_BRAND[familyKey], 13), h("span", { style: {
-						fontSize: "var(--agy-font-sm)",
-						fontWeight: 700,
-						color: "var(--agy-text-primary)"
-					} }, label)), line("5h 额度", pct5h, info?.resetTime), line("周额度", pctWeekly, info?.weeklyResetTime));
-				};
-				const renderedAccountCards = accounts.map((acc, idx) => {
-					const isPrimary = acc.id === status?.pool?.primaryAccountId;
-					const hasCooldown = Object.values(acc.cooldowns ?? {}).some((cd) => cd && cd.cooldownUntil > Date.now());
-					const isAuthRequired = acc.authRequired === true;
-					const dotColor = !acc.enabled ? "var(--agy-strong-neutral)" : isAuthRequired ? "var(--agy-strong-danger)" : hasCooldown ? "var(--agy-strong-warn)" : "var(--agy-strong-ok)";
-					const isAutoAlias = !acc.alias || /^备用.*账号/i.test(acc.alias) || /^主账号/i.test(acc.alias);
-					const displayName = acc.email ? isAutoAlias ? acc.email : acc.alias : acc.alias || acc.id;
-					const showEmailBadge = acc.email && !isAutoAlias;
-					const modelCount = accountModelIdsOf(acc).length;
-					const expanded = !!expandedModels[acc.id];
-					return h("div", {
-						key: acc.id,
-						className: "agy-card-hover agy-rise",
-						style: {
-							...isPrimary ? S.cardPrimary : S.card,
-							"--i": Math.min(idx, 8)
-						}
-					}, h("div", { style: {
-						display: "flex",
-						alignItems: "center",
-						justifyContent: "space-between",
-						flexWrap: "wrap",
-						gap: "var(--agy-space-2)"
-					} }, h("div", { style: {
-						display: "flex",
-						alignItems: "center",
-						gap: "var(--agy-space-2)",
-						flexWrap: "wrap",
-						minWidth: 0
-					} }, h("span", {
-						className: "agy-pulse-dot",
-						"aria-hidden": true,
-						style: { background: dotColor }
-					}), h("span", { style: {
-						fontSize: "var(--agy-font-lg)",
-						fontWeight: 750,
-						color: "var(--agy-text-primary)",
-						overflow: "hidden",
-						textOverflow: "ellipsis",
-						whiteSpace: "nowrap",
-						maxWidth: "340px"
-					} }, displayName), isPrimary ? h("span", { style: S.badgePrimary }, uiIcon("star", 11), " 主用") : null, acc.proxyUrl ? h("span", {
-						style: S.badgeTag,
-						title: `专属代理：${acc.proxyUrl}`
-					}, uiIcon("globe", 11), " 代理") : null, showEmailBadge ? h("span", {
-						style: S.badgeTag,
-						title: acc.email
-					}, uiIcon("mail", 11), ` ${maskEmail(acc.email)}`) : null, isAuthRequired ? h("span", { style: S.badgeUnready }, "需重新登录") : null, h("span", {
-						style: S.badgeTag,
-						title: "已发现的模型数"
-					}, uiIcon("layers", 11), ` 模型 ${modelCount}`)), h("div", { style: {
-						display: "flex",
-						alignItems: "center",
-						gap: "5px",
-						flexWrap: "wrap"
-					} }, h("button", {
-						className: "agy-btn",
-						style: S.btnSm,
-						onClick: () => toggleExpand(acc.id),
-						"aria-expanded": expanded,
-						"aria-controls": modelsPanelDomId(acc.id),
-						title: "查看该账号支持的模型与额度"
-					}, uiIcon(expanded ? "chevronUp" : "chevronDown", 11), expanded ? " 收起" : " 明细"), h("button", {
-						className: "agy-btn",
-						style: S.btnSm,
-						onClick: () => void refreshQuota(acc.id),
-						disabled: isBusy,
-						title: "刷新此账号（换号后点这里立即同步 email / 额度 / 模型）",
-						"aria-label": `同步账号 ${displayName}`
-					}, uiIcon("refresh", 11), " 同步"), !isPrimary ? h("button", {
-						className: "agy-btn",
-						style: S.btnSm,
-						onClick: () => void setPrimary(acc.id),
-						disabled: isBusy,
-						title: "切换调度主用账号"
-					}, "设为主用") : null, h("button", {
-						className: "agy-btn",
-						style: S.btnSm,
-						onClick: () => {
-							if (editingProxyId === acc.id) setEditingProxyId(null);
-							else {
-								setEditingProxyId(acc.id);
-								setProxyInputs((prev) => ({
-									...prev,
-									[acc.id]: acc.proxyUrl ?? ""
-								}));
-							}
-						},
-						"aria-expanded": editingProxyId === acc.id,
-						title: "配置该账号的专属代理"
-					}, uiIcon("globe", 11), " 代理"), accounts.length > 1 ? h("button", {
-						className: "agy-btn",
-						style: S.btnDanger,
-						onClick: () => void removeAccount(acc.id),
-						disabled: isBusy,
-						"aria-label": `移除此账号 ${displayName}`,
-						title: "从账号池移除（不会吊销 Google 侧授权）"
-					}, uiIcon("trash", 11), " 移除此") : null)), h("div", { style: {
-						display: "flex",
-						gap: "var(--agy-space-4)",
-						flexWrap: "wrap",
-						marginTop: "var(--agy-space-2)"
-					} }, renderQuotaBar("Gemini", "google", acc), renderQuotaBar("Claude", "anthropic", acc), renderQuotaBar("GPT-OSS", "openai", acc)), hasCooldown ? h("div", {
-						className: "agy-cooldown-breathe",
-						style: {
-							display: "flex",
-							alignItems: "center",
-							justifyContent: "space-between",
-							gap: "var(--agy-space-2)",
-							marginTop: "var(--agy-space-2)",
-							padding: "8px var(--agy-space-3)",
-							borderRadius: "var(--agy-radius-md)",
-							background: "var(--agy-warn-bg)",
-							border: "1px solid var(--agy-warn-border)",
-							color: "var(--agy-warn-text)",
-							fontSize: "var(--agy-font-sm)"
-						}
-					}, h("span", { style: {
-						display: "inline-flex",
-						alignItems: "center",
-						gap: "6px"
-					} }, uiIcon("zap", 12), "部分模型限流中，已自动切换账号"), h("button", {
-						className: "agy-btn",
-						style: {
-							...S.btnSm,
-							background: "var(--agy-warn-btn-bg)",
-							color: "var(--agy-warn-btn-text)",
-							border: "1px solid var(--agy-warn-btn-border)"
-						},
-						onClick: () => void clearCooldown(acc.id),
-						disabled: isBusy
-					}, "清除冷却")) : null, editingProxyId === acc.id ? h("div", { style: {
-						display: "flex",
-						gap: "var(--agy-space-2)",
-						marginTop: "var(--agy-space-2)",
-						flexWrap: "wrap"
-					} }, h("input", {
-						className: "agy-input",
-						style: S.input,
-						value: proxyInputs[acc.id] ?? "",
-						placeholder: "专属代理 URL (如: http://127.0.0.1:7890，留空则使用全局)",
-						"aria-label": `账号 ${displayName} 的专属代理 URL`,
-						onChange: (e) => setProxyInputs((prev) => ({
-							...prev,
-							[acc.id]: e.target.value
-						}))
-					}), h("button", {
-						className: "agy-btn",
-						style: S.btnSmPrimary,
-						onClick: () => void saveProxy(acc.id),
-						disabled: isBusy
-					}, "保存"), h("button", {
-						className: "agy-btn",
-						style: S.btnSm,
-						onClick: () => setEditingProxyId(null)
-					}, "取消")) : null, expanded ? (() => {
-						const detail = selectPanelPayload(modelPanels[acc.id], acc);
-						const entries = detail.payload.familyModels.flatMap((g) => g.models.map((m) => ({
-							id: m.id,
-							name: m.name,
-							family: g.family
-						})));
-						return h("div", {
-							id: modelsPanelDomId(acc.id),
-							role: "region",
-							"aria-label": `${displayName} 的模型明细`,
-							style: {
-								display: "flex",
-								flexWrap: "wrap",
-								alignItems: "center",
-								gap: "5px",
-								marginTop: "var(--agy-space-2)"
-							}
-						}, entries.length === 0 ? h("span", { style: {
-							...S.muted,
-							fontSize: "var(--agy-font-xs)"
-						} }, "尚未发现该账号的模型，可点「同步」或稍后自动加载。") : entries.map((m) => h("span", {
-							key: `${m.family}:${m.id}`,
-							style: S.badgeTag,
-							title: m.id
-						}, brandIcon(FAMILY_BRAND[m.family] ?? "gemini", 11), " ", m.name)), h("span", { style: {
-							...S.muted,
-							fontSize: "var(--agy-font-xs)",
-							width: "100%"
-						} }, detail.usingFallback ? "来源：最近一次额度同步（模型端点未返回数据时的兜底展示）" : "来源：最近一次模型端点成功发现"));
-					})() : null);
-				});
-				const poolAuthPhase = status?.poolAuth?.phase ?? "idle";
-				const addFlow = accountAddFlowView(addingAccount, poolAuthPhase);
-				const flowActive = addFlow.flowActive;
-				const addAccountSection = addingAccount ? h("div", { style: S.authModal }, h("div", { style: {
-					display: "flex",
-					alignItems: "center",
-					justifyContent: "space-between",
-					marginBottom: "var(--agy-space-2)"
-				} }, h("div", { style: S.panelTitle }, "添加账号"), h("button", {
-					className: "agy-btn",
-					style: S.btnSm,
-					onClick: () => void handleCancelAddAccount(),
-					"aria-label": "关闭添加流程"
-				}, uiIcon("x", 12))), addFlow.showBrowserStart ? h("div", { style: {
-					display: "flex",
-					gap: "var(--agy-space-2)",
-					flexWrap: "wrap",
-					alignItems: "center"
-				} }, h("input", {
-					className: "agy-input",
-					style: {
-						...S.input,
-						maxWidth: "280px"
-					},
-					value: aliasInput,
-					placeholder: "可选别名 (留空直接使用 Google 账号名称)",
-					"aria-label": "新账号别名",
-					onChange: (e) => setAliasInput(e.target.value)
-				}), h("button", {
-					className: "agy-btn",
-					style: S.btnPrimary,
-					onClick: () => void handleBeginAddAccount(),
-					disabled: isBusy
-				}, uiIcon("externalLink", 12), " 打开浏览器登录")) : null, flowActive ? h("div", { style: {
-					...S.muted,
-					lineHeight: 1.7
-				} }, poolAuthPhase === "waiting" ? "等待浏览器中完成 Google 授权，成功后将自动激活。" : "正在验证授权并激活账号，请稍候...", h("div", { style: { marginTop: "var(--agy-space-2)" } }, status?.poolAuth?.url ? h("button", {
-					className: "agy-btn",
-					style: {
-						...S.btnSm,
-						color: "var(--agy-accent)",
-						border: "1px solid var(--agy-accent-soft-border)",
-						background: "var(--agy-accent-soft-bg)"
-					},
-					onClick: () => win.open?.(status?.poolAuth?.url ?? "", "_blank")
-				}, uiIcon("externalLink", 12), " 若浏览器未打开，请点击此处手动打开 Google 登录页") : null)) : null, poolAuthPhase === "failed" ? h("div", { style: {
-					...S.noticeBanner,
-					background: "var(--agy-danger-bg)",
-					border: "1px solid var(--agy-danger-border)",
-					color: "var(--agy-danger-text)",
-					marginBottom: "var(--agy-space-2)"
-				} }, status?.poolAuth?.message || "自动激活失败，可手动粘贴授权码完成激活。") : null, h("div", { style: {
-					display: "flex",
-					gap: "var(--agy-space-2)",
-					marginTop: "var(--agy-space-2)",
-					flexWrap: "wrap"
-				} }, h("input", {
-					className: "agy-input",
-					style: S.input,
-					value: authCodeInput,
-					placeholder: "授权码 或 http://localhost:51121/oauth-callback?code=... 完整链接",
-					"aria-label": "手动授权码或回调链接",
-					onChange: (e) => setAuthCodeInput(e.target.value)
-				}), h("button", {
-					className: "agy-btn",
-					style: S.btnSmPrimary,
-					onClick: () => void handleCompleteAddAccount(),
-					disabled: isBusy
-				}, "手动激活"), h("button", {
-					className: "agy-btn",
-					style: S.btnSm,
-					onClick: () => void handleCancelAddAccount(),
-					disabled: isBusy
-				}, "取消"))) : h("div", { style: S.authModal }, h("div", { style: {
-					display: "flex",
-					gap: "var(--agy-space-2)",
-					flexWrap: "wrap",
-					alignItems: "center"
-				} }, h("input", {
-					className: "agy-input",
-					style: {
-						...S.input,
-						maxWidth: "280px"
-					},
-					value: aliasInput,
-					placeholder: "可选别名 (留空直接使用 Google 账号名称)",
-					"aria-label": "新账号别名",
-					onChange: (e) => setAliasInput(e.target.value)
-				}), h("button", {
-					className: "agy-btn",
-					style: S.btnPrimary,
-					onClick: () => void handleBeginAddAccount(),
-					disabled: isBusy
-				}, uiIcon("plus", 12), " 打开浏览器登录")));
-				const renderModelPanel = (acc, idx) => {
-					const panel = modelPanels[acc.id] ?? EMPTY_PANEL;
-					const expanded = !!expandedModels[acc.id];
-					const { payload, usingFallback } = selectPanelPayload(panel, acc);
-					const isAutoAlias = !acc.alias || /^备用.*账号/i.test(acc.alias) || /^主账号/i.test(acc.alias);
-					const displayName = acc.email ? isAutoAlias ? acc.email : acc.alias : acc.alias || acc.id;
-					const ids = payload.familyModels.flatMap((g) => g.models.map((m) => m.id));
-					const ownIdSet = new Set(ids);
-					const others = computeOtherAccountModelIds(modelPanels, accounts, acc.id);
-					const query = (modelQueries[acc.id] ?? "").trim().toLowerCase();
-					const famFilter = familyFilters[acc.id];
-					const groups = payload.familyModels.filter((g) => !famFilter || famFilter.length === 0 || famFilter.includes(g.family)).map((g) => ({
-						...g,
-						models: g.models.filter((m) => !query || m.id.toLowerCase().includes(query) || m.name.toLowerCase().includes(query))
-					})).filter((g) => g.models.length > 0);
-					const filteredCount = groups.reduce((n, g) => n + g.models.length, 0);
-					const presentFamilies = [
-						"google",
-						"anthropic",
-						"openai",
-						"unknown"
-					].filter((f) => payload.familyModels.some((g) => g.family === f && g.models.length > 0));
-					const coverageBadge = h("span", {
-						style: { ...S.badgeTag },
-						title: `该账号已发现 ${ownIdSet.size} 个模型 · 全部账号共发现 ${modelUnionTotal} 个`
-					}, uiIcon("layers", 11), ` 覆盖 ${ownIdSet.size}/${modelUnionTotal}`);
-					const headRow = h("div", { style: {
-						display: "flex",
-						alignItems: "center",
-						justifyContent: "space-between",
-						flexWrap: "wrap",
-						gap: "var(--agy-space-2)"
-					} }, h("div", { style: {
-						display: "flex",
-						alignItems: "center",
-						gap: "var(--agy-space-2)",
-						flexWrap: "wrap",
-						minWidth: 0
-					} }, h("span", { style: {
-						fontSize: "var(--agy-font-lg)",
-						fontWeight: 750,
-						color: "var(--agy-text-primary)"
-					} }, displayName), coverageBadge, typeof panel.fetchedAt === "number" ? h("span", {
-						className: "agy-num",
-						style: {
-							fontSize: "var(--agy-font-xs)",
-							color: "var(--agy-text-tertiary)"
-						}
-					}, `同步于 ${formatClock(panel.fetchedAt)}`) : null), h("div", { style: {
-						display: "flex",
-						alignItems: "center",
-						gap: "5px"
-					} }, panel.status === "loading" ? h("span", { style: {
-						display: "inline-flex",
-						alignItems: "center",
-						gap: "6px",
-						fontSize: "var(--agy-font-xs)",
-						color: "var(--agy-text-tertiary)"
-					} }, h("span", {
-						className: "agy-spinner",
-						"aria-hidden": true
-					}), "正在加载模型清单…") : null, h("button", {
-						className: "agy-btn",
-						style: S.btnSm,
-						onClick: () => void refreshModelsPanel(acc),
-						disabled: panel.status === "loading",
-						"aria-label": `刷新 ${displayName} 的模型清单`,
-						title: "重新发现该账号可用的模型与额度（POST refresh）"
-					}, uiIcon("refresh", 11), " 刷新模型清单"), h("button", {
-						className: "agy-btn",
-						style: S.btnSm,
-						onClick: () => toggleExpand(acc.id),
-						"aria-expanded": expanded,
-						"aria-controls": modelsPanelDomId(acc.id)
-					}, uiIcon(expanded ? "chevronUp" : "chevronDown", 11), expanded ? " 收起" : " 展开")));
-					const statusStrips = [];
-					if (panel.status === "error" && panel.error) statusStrips.push(renderStrip("error", `模型端点不可用：${panel.error}（${panel.payload ? "下方为最近一次成功发现的模型数据，失败不会清空" : "下方为最近一次额度同步的兜底模型数据"}）`, () => void loadModelsPanel(acc.id)));
-					if (panel.refreshError) statusStrips.push(renderStrip("warn", `刷新失败：${panel.refreshError} · 已保留旧模型数据`));
-					const controls = expanded ? h("div", { style: {
-						display: "flex",
-						gap: "var(--agy-space-2)",
-						flexWrap: "wrap",
-						alignItems: "center",
-						margin: "var(--agy-space-2) 0"
-					} }, h("span", { style: {
-						...S.input,
-						display: "inline-flex",
-						alignItems: "center",
-						gap: "6px",
-						flex: "1 1 220px",
-						maxWidth: "320px",
-						padding: 0
-					} }, uiIcon("search", 12, "var(--agy-text-tertiary)"), h("input", {
-						className: "agy-input",
-						style: {
-							border: "none",
-							background: "transparent",
-							color: "var(--agy-text-primary)",
-							fontSize: "var(--agy-font-sm)",
-							padding: "7px 4px",
-							width: "100%",
-							outline: "none"
-						},
-						value: modelQueries[acc.id] ?? "",
-						placeholder: "搜索模型名 / modelId",
-						"aria-label": `在 ${displayName} 的模型清单中搜索`,
-						onChange: (e) => setModelQueries((prev) => ({
-							...prev,
-							[acc.id]: e.target.value
-						}))
-					})), h("div", {
-						style: {
-							display: "flex",
-							gap: "4px",
-							flexWrap: "wrap"
-						},
-						role: "group",
-						"aria-label": "模型厂商筛选"
-					}, h("button", {
-						className: "agy-chip",
-						style: {
-							...S.badgeTag,
-							cursor: "pointer",
-							border: "1px solid var(--agy-badge-tag-border)"
-						},
-						"aria-pressed": !famFilter || famFilter.length === 0,
-						onClick: () => setFamilyFilters((prev) => ({
-							...prev,
-							[acc.id]: []
-						}))
-					}, "全部"), presentFamilies.map((f) => h("button", {
-						key: f,
-						className: "agy-chip",
-						style: {
-							...S.badgeTag,
-							cursor: "pointer",
-							border: "1px solid var(--agy-badge-tag-border)"
-						},
-						"aria-pressed": !!famFilter && famFilter.includes(f),
-						onClick: () => setFamilyFilters((prev) => ({
-							...prev,
-							[acc.id]: famFilter && famFilter.includes(f) ? famFilter.filter((x) => x !== f) : [...famFilter ?? [], f]
-						}))
-					}, FAMILY_LABEL[f] ?? f)))) : null;
-					const body = !expanded ? null : panel.status === "loading" && !panel.payload ? h("div", {
-						id: modelsPanelDomId(acc.id),
-						role: "region",
-						"aria-label": `${displayName} 的模型清单`,
-						style: { paddingTop: "var(--agy-space-1)" }
-					}, renderSkeletonRow(70, 16), renderSkeletonRow(85), renderSkeletonRow(55), h("span", { className: "agy-sr-only" }, "正在加载模型清单")) : ownIdSet.size === 0 && !query ? h("div", {
-						id: modelsPanelDomId(acc.id),
-						role: "region",
-						"aria-label": `${displayName} 的模型清单`
-					}, renderEmptyState("尚未发现该账号的模型清单。", h("button", {
-						className: "agy-btn",
-						style: S.btnSmPrimary,
-						onClick: () => void refreshModelsPanel(acc),
-						disabled: panel.status === "loading"
-					}, uiIcon("refresh", 11), " 点击刷新发现模型"))) : filteredCount === 0 ? h("div", {
-						id: modelsPanelDomId(acc.id),
-						role: "region",
-						"aria-label": `${displayName} 的模型清单`
-					}, renderEmptyState("没有匹配当前搜索 / 筛选的模型。", h("button", {
-						className: "agy-btn",
-						style: S.btnSm,
-						onClick: () => {
-							setModelQueries((prev) => ({
-								...prev,
-								[acc.id]: ""
-							}));
-							setFamilyFilters((prev) => ({
-								...prev,
-								[acc.id]: []
-							}));
-						}
-					}, "清空搜索与筛选"))) : h("div", {
-						id: modelsPanelDomId(acc.id),
-						role: "region",
-						"aria-label": `${displayName} 的模型清单`
-					}, usingFallback && ids.length > 0 ? h("div", { style: {
-						fontSize: "var(--agy-font-xs)",
-						color: "var(--agy-text-tertiary)",
-						marginBottom: "var(--agy-space-2)"
-					} }, "来源：最近一次额度同步（模型端点未返回数据时的兜底展示）") : null, h("div", { style: {
-						fontSize: "var(--agy-font-xs)",
-						color: "var(--agy-text-tertiary)",
-						marginBottom: "var(--agy-space-2)"
-					} }, `${filteredCount} / ${ownIdSet.size} 个模型 · 独有 ${ids.filter((id) => !others.has(id)).length} · 共用 ${ids.filter((id) => others.has(id)).length}`), groups.map((g) => h("div", {
-						key: g.family,
-						style: { marginBottom: "var(--agy-space-3)" }
-					}, h("div", { style: {
-						display: "flex",
-						alignItems: "center",
-						gap: "6px",
-						marginBottom: "6px"
-					} }, brandIcon(FAMILY_BRAND[g.family] ?? "gemini", 12), h("span", { style: S.panelCaption }, FAMILY_LABEL[g.family] ?? g.family)), g.models.map((m, rowIdx) => {
-						const pct = typeof m.remainingFraction === "number" ? Math.max(0, Math.min(100, Math.round(m.remainingFraction * 100))) : -1;
-						const isExclusive = !others.has(m.id);
-						return h("div", {
-							key: `${g.family}:${m.id}`,
-							className: "agy-model-row",
-							style: {
-								"--i": Math.min(rowIdx, 12),
-								display: "flex",
-								alignItems: "center",
-								gap: "var(--agy-space-2)",
-								padding: "5px 0",
-								flexWrap: "wrap"
-							}
-						}, h("span", {
-							title: m.id,
-							style: {
-								flex: "1 1 240px",
-								minWidth: "160px",
-								fontSize: "var(--agy-font-sm)",
-								color: "var(--agy-text-primary)",
-								overflow: "hidden",
-								textOverflow: "ellipsis",
-								whiteSpace: "nowrap"
-							}
-						}, m.name), isExclusive ? h("span", {
-							style: {
-								...S.badgePrimary,
-								opacity: .9
-							},
-							title: "其它账号目前尚未发现此模型"
-						}, "本账号独有") : h("span", {
-							style: S.badgeTag,
-							title: "账号池中至少一个其它账号也支持此模型"
-						}, "其它账号也支持"), h("div", {
-							style: {
-								...S.progressBarBg,
-								maxWidth: "180px",
-								minWidth: "90px"
-							},
-							"aria-hidden": true
-						}, h("div", {
-							className: "agy-progress-fill",
-							style: {
-								width: `${pct < 0 ? 0 : pct}%`,
-								height: "100%",
-								borderRadius: "var(--agy-radius-pill)",
-								background: quotaGradientFor(pct, false)
-							}
-						})), h("span", {
-							className: "agy-num",
-							style: {
-								fontSize: "var(--agy-font-xs)",
-								fontWeight: 700,
-								minWidth: "38px",
-								textAlign: "right",
-								color: quotaTextFor(pct, false)
-							}
-						}, pct < 0 ? "—" : `${pct}%`), h(ResetCountdown, {
-							resetTime: m.resetTime,
-							emptyPrefix: "↻ ",
-							emptyText: "未提供",
-							className: "agy-num",
-							style: {
-								fontSize: "var(--agy-font-xs)",
-								color: "var(--agy-text-tertiary)",
-								minWidth: "132px",
-								padding: "2px 6px",
-								borderRadius: "var(--agy-radius-sm)"
-							}
-						}));
-					}))));
-					return h("div", {
-						key: acc.id,
-						className: "agy-card-hover agy-rise",
-						style: {
-							...S.card,
-							"--i": Math.min(idx, 8)
-						}
-					}, headRow, statusStrips.length > 0 ? h("div", null, ...statusStrips) : null, controls, body);
-				};
-				const renderModelsSection = () => {
-					if (accounts.length === 0) return renderEmptyState("还没有账号。添加账号后，这里会展示每个账号支持的模型、剩余额度与跨账号覆盖差异。", h("button", {
-						className: "agy-btn",
-						style: S.btnPrimary,
-						onClick: () => setActiveSection("accounts")
-					}, uiIcon("plus", 12), " 前往添加账号"));
-					return h("div", null, h("div", { style: {
-						display: "flex",
-						alignItems: "center",
-						gap: "var(--agy-space-2)",
-						marginBottom: "var(--agy-space-2)",
-						flexWrap: "wrap"
-					} }, h("span", { style: S.panelCaption }, "账号 × 模型覆盖"), h("span", {
-						className: "agy-num",
-						style: {
-							fontSize: "var(--agy-font-xs)",
-							color: "var(--agy-text-tertiary)"
-						}
-					}, `已发现模型并集 ${modelUnionTotal} 个 · 灰度差异以并集为基准`)), ...accounts.map((acc, idx) => renderModelPanel(acc, idx)));
-				};
-				const renderAuditDrawer = () => {
-					if (!showAuditDrawer) return null;
-					const o = statsOverview;
-					const totalRequests = numOf(o, "totalRequests");
-					const totalSuccess = numOf(o, "totalSuccess");
-					const totalFailed = numOf(o, "totalFailed");
-					const cacheHitRate = numOf(o, "cacheHitRate");
-					const cacheColor = cacheHitRate === null ? "var(--agy-text-primary)" : cacheHitRate > .3 ? "var(--agy-strong-ok)" : cacheHitRate >= .1 ? "var(--agy-strong-warn)" : "var(--agy-strong-neutral)";
-					const summaryCards = o ? h("div", { style: {
-						display: "flex",
-						gap: "var(--agy-space-2)",
-						flexWrap: "wrap",
-						padding: "var(--agy-space-3) var(--agy-space-4) 0"
-					} }, renderStatCard("请求总数", totalRequests === null ? "—" : formatNumber(totalRequests), `成功 ${totalSuccess === null ? "—" : formatNumber(totalSuccess)} · 失败 ${totalFailed === null ? "—" : formatNumber(totalFailed)}`), renderStatCard("缓存命中率 (Cache Hit %)", cacheHitRate === null ? "—" : `${(cacheHitRate * 100).toFixed(1)}%`, `命中 Token ${numOf(o, "totalCachedTokens") === null ? "—" : formatCompactTokens(numOf(o, "totalCachedTokens") ?? 0)}`, cacheColor), renderStatCard("Token 汇总 (P / C / O)", formatCompactTokens(numOf(o, "totalTokens") ?? 0), `P ${formatCompactTokens(numOf(o, "totalPromptTokens") ?? 0)} / C ${formatCompactTokens(numOf(o, "totalCachedTokens") ?? 0)} / O ${formatCompactTokens(numOf(o, "totalOutputTokens") ?? 0)}`), renderStatCard("平均耗时 / TTFT", numOf(o, "avgLatencyMs") === null ? "—" : `${Math.round(numOf(o, "avgLatencyMs") ?? 0)}ms`, `TTFT ${numOf(o, "avgTtftMs") === null ? "—" : `${Math.round(numOf(o, "avgTtftMs") ?? 0)}ms`} · P90 ${numOf(o, "p90LatencyMs") === null ? "—" : `${Math.round(numOf(o, "p90LatencyMs") ?? 0)}ms`}`)) : h("div", { style: {
-						padding: "var(--agy-space-3) var(--agy-space-4) 0",
-						display: "flex",
-						gap: "var(--agy-space-2)",
-						flexWrap: "wrap"
-					} }, [
-						0,
-						1,
-						2,
-						3
-					].map((i) => h("div", {
-						key: i,
-						style: { flex: "1 1 150px" }
-					}, renderSkeletonRow(60, 12), renderSkeletonRow(90, 22))));
-					const requestsView = auditLoading && auditRequests.length === 0 ? h("div", { style: { padding: "0 var(--agy-space-4)" } }, renderSkeletonRow(95, 20), renderSkeletonRow(95, 20), renderSkeletonRow(95, 20)) : auditError ? renderStrip("error", auditError, () => void fetchAuditRequests(20, auditPage * 20)) : auditRequests.length === 0 ? h("div", { style: { padding: "var(--agy-space-4)" } }, renderEmptyState("暂无请求审计记录。")) : h("table", { className: "agy-table" }, h("thead", null, h("tr", null, h("th", null, "时间"), h("th", null, "模型"), h("th", null, "账号"), h("th", null, "Token (P / C / O)"), h("th", null, "耗时 / TTFT"), h("th", null, "状态"))), h("tbody", null, auditRequests.map((r, i) => {
-						const account = accounts.find((a) => a.id === r.accountId);
-						const statusOk = typeof r.status === "string" && !/fail|error|4\d\d|5\d\d/i.test(r.status);
-						return h("tr", { key: r.requestId ?? i }, h("td", { className: "agy-num" }, r.timestamp ?? "—"), h("td", null, r.model ?? "—"), h("td", null, account ? maskEmail(account.email) || account.alias : r.accountId ?? "未知"), h("td", { className: "agy-num" }, `${formatCompactTokens(r.promptTokens ?? 0)} / ${formatCompactTokens(r.cachedTokens ?? 0)} / ${formatCompactTokens(r.outputTokens ?? 0)}`), h("td", { className: "agy-num" }, `${r.latencyMs === void 0 ? "—" : `${Math.round(r.latencyMs)}ms`} · ${r.ttftMs === void 0 ? "—" : `${Math.round(r.ttftMs)}ms`}`), h("td", { style: { color: statusOk ? "var(--agy-strong-ok)" : "var(--agy-strong-danger)" } }, r.status ?? "—"));
-					})));
-					const sessionsView = auditSessionsLoading && auditSessions.length === 0 ? h("div", { style: { padding: "0 var(--agy-space-4)" } }, renderSkeletonRow(95, 20), renderSkeletonRow(95, 20), renderSkeletonRow(95, 20)) : auditError ? renderStrip("error", auditError, () => void fetchAuditSessions(20, auditSessionsPage * 20)) : auditSessions.length === 0 ? h("div", { style: { padding: "var(--agy-space-4)" } }, renderEmptyState("暂无会话审计记录。")) : h("table", { className: "agy-table" }, h("thead", null, h("tr", null, h("th", null, "更新时间"), h("th", null, "会话 ID"), h("th", null, "账号"), h("th", null, "请求数 (总数 / 成功 / 失败)"), h("th", null, "Token (Prompt / 命中缓存 / 命中率)"), h("th", null, "状态/详情"))), h("tbody", null, auditSessions.map((s, i) => {
-						const account = accounts.find((a) => a.id === s.accountId);
-						const shortId = s.sessionId ? `${s.sessionId.slice(0, 8)}…${s.sessionId.slice(-4)}` : "—";
-						return h("tr", { key: s.sessionId ?? i }, h("td", { className: "agy-num" }, s.updatedAt ?? "—"), h("td", { title: s.sessionId }, shortId), h("td", null, account ? maskEmail(account.email) || account.alias : s.accountId ?? "未知"), h("td", { className: "agy-num" }, `${formatNumber(s.totalRequests ?? 0)} / ${formatNumber(s.totalSuccess ?? 0)} / ${formatNumber(s.totalFailed ?? 0)}`), h("td", { className: "agy-num" }, `${formatCompactTokens(s.totalPromptTokens ?? 0)} / ${formatCompactTokens(s.totalCachedTokens ?? 0)} / ${typeof s.cacheHitRate === "number" ? `${(s.cacheHitRate * 100).toFixed(1)}%` : "—"}`), h("td", {
-							title: s.lastError ?? void 0,
-							style: { color: (s.totalFailed ?? 0) > 0 ? "var(--agy-strong-warn)" : "var(--agy-strong-ok)" }
-						}, s.status ?? s.lastError ?? "—"));
-					})));
-					const totalForTab = auditTab === "requests" ? auditTotal : auditSessionsTotal;
-					const pageForTab = auditTab === "requests" ? auditPage : auditSessionsPage;
-					const setPageForTab = (next) => {
-						if (auditTab === "requests") setAuditPage(next);
-						else setAuditSessionsPage(next);
-					};
-					const canPrev = pageForTab > 0;
-					const canNext = (pageForTab + 1) * 20 < totalForTab;
-					return portalToBody(h("div", {
-						className: "agy-drawer-backdrop",
-						onClick: (e) => {
-							if (e.target === e.currentTarget) setShowAuditDrawer(false);
-						}
-					}, h("div", {
-						className: "agy-drawer",
-						role: "dialog",
-						"aria-modal": true,
-						"aria-label": "请求审计与会话统计"
-					}, h("div", { style: {
-						display: "flex",
-						alignItems: "center",
-						justifyContent: "space-between",
-						gap: "var(--agy-space-2)",
-						padding: "var(--agy-space-3) var(--agy-space-4)",
-						borderBottom: "1px solid var(--agy-drawer-border)"
-					} }, h("div", { style: S.panelTitle }, "请求审计与会话统计 (Audit Log)"), h("div", { style: {
-						display: "flex",
-						gap: "5px"
-					} }, h("button", {
-						className: "agy-btn",
-						style: {
-							...S.btnSm,
-							background: "var(--agy-drawer-btn-bg)",
-							color: "var(--agy-drawer-btn-text)",
-							border: "1px solid var(--agy-drawer-btn-border)"
-						},
-						onClick: () => {
-							if (auditTab === "requests") fetchAuditRequests(20, auditPage * 20);
-							else fetchAuditSessions(20, auditSessionsPage * 20);
-						},
-						"aria-label": "刷新审计数据"
-					}, uiIcon("refresh", 12), " 刷新"), h("button", {
-						className: "agy-btn",
-						style: {
-							...S.btnSm,
-							background: "var(--agy-drawer-btn-bg)",
-							color: "var(--agy-drawer-btn-text)",
-							border: "1px solid var(--agy-drawer-btn-border)"
-						},
-						onClick: () => setShowAuditDrawer(false),
-						"aria-label": "关闭审计抽屉"
-					}, uiIcon("x", 12)))), summaryCards, h("div", { style: {
-						padding: "var(--agy-space-3) var(--agy-space-4) 0",
-						display: "flex",
-						gap: "var(--agy-space-2)",
-						alignItems: "center",
-						flexWrap: "wrap"
-					} }, h("div", {
-						style: S.segGroup,
-						role: "tablist",
-						"aria-label": "审计视图切换"
-					}, h("button", {
-						role: "tab",
-						"aria-selected": auditTab === "requests",
-						style: auditTab === "requests" ? S.segBtnActive : S.segBtn,
-						onClick: () => setAuditTab("requests")
-					}, "按请求明细 (Requests)"), h("button", {
-						role: "tab",
-						"aria-selected": auditTab === "sessions",
-						style: auditTab === "sessions" ? S.segBtnActive : S.segBtn,
-						onClick: () => setAuditTab("sessions")
-					}, "按会话统计 (Sessions)")), auditLoading || auditSessionsLoading ? h("span", { style: {
-						display: "inline-flex",
-						alignItems: "center",
-						gap: "6px",
-						fontSize: "var(--agy-font-xs)",
-						color: "var(--agy-table-faint)"
-					} }, h("span", {
-						className: "agy-spinner",
-						"aria-hidden": true
-					}), "加载中…") : null), h("div", { style: {
-						flex: 1,
-						overflow: "auto",
-						padding: "var(--agy-space-2) 0"
-					} }, auditTab === "requests" ? requestsView : sessionsView), h("div", { style: {
-						display: "flex",
-						alignItems: "center",
-						justifyContent: "flex-end",
-						gap: "var(--agy-space-2)",
-						padding: "var(--agy-space-3) var(--agy-space-4)",
-						borderTop: "1px solid var(--agy-drawer-border)"
-					} }, h("span", {
-						className: "agy-num",
-						style: {
-							fontSize: "var(--agy-font-xs)",
-							color: "var(--agy-table-faint)",
-							marginRight: "auto"
-						}
-					}, `共 ${formatNumber(totalForTab)} 条 · 每页 20 条`), h("button", {
-						className: "agy-btn",
-						style: {
-							...S.btnSm,
-							background: "var(--agy-drawer-btn-bg)",
-							color: "var(--agy-drawer-btn-text)",
-							border: "1px solid var(--agy-drawer-btn-border)"
-						},
-						disabled: !canPrev,
-						onClick: () => setPageForTab(pageForTab - 1)
-					}, "上一页"), h("span", {
-						className: "agy-num",
-						style: {
-							fontSize: "var(--agy-font-xs)",
-							color: "var(--agy-table-soft)"
-						}
-					}, `第 ${pageForTab + 1} 页`), h("button", {
-						className: "agy-btn",
-						style: {
-							...S.btnSm,
-							background: "var(--agy-drawer-btn-bg)",
-							color: "var(--agy-drawer-btn-text)",
-							border: "1px solid var(--agy-drawer-btn-border)"
-						},
-						disabled: !canNext,
-						onClick: () => setPageForTab(pageForTab + 1)
-					}, "下一页")))));
-				};
-				const renderOverviewSection = () => {
-					if (accounts.length === 0 && !status) return renderEmptyState("插件状态还在加载中。", void 0);
-					if (accounts.length === 0) return renderEmptyState("账号池为空：还没有可调度的账号。添加账号后，这里会显示额度快照与运行状态。", h("button", {
-						className: "agy-btn",
-						style: S.btnPrimary,
-						onClick: () => setActiveSection("accounts")
-					}, uiIcon("plus", 12), " 添加账号"));
-					const readyAccounts = accounts.filter((a) => a.enabled && !a.authRequired).length;
-					const lastRun = status?.lastRun;
-					const dormant = status?.dormantReason;
-					return h("div", null, dormant ? renderStrip("warn", `插件处于休眠状态：${dormant}`) : null, !pollOk ? renderStrip("warn", `轮询中断：页面展示的是 ${formatClock(lastUpdatedAt)} 拉取的最后一次数据`) : null, h("div", { style: {
-						display: "flex",
-						gap: "var(--agy-space-2)",
-						flexWrap: "wrap",
-						marginBottom: "var(--agy-space-3)"
-					} }, renderStatCard("可调度账号", `${readyAccounts} / ${accounts.length}`, `主用：${status?.pool?.primaryAccountId ?? "自动"}`), renderStatCard("Gemini App 账号", `${status?.geminiAppPool?.total ?? 0} 个`, `就绪：${status?.geminiAppPool?.ready ?? 0} 个`), renderStatCard("授权状态", isAuthed ? "正常" : "待认证", `auth: ${status?.auth?.phase ?? "—"} · poolAuth: ${poolAuthPhase}`), renderStatCard("默认模型", status?.defaultModel ?? "—", `Effort：${status?.defaultEffort ?? "—"}`), renderStatCard("上游目录模型数", formatNumber(status?.catalog?.count ?? 0), `来源：${status?.catalog?.source ?? "—"}`), renderStatCard("最近一次请求", lastRun?.ok === false ? `失败 ${lastRun?.code ?? ""}` : "成功", lastRun?.model ? `${lastRun.model} · ${lastRun.durationMs ?? "—"}ms` : "—")), h("div", { style: S.panelCaption }, "额度快照"), ...accounts.map((acc, idx) => h("div", {
-						key: acc.id,
-						className: "agy-card-hover agy-rise",
-						style: {
-							...S.card,
-							marginBottom: "var(--agy-space-2)",
-							"--i": Math.min(idx, 8)
-						}
-					}, h("div", { style: {
-						display: "flex",
-						alignItems: "center",
-						justifyContent: "space-between",
-						gap: "var(--agy-space-2)",
-						flexWrap: "wrap"
-					} }, h("span", { style: {
-						fontWeight: 700,
-						color: "var(--agy-text-primary)"
-					} }, acc.email ? acc.alias && !/^备用.*账号/i.test(acc.alias) && !/^主账号/i.test(acc.alias) ? acc.alias : maskEmail(acc.email) : acc.alias || acc.id), h("button", {
-						className: "agy-btn",
-						style: S.btnSm,
-						onClick: () => {
-							setActiveSection("models");
-							ensureModelsLoaded(acc.id);
-						}
-					}, uiIcon("layers", 11), " 查看模型")), h("div", { style: {
-						display: "flex",
-						gap: "var(--agy-space-4)",
-						flexWrap: "wrap",
-						marginTop: "var(--agy-space-1)"
-					} }, renderQuotaBar("Gemini", "google", acc), renderQuotaBar("Claude", "anthropic", acc), renderQuotaBar("GPT-OSS", "openai", acc)))));
-				};
-				const renderUsageSection = () => {
-					return h("div", null, statsError ? renderStrip("error", statsError, () => void fetchStatsOverview()) : null, h("div", { style: {
-						display: "flex",
-						gap: "var(--agy-space-2)",
-						flexWrap: "wrap",
-						marginBottom: "var(--agy-space-3)"
-					} }, statsOverview ? renderStatCard("请求总数", formatNumber(numOf(statsOverview, "totalRequests") ?? 0), `成功 ${formatNumber(numOf(statsOverview, "totalSuccess") ?? 0)} · 失败 ${formatNumber(numOf(statsOverview, "totalFailed") ?? 0)}`) : h("div", { style: {
-						...S.statBox,
-						flex: "1 1 150px"
-					} }, renderSkeletonRow(60, 12), renderSkeletonRow(90, 22)), statsOverview ? renderStatCard("Token 汇总", formatCompactTokens(numOf(statsOverview, "totalTokens") ?? 0), `Prompt ${formatCompactTokens(numOf(statsOverview, "totalPromptTokens") ?? 0)} · 输出 ${formatCompactTokens(numOf(statsOverview, "totalOutputTokens") ?? 0)}`) : h("div", { style: {
-						...S.statBox,
-						flex: "1 1 150px"
-					} }, renderSkeletonRow(60, 12), renderSkeletonRow(90, 22)), statsOverview ? renderStatCard("缓存命中率", `${((numOf(statsOverview, "cacheHitRate") ?? 0) * 100).toFixed(1)}%`, `命中 Token ${formatCompactTokens(numOf(statsOverview, "totalCachedTokens") ?? 0)}`, (numOf(statsOverview, "cacheHitRate") ?? 0) > .3 ? "var(--agy-strong-ok)" : (numOf(statsOverview, "cacheHitRate") ?? 0) >= .1 ? "var(--agy-strong-warn)" : "var(--agy-strong-neutral)") : h("div", { style: {
-						...S.statBox,
-						flex: "1 1 150px"
-					} }, renderSkeletonRow(60, 12), renderSkeletonRow(90, 22)), statsOverview ? renderStatCard("平均耗时 / TTFT", `${Math.round(numOf(statsOverview, "avgLatencyMs") ?? 0)}ms`, `TTFT ${Math.round(numOf(statsOverview, "avgTtftMs") ?? 0)}ms · P90 ${Math.round(numOf(statsOverview, "p90LatencyMs") ?? 0)}ms`) : h("div", { style: {
-						...S.statBox,
-						flex: "1 1 150px"
-					} }, renderSkeletonRow(60, 12), renderSkeletonRow(90, 22))), h("div", { style: {
-						display: "flex",
-						gap: "var(--agy-space-2)",
-						flexWrap: "wrap"
-					} }, h("button", {
-						className: "agy-btn",
-						style: S.btnPrimary,
-						onClick: () => setShowAuditDrawer(true)
-					}, uiIcon("activity", 12), " 打开请求明细与会话统计"), h("button", {
-						className: "agy-btn",
-						style: S.btnSm,
-						onClick: () => void fetchStatsOverview(),
-						"aria-label": "重新加载用量统计"
-					}, uiIcon("refresh", 12), " 重新加载")));
-				};
-				const renderDiagRow = (label, value, mono = true) => h("div", { style: {
-					display: "flex",
-					gap: "var(--agy-space-3)",
-					padding: "8px 0",
-					borderBottom: "1px solid var(--agy-border-divider)",
-					flexWrap: "wrap"
-				} }, h("span", { style: {
-					width: "170px",
-					color: "var(--agy-text-tertiary)",
-					fontSize: "var(--agy-font-sm)",
-					flexShrink: 0
-				} }, label), h("span", {
-					className: mono ? "agy-num" : void 0,
-					style: {
-						color: "var(--agy-text-primary)",
-						fontSize: "var(--agy-font-sm)",
-						wordBreak: "break-all",
-						flex: 1
-					}
-				}, value));
-				const renderDiagnosticsSection = () => {
-					const catalog = status?.catalog ?? {};
-					const lastRun = status?.lastRun ?? {};
-					const endpointErrors = Array.isArray(catalog.endpointErrors) ? catalog.endpointErrors.length : 0;
-					return h("div", null, !pollOk ? renderStrip("warn", `轮询中断：以下为 ${formatClock(lastUpdatedAt)} 的最后一次成功拉取`) : null, h("div", {
-						className: "agy-rise",
-						style: S.card
-					}, renderDiagRow("插件状态", status ? status.enabled === false ? "已停用" : "运行中" : "未加载", false), renderDiagRow("休眠原因", status?.dormantReason ?? "无", false), renderDiagRow("版本 / 构建校验", status?.distSha256 ? `${String(status.distSha256).slice(0, 16)}…` : status?.version ?? "未上报"), renderDiagRow("上游目录", `${catalog.source ?? "—"} · ${formatNumber(catalog.count ?? 0)} 个模型${endpointErrors > 0 ? ` · ${endpointErrors} 条端点错误` : ""}`, false), renderDiagRow("目录最近错误", catalog.lastError ?? "无", false), renderDiagRow("最近一次运行", lastRun.ok === void 0 ? "无记录" : `${lastRun.ok ? "成功" : `失败 (code ${lastRun.code ?? "—"})`} · ${lastRun.durationMs ?? "—"}ms · ${lastRun.model ?? "—"}`, false), renderDiagRow("授权阶段", `auth: ${status?.auth?.phase ?? "—"} · poolAuth: ${poolAuthPhase}`, false), renderDiagRow("工作区", status?.workspaceRoot ?? "未上报"), renderDiagRow("数据通道", `${base || "同源"}${API_PREFIX} · 3s 状态轮询 / 10s 统计轮询`)), h("div", { style: {
-						display: "flex",
-						gap: "var(--agy-space-2)"
-					} }, h("button", {
-						className: "agy-btn",
-						style: S.btnSmPrimary,
-						onClick: () => void refresh(),
-						disabled: isBusy
-					}, uiIcon("refresh", 12), " 立即刷新状态")));
-				};
-				const renderConfigRow = (key, label, hint) => {
-					const draft = cfgDrafts[key] ?? "";
-					return h("div", {
-						key,
-						style: {
-							display: "flex",
-							gap: "var(--agy-space-2)",
-							alignItems: "center",
-							padding: "10px 0",
-							borderBottom: "1px solid var(--agy-border-divider)",
-							flexWrap: "wrap"
-						}
-					}, h("div", { style: {
-						width: "210px",
-						flexShrink: 0
-					} }, h("div", { style: {
-						fontSize: "var(--agy-font-sm)",
-						fontWeight: 700,
-						color: "var(--agy-text-primary)"
-					} }, label), h("div", { style: {
-						fontSize: "var(--agy-font-xs)",
-						color: "var(--agy-text-tertiary)",
-						marginTop: "2px"
-					} }, hint)), h("input", {
-						className: "agy-input",
-						style: {
-							...S.input,
-							maxWidth: "380px"
-						},
-						value: draft,
-						placeholder: key === "baseUrl" ? "留空则不修改（后端不回显该值）" : hint,
-						"aria-label": label,
-						onChange: (e) => setCfgDrafts((prev) => ({
-							...prev,
-							[key]: e.target.value
-						}))
-					}), h("button", {
-						className: "agy-btn",
-						style: S.btnSmPrimary,
-						disabled: isBusy || key !== "baseUrl" && draft.trim() === "",
-						onClick: () => void setCfg(key, draft.trim())
-					}, "保存"));
-				};
-				const renderSwitchRow = (key, title, subtitle, ariaLabel, onLabel = "已开启", offLabel = "已关闭") => {
-					const checked = status?.[key] === true;
-					return h("div", { style: {
-						display: "flex",
-						gap: "var(--agy-space-2)",
-						alignItems: "center",
-						padding: "10px 0",
-						borderBottom: "1px solid var(--agy-border-subtle)",
-						flexWrap: "wrap"
-					} }, h("div", { style: {
-						width: "210px",
-						flexShrink: 0
-					} }, h("div", { style: {
-						fontSize: "var(--agy-font-sm)",
-						fontWeight: 700,
-						color: "var(--agy-text-primary)"
-					} }, title), h("div", { style: {
-						fontSize: "var(--agy-font-xs)",
-						color: "var(--agy-text-tertiary)",
-						marginTop: "2px"
-					} }, subtitle)), h("button", {
-						className: "agy-btn",
-						role: "switch",
-						"aria-checked": checked,
-						"aria-label": ariaLabel,
-						style: {
-							...S.btnSm,
-							background: checked ? "var(--agy-accent)" : "var(--agy-bg-btn)",
-							color: checked ? "var(--agy-on-accent)" : "var(--agy-text-btn)",
-							border: `1px solid ${checked ? "var(--agy-border-btn-primary)" : "var(--agy-border-btn)"}`
-						},
-						disabled: isBusy,
-						onClick: () => void setCfg(String(key), !checked)
-					}, checked ? onLabel : offLabel));
-				};
-				const renderConfigSection = () => {
-					const hasToken = status?.hasGeminiAppToken === true;
-					return h("div", null, h("div", {
-						className: "agy-rise",
-						style: S.card
-					}, h("div", {
-						style: S.panelCaption,
-						marginBottom: "var(--agy-space-1)"
-					}, "可写配置（POST /config）"), renderConfigRow("defaultModel", "默认模型 (defaultModel)", status?.defaultModel ?? "当前值将在状态轮询后回填"), renderConfigRow("defaultEffort", "默认 Effort (defaultEffort)", status?.defaultEffort ?? "例如 low / medium / high"), renderConfigRow("baseUrl", "上游地址 (baseUrl)", "高级：仅在你明确需要切换上游时填写"), renderSwitchRow("askTool", "Ask 工具注册 (askTool)", "在 DSH 中注册 agy ask 工具开关", "切换 Ask 工具注册", "已注册", "未注册")), h("div", {
-						className: "agy-rise",
-						style: {
-							...S.card,
-							marginTop: "var(--agy-space-3)"
-						}
-					}, h("div", {
-						style: S.panelCaption,
-						marginBottom: "var(--agy-space-1)"
-					}, "Gemini App (Robin) 双轨分流"), renderSwitchRow("geminiAppOffloadEnabled", "无关工具任务分流至 Gemini App", "启用后将无工具调用请求自动分流至 Gemini App API（并同步启用 geminiAppEnabled）", "切换无关工具任务分流至 Gemini App"), renderSwitchRow("geminiAppAskToolEnabled", "委派工具 (gemini_app_ask)", "在主 Agent 会话中注册 gemini_app_ask 工具，供主动委派独立无工具子任务", "切换委派工具 gemini_app_ask"), renderSwitchRow("geminiAppFreshSessionSingleTurn", "小上下文单轮裁剪", "开启后在上下文较小时仅保留 system 与最后一条 user 消息起新会话", "切换小上下文单轮裁剪"), renderSwitchRow("geminiAppOffloadFallbackToAgy", "失败自动回退 AGY", "Gemini App 首包前失败时自动无缝回退至 AGY 账号池", "切换失败自动回退 AGY"), h("div", { style: {
-						display: "flex",
-						gap: "var(--agy-space-2)",
-						alignItems: "center",
-						padding: "10px 0",
-						flexWrap: "wrap"
-					} }, h("div", { style: {
-						width: "210px",
-						flexShrink: 0
-					} }, h("div", { style: {
-						fontSize: "var(--agy-font-sm)",
-						fontWeight: 700,
-						color: "var(--agy-text-primary)"
-					} }, "Gemini App Token"), h("div", { style: {
-						fontSize: "var(--agy-font-xs)",
-						color: hasToken ? "var(--agy-text-success, #22c55e)" : "var(--agy-text-tertiary)",
-						marginTop: "2px"
-					} }, hasToken ? "状态：已配置" : "状态：未配置")), h("input", {
-						type: "password",
-						value: geminiAppTokenInput,
-						placeholder: hasToken ? "已配置（输入新 Token 可覆盖，留空保存可清除）" : "粘贴 ya29.m.* Assistant OAuth Token",
-						"aria-label": "Gemini App Token",
-						style: {
-							...S.input,
-							flex: "1 1 240px",
-							minWidth: "200px"
-						},
-						onChange: (e) => setGeminiAppTokenInput(e.target.value)
-					}), h("button", {
-						className: "agy-btn",
-						style: S.btnSm,
-						disabled: isBusy,
-						onClick: () => {
-							const val = geminiAppTokenInput.trim();
-							setCfg("geminiAppToken", val).then(() => setGeminiAppTokenInput(""));
-						}
-					}, "保存"))));
-				};
-				const SECTIONS = [
-					{
-						key: "overview",
-						label: "总览"
-					},
-					{
-						key: "accounts",
-						label: "账号"
-					},
-					{
-						key: "models",
-						label: "模型"
-					},
-					{
-						key: "usage",
-						label: "用量统计"
-					},
-					{
-						key: "diagnostics",
-						label: "诊断"
-					},
-					{
-						key: "config",
-						label: "配置"
-					}
-				];
-				const onNavKeyDown = (ev) => {
-					const idx = SECTIONS.findIndex((s) => s.key === activeSection);
-					let next = -1;
-					if (ev.key === "ArrowRight") next = (idx + 1) % SECTIONS.length;
-					else if (ev.key === "ArrowLeft") next = (idx - 1 + SECTIONS.length) % SECTIONS.length;
-					else if (ev.key === "Home") next = 0;
-					else if (ev.key === "End") next = SECTIONS.length - 1;
-					if (next < 0) return;
-					ev.preventDefault?.();
-					const key = SECTIONS[next].key;
-					setActiveSection(key);
-					tabRefs.current[key]?.focus?.();
-				};
-				const navBar = h("nav", {
-					style: S.navBar,
-					role: "tablist",
-					"aria-label": `${SETTINGS_SECTION_LABEL} 设置分区`,
-					onKeyDown: onNavKeyDown
-				}, ...SECTIONS.map((s) => h("button", {
-					key: s.key,
-					ref: (node) => {
-						tabRefs.current[s.key] = node;
-					},
-					className: "agy-tab",
-					role: "tab",
-					id: `agy-tab-${s.key}`,
-					"aria-selected": activeSection === s.key,
-					"aria-controls": `agy-panel-${s.key}`,
-					tabIndex: activeSection === s.key ? 0 : -1,
-					style: S.tab,
-					onClick: () => setActiveSection(s.key)
-				}, s.label)));
-				const loginGeminiAppAccount = async () => {
-					const cred = geminiAppCredInput.trim();
-					if (!cred) {
-						showToast("请粘贴 oauth_token、MasterToken 或 Access Token", "error");
-						return;
-					}
-					setGeminiAppBusy(true);
-					try {
-						const payload = {};
-						const email = geminiAppEmailInput.trim();
-						if (email) payload.email = email;
-						if (cred.startsWith("aas_et/")) payload.masterToken = cred;
-						else if (cred.startsWith("ya29.")) payload.accessToken = cred;
-						else payload.oauthToken = cred;
-						const res = await fetchWithFallback(`${API_PREFIX}/gemini-app/pool/login`, {
-							method: "POST",
-							headers: { "content-type": "application/json" },
-							body: JSON.stringify(payload)
-						});
-						const data = res ? await res.json() : null;
-						if (!res || !res.ok || !data?.ok) {
-							showToast(data?.error || `登录失败 (${res?.status ?? "network"})`, "error");
-							return;
-						}
-						setGeminiAppEmailInput("");
-						setGeminiAppCredInput("");
-						setAddingGeminiAppAccount(false);
-						const next = await getStatus();
-						if (next) setStatus(next);
-						showToast("Gemini App 账号已添加", "success");
-					} catch (err) {
-						showToast(`添加失败：${err instanceof Error ? err.message : String(err)}`, "error");
-					} finally {
-						setGeminiAppBusy(false);
-					}
-				};
-				const removeGeminiAppAccount = async (id) => {
-					setGeminiAppBusy(true);
-					try {
-						const res = await fetchWithFallback(`${API_PREFIX}/gemini-app/pool/remove`, {
-							method: "POST",
-							headers: { "content-type": "application/json" },
-							body: JSON.stringify({ id })
-						});
-						if (!res || !res.ok) {
-							showToast(`删除失败 (${res?.status ?? "network"})`, "error");
-							return;
-						}
-						const next = await getStatus();
-						if (next) setStatus(next);
-						showToast("已移除 Gemini App 账号", "success");
-					} catch (err) {
-						showToast(`删除失败：${err instanceof Error ? err.message : String(err)}`, "error");
-					} finally {
-						setGeminiAppBusy(false);
-					}
-				};
-				const geminiPool = status?.geminiAppPool ?? {
-					total: 0,
-					ready: 0,
-					accounts: []
-				};
-				const geminiAppAccountsCard = h("div", { style: {
-					...S.card,
-					marginTop: "var(--agy-space-3)"
-				} }, h("div", { style: {
-					display: "flex",
-					justifyContent: "space-between",
-					alignItems: "center",
-					gap: "var(--agy-space-2)",
-					flexWrap: "wrap"
-				} }, h("div", { style: {
-					display: "flex",
-					alignItems: "center",
-					gap: "var(--agy-space-2)"
-				} }, h("span", { style: S.panelTitle }, "Gemini App 账号"), h("span", { style: S.muted }, `已登录 ${geminiPool.total} 个账号`)), h("button", {
-					className: "agy-btn",
-					style: S.btnSmPrimary,
-					disabled: geminiAppBusy,
-					onClick: () => setAddingGeminiAppAccount((v) => !v)
-				}, uiIcon("plus", 12), addingGeminiAppAccount ? " 收起" : " 添加 / 登录账号")), addingGeminiAppAccount ? h("div", { style: {
-					marginTop: "var(--agy-space-3)",
-					paddingTop: "var(--agy-space-3)",
-					borderTop: "1px solid var(--agy-border)",
-					display: "flex",
-					flexDirection: "column",
-					gap: "var(--agy-space-2)"
-				} }, h("div", { style: {
-					display: "flex",
-					alignItems: "center",
-					gap: "var(--agy-space-2)",
-					flexWrap: "wrap"
-				} }, h("button", {
-					className: "agy-btn",
-					style: S.btnSm,
-					onClick: () => {
-						win.open?.("https://accounts.google.com/EmbeddedSetup", "_blank");
-					}
-				}, "打开 Google EmbeddedSetup 登录页"), h("span", { style: S.muted }, "登录后从 Cookie 提取 oauth_token，或直接粘贴 aas_et/ MasterToken / ya29.m.* Token")), h("input", {
-					type: "text",
-					placeholder: "邮箱（可选，换票时自动识别）",
-					value: geminiAppEmailInput,
-					onChange: (e) => setGeminiAppEmailInput(e.target.value),
-					style: S.input
-				}), h("input", {
-					type: "password",
-					placeholder: "粘贴 oauth_token / aas_et/... / ya29.m.*",
-					value: geminiAppCredInput,
-					onChange: (e) => setGeminiAppCredInput(e.target.value),
-					style: S.input
-				}), h("div", { style: {
-					display: "flex",
-					gap: "var(--agy-space-2)"
-				} }, h("button", {
-					className: "agy-btn",
-					style: S.btnSmPrimary,
-					disabled: geminiAppBusy || !geminiAppCredInput.trim(),
-					onClick: () => {
-						loginGeminiAppAccount();
-					}
-				}, geminiAppBusy ? "处理中..." : "保存并入池"), h("button", {
-					className: "agy-btn",
-					style: S.btnSm,
-					disabled: geminiAppBusy,
-					onClick: () => setAddingGeminiAppAccount(false)
-				}, "取消"))) : null, geminiPool.accounts.length > 0 ? h("div", { style: {
-					marginTop: "var(--agy-space-2)",
-					display: "flex",
-					flexDirection: "column",
-					gap: "6px"
-				} }, ...geminiPool.accounts.map((acc) => {
-					const badgeText = acc.status === "ready" ? "就绪" : acc.status === "cooldown" ? "冷却中" : "需重新登录";
-					const badgeStyle = acc.status === "ready" ? S.badgeReady : acc.status === "cooldown" ? S.badgeTag : S.badgeUnready;
-					return h("div", {
-						key: acc.id,
-						style: {
-							display: "flex",
-							justifyContent: "space-between",
-							alignItems: "center",
-							padding: "6px 8px",
-							borderRadius: "6px",
-							background: "var(--agy-surface-2, rgba(127,127,127,0.06))"
-						}
-					}, h("div", { style: {
-						display: "flex",
-						alignItems: "center",
-						gap: "8px"
-					} }, h("span", { style: { fontSize: "13px" } }, acc.email ? maskEmail(acc.email) : acc.id), h("span", { style: badgeStyle }, badgeText)), h("button", {
-						className: "agy-btn",
-						style: S.btnSm,
-						disabled: geminiAppBusy,
-						onClick: () => {
-							removeGeminiAppAccount(acc.id);
-						}
-					}, "删除"));
-				})) : null);
-				const sectionBody = () => {
-					switch (activeSection) {
-						case "overview": return renderOverviewSection();
-						case "accounts": return h("div", null, addAccountSection, ...renderedAccountCards, geminiAppAccountsCard);
-						case "models": return renderModelsSection();
-						case "usage": return renderUsageSection();
-						case "diagnostics": return renderDiagnosticsSection();
-						case "config": return renderConfigSection();
-					}
-				};
-				if (status === null) return h("div", {
+				if (!status) return h("div", {
 					className: "agy-root",
 					style: S.container
-				}, h("style", null, THEME_CSS), h("div", { style: S.headerCard }, h("div", { style: {
+				}, h("style", null, THEME_CSS), h("div", { style: {
+					...S.heroCard,
+					display: "flex",
+					justifyContent: "space-between",
+					alignItems: "center"
+				} }, h("div", { style: {
 					display: "flex",
 					alignItems: "center",
 					gap: "var(--agy-space-2)"
-				} }, agyIcon(18), h("span", { style: S.panelTitle }, SETTINGS_SECTION_LABEL)), h("span", { style: {
+				} }, agyIcon(20), h("span", { style: S.panelTitle }, SETTINGS_SECTION_LABEL)), h("span", { style: {
 					display: "inline-flex",
 					alignItems: "center",
 					gap: "6px",
@@ -3260,62 +3776,216 @@ body[data-theme="dark"] {
 				} }, h("span", {
 					className: "agy-spinner",
 					"aria-hidden": true
-				}), "正在加载状态")), renderToastBanner(), navBar, renderSkeletonCard(), renderSkeletonCard());
-				const headerCard = h("div", { style: S.headerCard }, h("div", { style: {
+				}), "正在加载状态")), renderToastBanner(), navBar, h("div", { style: S.card }, h("div", {
+					className: "agy-skeleton",
+					style: {
+						width: "42%",
+						height: "16px",
+						marginBottom: "var(--agy-space-3)"
+					}
+				}), h("div", {
+					className: "agy-skeleton",
+					style: {
+						width: "88%",
+						height: "12px",
+						marginBottom: "var(--agy-space-2)"
+					}
+				}), h("div", {
+					className: "agy-skeleton",
+					style: {
+						width: "72%",
+						height: "12px"
+					}
+				})));
+				const readyAccounts = accounts.filter((a) => {
+					const inCooldown = Object.values(a.cooldowns ?? {}).some((until) => typeof until === "number" && until > Date.now());
+					return a.enabled && !a.authRequired && !inCooldown;
+				}).length;
+				const primaryAcc = accounts.find((a) => a.id === status.pool?.primaryAccountId);
+				const primaryLabel = primaryAcc ? maskEmail(primaryAcc.email) || primaryAcc.alias || primaryAcc.id : accounts.length > 0 ? "自动调度" : "未配置";
+				const defaultModelLabel = status.defaultModel || "未设置";
+				const defaultEffortLabel = status.defaultEffort || "medium";
+				const statusTone = !pollOk ? "warn" : readyAccounts > 0 ? "ok" : accounts.length > 0 ? "danger" : "neutral";
+				const statusText = !pollOk ? `轮询中断 · ${formatClock(lastUpdatedAt)}` : readyAccounts > 0 ? `运行中 · ${readyAccounts}/${accounts.length} 就绪` : accounts.length > 0 ? "需授权或冷却中" : "待添加账号";
+				const heroHeader = h("header", { style: S.heroCard }, h("div", { style: {
+					display: "flex",
+					justifyContent: "space-between",
+					alignItems: "flex-start",
+					gap: "var(--agy-space-3)",
+					flexWrap: "wrap"
+				} }, h("div", { style: {
+					display: "flex",
+					flexDirection: "column",
+					gap: "6px"
+				} }, h("div", { style: {
 					display: "flex",
 					alignItems: "center",
 					gap: "var(--agy-space-2)",
-					flexWrap: "wrap",
-					minWidth: 0
-				} }, agyIcon(18), h("span", { style: S.panelTitle }, SETTINGS_SECTION_LABEL), h("span", { style: isAuthed ? S.badgeReady : S.badgeUnready }, isAuthed ? "就绪" : "待认证"), h("span", {
-					className: "agy-num",
-					title: pollOk ? "状态轮询正常（3 秒间隔）" : "轮询中断，展示的是最后一次成功拉取的数据",
-					style: {
-						fontSize: "var(--agy-font-xs)",
-						padding: "2px 8px",
-						borderRadius: "var(--agy-radius-pill)",
-						background: pollOk ? "var(--agy-neutral-bg)" : "var(--agy-warn-bg)",
-						border: `1px solid ${pollOk ? "var(--agy-neutral-border)" : "var(--agy-warn-border)"}`,
-						color: pollOk ? "var(--agy-neutral-text)" : "var(--agy-warn-text)"
-					}
-				}, pollOk ? `更新于 ${formatClock(lastUpdatedAt)}` : `轮询中断 · 上次成功 ${formatClock(lastUpdatedAt)}`)), h("div", { style: {
+					flexWrap: "wrap"
+				} }, agyIcon(20), h("h2", { style: {
+					...S.panelTitle,
+					margin: 0
+				} }, SETTINGS_SECTION_LABEL), renderBadge(statusText, statusTone), status.version ? renderBadge(`v${status.version}`, "neutral") : null), h("div", { style: {
 					display: "flex",
-					gap: "5px",
+					alignItems: "center",
+					gap: "var(--agy-space-3)",
+					flexWrap: "wrap",
+					fontSize: "var(--agy-font-xs)",
+					color: "var(--agy-text-secondary)"
+				} }, h("span", null, "主用账号：", h("strong", { style: { color: "var(--agy-text-primary)" } }, primaryLabel)), h("span", { style: { color: "var(--agy-border-divider)" } }, "·"), h("span", null, "默认模型：", h("strong", {
+					className: "agy-num",
+					style: { color: "var(--agy-text-primary)" }
+				}, defaultModelLabel), ` (${defaultEffortLabel})`))), h("div", { style: {
+					display: "flex",
+					alignItems: "center",
+					gap: "var(--agy-space-2)",
 					flexWrap: "wrap"
 				} }, h("button", {
 					className: "agy-btn",
 					style: S.btnSm,
-					onClick: () => setShowAuditDrawer(true)
-				}, uiIcon("activity", 12), " 审计明细"), h("button", {
-					className: "agy-btn",
-					style: S.btnSm,
-					onClick: () => void refreshQuota(),
-					disabled: isBusy
-				}, uiIcon("zap", 12), " 刷新额度"), h("button", {
+					disabled: loadingAction !== null,
+					onClick: () => {
+						refreshStatusNow();
+					}
+				}, uiIcon("refresh", 12), loadingAction === "refresh" ? " 刷新中…" : " 刷新状态"), h("button", {
 					className: "agy-btn",
 					style: S.btnSmPrimary,
 					onClick: () => {
 						setActiveSection("accounts");
 						setAddingAccount(true);
-					},
-					disabled: isBusy
-				}, uiIcon("plus", 12), " 添加账号"), h("button", {
-					className: "agy-btn",
-					style: S.btnSm,
-					onClick: () => void refresh(),
-					disabled: isBusy,
-					"aria-label": "刷新插件状态"
-				}, uiIcon("refresh", 12))));
+					}
+				}, uiIcon("plus", 12), " 添加账号"))));
+				const isBusy = loadingAction !== null;
+				const sectionBody = () => {
+					switch (activeSection) {
+						case "overview": return h(OverviewSection, {
+							status,
+							accounts,
+							pollOk,
+							lastUpdatedAt,
+							onNavigate: setActiveSection,
+							onBeginAddAccount: () => {
+								setActiveSection("accounts");
+								setAddingAccount(true);
+							},
+							onRefreshStatus: () => {
+								refreshStatusNow();
+							}
+						});
+						case "accounts": return h(AccountsSection, {
+							status,
+							accounts,
+							isBusy,
+							addingAccount,
+							aliasInput,
+							manualCodeInput,
+							editingProxyId,
+							proxyInput,
+							geminiAppEmailInput,
+							geminiAppCookieInput,
+							geminiAppBusy,
+							onAliasInputChange: setAliasInput,
+							onManualCodeInputChange: setManualCodeInput,
+							onToggleAddingAccount: setAddingAccount,
+							onBeginAddAccount: beginAddAccount,
+							onCancelAddAccount: cancelAddAccount,
+							onSubmitManualCode: submitManualCode,
+							onSetPrimary: (id) => runPoolAction(`primary-${id}`, "/pool/primary", { id }, "已设为主用账号"),
+							onSyncQuota: (id) => runPoolAction(`quota-${id}`, "/pool/refresh-quota", { id }, "已同步配额"),
+							onClearCooldown: (id) => runPoolAction(`cooldown-${id}`, "/pool/clear-cooldown", { id }, "已清除冷却"),
+							onRemoveAccount: (id) => runPoolAction(`remove-${id}`, "/pool/remove", { id }, "已移除账号"),
+							onStartEditProxy: (id, currentProxy) => {
+								setEditingProxyId(id);
+								setProxyInput(currentProxy);
+							},
+							onCancelEditProxy: () => {
+								setEditingProxyId(null);
+								setProxyInput("");
+							},
+							onProxyInputChange: setProxyInput,
+							onSaveProxy: async (id) => {
+								await runPoolAction(`proxy-${id}`, "/pool/proxy", {
+									id,
+									proxyUrl: proxyInput.trim()
+								}, "已更新代理设置");
+								setEditingProxyId(null);
+								setProxyInput("");
+							},
+							onViewAccountModels: handleViewAccountModels,
+							onGeminiAppEmailChange: setGeminiAppEmailInput,
+							onGeminiAppCookieChange: setGeminiAppCookieInput,
+							onAddGeminiAppAccount: addGeminiAppAccount,
+							onRemoveGeminiAppAccount: removeGeminiAppAccount
+						});
+						case "models": return h(ModelsSection, {
+							status,
+							accounts,
+							modelPanels,
+							expandedModels,
+							modelQueries,
+							familyFilters,
+							isBusy,
+							onToggleExpand: (accId) => {
+								const next = !expandedModels[accId];
+								setExpandedModels((prev) => ({
+									...prev,
+									[accId]: next
+								}));
+								if (next) ensureModelsLoaded(accId);
+							},
+							onQueryChange: (accId, query) => {
+								setModelQueries((prev) => ({
+									...prev,
+									[accId]: query
+								}));
+							},
+							onFamilyFilterChange: (accId, family) => {
+								setFamilyFilters((prev) => ({
+									...prev,
+									[accId]: family
+								}));
+							},
+							onLoadModelsPanel: loadModelsPanel,
+							onRefreshModelsPanel: refreshModelsPanel,
+							onSaveConfig: saveConfig
+						});
+						case "usage": return h(UsageSection, {
+							statsOverview,
+							statsError,
+							accounts: accounts.map((a) => ({
+								id: a.id,
+								email: a.email,
+								alias: a.alias
+							})),
+							onRefreshStats: fetchStatsOverview
+						});
+						case "diagnostics": return h(DiagnosticsSection, {
+							status,
+							pollOk,
+							lastUpdatedAt,
+							poolAuthPhase,
+							isBusy,
+							onRefresh: refreshStatusNow
+						});
+						case "config": return h(ConfigSection, {
+							status,
+							isBusy,
+							onSaveConfig: saveConfig,
+							onNavigateModels: () => setActiveSection("models")
+						});
+					}
+				};
 				return h("div", {
 					className: "agy-root",
 					style: S.container
-				}, h("style", null, THEME_CSS), headerCard, renderToastBanner(), navBar, h("div", {
+				}, h("style", null, THEME_CSS), heroHeader, renderToastBanner(), navBar, h("div", {
 					key: activeSection,
 					id: `agy-panel-${activeSection}`,
+					className: "agy-fade-slide-in",
 					role: "tabpanel",
 					"aria-labelledby": `agy-tab-${activeSection}`,
 					tabIndex: 0
-				}, sectionBody()), renderAuditDrawer());
+				}, sectionBody()));
 			};
 			ctx.slots.inject("settings.section", () => {
 				return ctx.slots.register({

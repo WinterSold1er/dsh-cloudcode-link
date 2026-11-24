@@ -15,7 +15,7 @@ import {
   buildFreshSessionOptions,
   streamWithGeminiAppOffload,
 } from '../src/host/gemini-app-offload.ts'
-import { defineGeminiAppAskTool } from '../src/host/gemini-app-ask-tool.ts'
+import { defineExpertAskTool } from '../src/host/expert-ask-tool.ts'
 import {
   ProtobufWriter,
   ProtobufReader,
@@ -418,8 +418,8 @@ describe('Gemini App Offload: Streaming & Fallback', () => {
   })
 })
 
-describe('Gemini App Offload: gemini_app_ask Tool', () => {
-  it('executes stateless request with system prompt and mode selection', async () => {
+describe('Gemini App Offload: expert_ask Tool', () => {
+  it('executes stateless request with role system prompt and mode selection', async () => {
     let capturedPrompt = ''
     let capturedMode: number | undefined
     const transport = makeSuccessTransport('Tool result text', (body) => {
@@ -428,15 +428,15 @@ describe('Gemini App Offload: gemini_app_ask Tool', () => {
       capturedMode = parsed.modeId
     })
 
-    const tool = defineGeminiAppAskTool({
+    const tool = defineExpertAskTool({
       cfg: () => makeOffloadConfig(),
       transport,
     })
 
     const result = await tool.execute(
       {
-        prompt: 'Translate hello to French',
-        system: 'Output only the translation.',
+        task: 'Translate hello to French',
+        role: 'writing',
         mode: 'advanced',
       },
       { signal: new AbortController().signal } as never,
@@ -444,32 +444,31 @@ describe('Gemini App Offload: gemini_app_ask Tool', () => {
 
     assert.strictEqual(result, 'Tool result text')
     assert.ok(capturedPrompt.includes('[System Instructions]'))
-    assert.ok(capturedPrompt.includes('Output only the translation.'))
     assert.ok(capturedPrompt.includes('Translate hello to French'))
     assert.strictEqual(capturedMode, RobinBardMode.ADVANCED)
   })
 
   it('validates inputs and surfaces classified errors without swallowing', async () => {
-    const tool = defineGeminiAppAskTool({
+    const tool = defineExpertAskTool({
       cfg: () => makeOffloadConfig({ geminiAppToken: undefined }),
     })
 
     await assert.rejects(
-      () => tool.execute({ prompt: '   ' }, {} as never),
-      /prompt must be a non-empty string/,
+      () => tool.execute({ task: '   ' }, {} as never),
+      /task must be a non-empty string/,
     )
 
     await assert.rejects(
-      () => tool.execute({ prompt: 'hi', mode: 'turbo' }, {} as never),
-      /invalid mode "turbo"/,
+      () => tool.execute({ task: 'hi', mode: 'turbo' }, {} as never),
+      /mode/i,
     )
 
     const prevEnv = process.env.DSH_GEMINI_APP_TOKEN
     delete process.env.DSH_GEMINI_APP_TOKEN
     try {
       await assert.rejects(
-        () => tool.execute({ prompt: 'hi' }, {} as never),
-        /gemini_app_ask failed \[AUTH_REQUIRED\]/,
+        () => tool.execute({ task: 'hi' }, {} as never),
+        /expert_ask failed \[AUTH_REQUIRED\]/,
       )
     } finally {
       if (prevEnv !== undefined) process.env.DSH_GEMINI_APP_TOKEN = prevEnv

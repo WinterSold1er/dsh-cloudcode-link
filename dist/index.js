@@ -1,6 +1,6 @@
 import { createRequire } from "node:module";
 import path, { dirname, isAbsolute, join, resolve } from "node:path";
-import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import fs, { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import os, { homedir } from "node:os";
@@ -30232,21 +30232,25 @@ function decodeExt1003Candidate(reader) {
 			default: reader.skipField(tag.wireType);
 		}
 	}
-	const fullText = f7Text && f7Text.length > 0 ? f7Text : f2Text;
+	const fullText = f2Text !== void 0 && f2Text.length > 0 ? f2Text : f7Text !== void 0 && f7Text.length > 0 ? f7Text : f2Text ?? f7Text;
 	return fullText !== void 0 ? { fullText } : {};
 }
 function decodeExt1003BardResponse(reader) {
 	let fullText;
 	let conversationId;
 	let responseId;
+	let hasPrimaryCandidate = false;
 	while (!reader.isAtEnd()) {
 		const tag = reader.readTag();
 		if (!tag) break;
 		switch (tag.fieldNumber) {
 			case 1:
 				if (tag.wireType === 2) {
-					const cand = decodeExt1003Candidate(reader.readSubReader());
-					if (cand.fullText !== void 0) fullText = cand.fullText;
+					if (!hasPrimaryCandidate) {
+						hasPrimaryCandidate = true;
+						const cand = decodeExt1003Candidate(reader.readSubReader());
+						if (cand.fullText !== void 0) fullText = cand.fullText;
+					} else reader.skipField(tag.wireType);
 				} else reader.skipField(tag.wireType);
 				break;
 			case 2:
@@ -30789,6 +30793,7 @@ async function* mapRobinResponsesToChunks(responses, signal, onFirstEmit) {
 	let currentBlock = null;
 	let firstChunkEmitted = false;
 	let accumulatedChars = 0;
+	let lastFullText = "";
 	const notifyFirstEmit = () => {
 		if (!firstChunkEmitted) {
 			firstChunkEmitted = true;
@@ -30869,9 +30874,16 @@ async function* mapRobinResponsesToChunks(responses, signal, onFirstEmit) {
 					};
 				}
 				let textToEmit = deltaText;
-				if (!textToEmit && fullText) {
-					const prevLen = currentBlock?.type === "text" ? currentBlock.text.length : 0;
-					if (fullText.length > prevLen) textToEmit = fullText.slice(prevLen);
+				if (textToEmit && textToEmit.length > 0) lastFullText = fullText ?? lastFullText + textToEmit;
+				else if (fullText) {
+					if (fullText.startsWith(lastFullText)) textToEmit = fullText.slice(lastFullText.length);
+					else {
+						let lcp = 0;
+						const minLen = Math.min(lastFullText.length, fullText.length);
+						while (lcp < minLen && lastFullText.charCodeAt(lcp) === fullText.charCodeAt(lcp)) lcp++;
+						textToEmit = fullText.slice(lcp);
+					}
+					lastFullText = fullText;
 				}
 				if (textToEmit && textToEmit.length > 0) {
 					notifyFirstEmit();
@@ -31133,7 +31145,7 @@ var GeminiAppClient = class {
 		}
 		return grpcPayload;
 	}
-	async *executeWithToken(token, endpoint, grpcPayload, signal, onFirstEmit) {
+	async *executeWithToken(token, endpoint, grpcPayload, signal, onFirstEmit, onFullText) {
 		const headers = {
 			"content-type": "application/grpc",
 			"grpc-accept-encoding": "gzip",
@@ -31158,12 +31170,31 @@ var GeminiAppClient = class {
 			};
 			return;
 		}
-		yield* parseRobinGrpcFramesToChunks(transportResult.frames, signal, onFirstEmit);
+		if (!onFullText) {
+			yield* parseRobinGrpcFramesToChunks(transportResult.frames, signal, onFirstEmit);
+			return;
+		}
+		const reportFullText = onFullText;
+		async function* decodeFrames() {
+			for await (const frame of transportResult.frames) {
+				if (signal?.aborted) return;
+				let decoded;
+				try {
+					decoded = decodeProcessQueryResponse(frame);
+				} catch (err) {
+					throw new Error(`Failed to decode Gemini App Protobuf frame: ${err instanceof Error ? err.message : String(err)}`);
+				}
+				const fullText = decoded.chatHistoryOutput?.fullText;
+				if (fullText) reportFullText(fullText);
+				yield decoded;
+			}
+		}
+		yield* mapRobinResponsesToChunks(decodeFrames(), signal, onFirstEmit);
 	}
 	/**
 	* Primary streaming method: executes ProcessQuery gRPC call and streams StreamChunks.
 	*/
-	async *streamProcessQuery(request, signal, onFirstEmit) {
+	async *streamProcessQuery(request, signal, onFirstEmit, onFullText) {
 		const endpoint = this.config.endpoint || "robinfrontend-pa.googleapis.com";
 		const grpcPayload = this.buildGrpcPayload(request);
 		if (this.pool && this.pool.listAccounts().length > 0) {
@@ -31193,7 +31224,7 @@ var GeminiAppClient = class {
 					let hasEmittedContent = false;
 					let retrySameAccount = false;
 					let switchNextAccount = false;
-					for await (const chunk of this.executeWithToken(account.accessToken, endpoint, grpcPayload, signal, onFirstEmit)) {
+					for await (const chunk of this.executeWithToken(account.accessToken, endpoint, grpcPayload, signal, onFirstEmit, onFullText)) {
 						if (chunk.type === "content-block-start" || chunk.type === "content-block-delta") {
 							hasEmittedContent = true;
 							yield chunk;
@@ -31283,24 +31314,28 @@ var GeminiAppClient = class {
 			};
 			return;
 		}
-		yield* this.executeWithToken(token, endpoint, grpcPayload, signal, onFirstEmit);
+		yield* this.executeWithToken(token, endpoint, grpcPayload, signal, onFirstEmit, onFullText);
 	}
 	/**
 	* Non-streaming convenience method: gathers all stream chunks and returns accumulated text.
 	*/
 	async processQuery(request, signal) {
 		let accumulatedText = "";
+		let latestFullText = null;
 		let lastError = null;
-		for await (const chunk of this.streamProcessQuery(request, signal)) if (chunk.type === "text-delta") accumulatedText += chunk.text;
+		for await (const chunk of this.streamProcessQuery(request, signal, void 0, (fullText) => {
+			latestFullText = fullText;
+		})) if (chunk.type === "text-delta") accumulatedText += chunk.text;
 		else if (chunk.type === "finish") {
 			const finish = chunk;
 			if (finish.reason?.kind === "error") lastError = new GeminiAppError(finish.reason.failure?.message || "Gemini App request failed", finish.reason.failure?.code || "UNKNOWN_ERROR");
 		}
 		if (lastError) throw lastError;
+		const finalText = latestFullText ?? accumulatedText;
 		return {
-			text: accumulatedText,
+			text: finalText,
 			response: { chatHistoryOutput: {
-				fullText: accumulatedText,
+				fullText: finalText,
 				deltaText: ""
 			} }
 		};
@@ -32291,24 +32326,125 @@ var GeminiAppAdapter = class extends LlmAdapter {
 	}
 };
 //#endregion
-//#region src/host/gemini-app-ask-tool.ts
-function defineGeminiAppAskTool(deps) {
+//#region src/host/expert-ask-tool.ts
+const EXPERT_ROLES = [
+	"coding",
+	"review",
+	"debug",
+	"writing",
+	"math",
+	"general"
+];
+const ROLE_SYSTEM_PROMPTS = {
+	coding: "You are a senior software engineer. Follow the existing codebase style and conventions, handle edge cases and error paths explicitly, avoid placeholders or TODOs, and output complete, directly applicable code or precise edit blocks.",
+	review: "You are a strict code reviewer. Report only real defects—logic bugs, concurrency/nullability/security hazards, and architectural flaws—with exact file/line locations and concrete fixes. Skip trivial formatting nitpicks.",
+	debug: "You are a principal debugging specialist. Trace the causal chain from observed symptoms to the root cause, explain why it happens, and provide minimal, verifiable fix steps.",
+	writing: "You are an expert technical and editorial writer. Produce clear, well-structured, natural prose tailored to the target audience, genre, and tone.",
+	math: "You are a mathematician and algorithmist. Derive solutions step by step with rigorous notation, verify edge cases, and state the final conclusion clearly.",
+	general: "You are a principal analytical advisor. Cut straight to the essence of the problem, provide structured analysis and trade-offs, and deliver actionable conclusions."
+};
+const EXPERT_FIRST_SYSTEM_PROMPT = `## Brain/Hand Separation: Prefer \`expert_ask\` for Thinking & Creation
+
+You have access to \`expert_ask\`, which delegates reasoning, coding, review, debugging, writing, and math to a fast, free Expert model (Robin API). Act as the hands and eyes (file discovery, reading/writing, running commands/tests) and delegate non-trivial intellectual work to \`expert_ask\`:
+
+1. **When to call \`expert_ask\`**:
+   - Writing new features, refactoring code, or fixing non-trivial bugs (\`role: "coding"\` / \`"debug"\`)
+   - Code review or PR/diff evaluation (\`role: "review"\`)
+   - Writing articles, reports, copy, or translations (\`role: "writing"\`)
+   - Math problems, algorithm proofs, or complex logic analysis (\`role: "math"\`)
+   - Architecture design, tech selection, or complex problem breakdown (\`role: "general"\`)
+2. **Standard workflow**:
+   - **Coding**: Locate relevant files with \`glob\`/\`grep\` -> pass \`file_paths\` and requirements directly to \`expert_ask\` -> apply the returned solution with \`edit\`/\`write\` -> run tests to verify.
+   - **General (writing/math/Q&A)**: Call \`expert_ask\` directly -> present the result to the user (or write to a file if requested).
+3. **Exceptions**: Pure file lookups, pure command execution, or trivial 1-2 line obvious edits can be done directly without \`expert_ask\`.`;
+const DEFAULT_MAX_FILE_CHARS = 3e4;
+const DEFAULT_MAX_TOTAL_CHARS = 1e5;
+function parseFileSpec(rawSpec) {
+	const trimmed = rawSpec.trim();
+	if (!trimmed) throw new Error("expert_ask: file_paths entries must be non-empty strings");
+	const lastColon = trimmed.lastIndexOf(":");
+	if (lastColon > Math.max(trimmed.lastIndexOf("/"), trimmed.lastIndexOf("\\")) && lastColon > 0) {
+		const filePath = trimmed.slice(0, lastColon);
+		const rangePart = trimmed.slice(lastColon + 1);
+		const match = /^(\d+)-(\d+)$/.exec(rangePart);
+		if (!match) throw new Error(`expert_ask: invalid line range "${rangePart}" in "${rawSpec}", expected path:start-end`);
+		const start = Number(match[1]);
+		const end = Number(match[2]);
+		if (!Number.isInteger(start) || !Number.isInteger(end) || start < 1 || start > end) throw new Error(`expert_ask: invalid line range ${start}-${end} in "${rawSpec}" (must satisfy 1 <= start <= end)`);
+		return {
+			filePath,
+			start,
+			end
+		};
+	}
+	return { filePath: trimmed };
+}
+function readSandboxedFiles(filePaths, cwd, limits) {
+	const maxFileChars = limits?.maxFileChars ?? DEFAULT_MAX_FILE_CHARS;
+	const maxTotalChars = limits?.maxTotalChars ?? DEFAULT_MAX_TOTAL_CHARS;
+	const resolvedCwd = path.resolve(cwd);
+	const realCwd = fs.realpathSync(resolvedCwd);
+	const sections = [];
+	let totalChars = 0;
+	for (const rawSpec of filePaths) {
+		const { filePath, start, end } = parseFileSpec(rawSpec);
+		const resolvedTarget = path.resolve(resolvedCwd, filePath);
+		const relLexical = path.relative(resolvedCwd, resolvedTarget);
+		if (relLexical === "" || relLexical.startsWith("..") || path.isAbsolute(relLexical)) throw new Error(`expert_ask: path "${filePath}" is outside workspace sandbox`);
+		let realTarget;
+		try {
+			realTarget = fs.realpathSync(resolvedTarget);
+		} catch {
+			throw new Error(`expert_ask: file not found: "${filePath}"`);
+		}
+		const relReal = path.relative(realCwd, realTarget);
+		if (relReal === "" || relReal.startsWith("..") || path.isAbsolute(relReal)) throw new Error(`expert_ask: path "${filePath}" resolves outside workspace sandbox (symlink escape)`);
+		if (!fs.statSync(realTarget).isFile()) throw new Error(`expert_ask: path "${filePath}" is not a regular file`);
+		const lines = fs.readFileSync(realTarget, "utf8").split(/\r?\n/);
+		const sliceStart = start !== void 0 ? start - 1 : 0;
+		const sliceEnd = end !== void 0 ? end : lines.length;
+		let formatted = lines.slice(sliceStart, sliceEnd).map((line, idx) => `${sliceStart + idx + 1}: ${line}`).join("\n");
+		if (formatted.length > maxFileChars) formatted = formatted.slice(0, maxFileChars) + `\n[truncated: file "${rawSpec}" exceeded ${maxFileChars} chars]`;
+		const section = `=== File: ${rawSpec} ===\n${formatted}`;
+		if (totalChars + section.length > maxTotalChars) {
+			const remaining = maxTotalChars - totalChars;
+			if (remaining > 100) sections.push(section.slice(0, remaining) + `\n[truncated: total attached context exceeded ${maxTotalChars} chars]`);
+			else sections.push(`[truncated: total attached context exceeded ${maxTotalChars} chars (remaining files omitted)]`);
+			break;
+		}
+		sections.push(section);
+		totalChars += section.length;
+	}
+	return sections.join("\n\n");
+}
+function defineExpertAskTool(deps) {
 	return defineTool({
-		name: "gemini_app_ask",
-		description: "Delegate a standalone, tool-free task (such as writing an independent code snippet, summarizing text, translating, explaining concepts, or understanding images) to the Google Gemini App (Robin) API. Each call starts a fresh stateless session and does not support local tool calling. Use this when Gemini App offload/ask mode is enabled to offload tool-free work from the primary model.",
+		name: "expert_ask",
+		description: "Delegate thinking, reasoning, coding, code review, debugging, writing, math, and analysis tasks to the Expert (Robin API — fast and free). Prefer calling this tool for any non-trivial intellectual work instead of solving it yourself. Pass file_paths directly so the plugin reads files for the Expert without consuming your own context.",
 		parameters: {
-			prompt: {
+			task: {
 				type: "string",
 				required: true,
-				description: "The standalone task or question for Gemini App."
+				description: "The specific task, question, or problem for the Expert to solve."
 			},
-			system: {
+			role: {
 				type: "string",
-				description: "Optional system instructions for this stateless request."
+				enum: [...EXPERT_ROLES],
+				description: "Expert role: 'coding' | 'review' | 'debug' | 'writing' | 'math' | 'general' (default: 'general')."
+			},
+			file_paths: {
+				type: "array",
+				items: { type: "string" },
+				description: "Optional workspace-relative file paths (supports 'path/to/file.ts' or 'path/to/file.ts:10-80' 1-based inclusive line ranges) to attach directly."
+			},
+			context: {
+				type: "string",
+				description: "Optional extra context such as error logs, git diff, or constraints."
 			},
 			mode: {
 				type: "string",
-				description: "Optional Gemini App mode: 'standard' or 'advanced' (default: 'standard')."
+				enum: ["standard", "advanced"],
+				description: "Optional Robin mode: 'standard' or 'advanced' (default: 'advanced')."
 			}
 		},
 		output: {
@@ -32320,53 +32456,99 @@ function defineGeminiAppAskTool(deps) {
 		},
 		timeoutMs: 3e5,
 		async execute(args, exec) {
-			const prompt = typeof args.prompt === "string" ? args.prompt.trim() : "";
-			if (!prompt) throw new Error("gemini_app_ask: prompt must be a non-empty string");
+			const task = typeof args.task === "string" ? args.task.trim() : "";
+			if (!task) throw new Error("expert_ask: task must be a non-empty string");
+			const rawRole = typeof args.role === "string" ? args.role.trim().toLowerCase() : "";
+			const role = rawRole === "" ? "general" : rawRole;
+			if (!EXPERT_ROLES.includes(role)) throw new Error(`expert_ask: invalid role "${args.role}", expected one of ${EXPERT_ROLES.join(", ")}`);
 			const rawMode = typeof args.mode === "string" ? args.mode.trim().toLowerCase() : "";
-			if (rawMode !== "" && rawMode !== "standard" && rawMode !== "advanced") throw new Error(`gemini_app_ask: invalid mode "${args.mode}", expected "standard" or "advanced"`);
+			if (rawMode !== "" && rawMode !== "standard" && rawMode !== "advanced") throw new Error(`expert_ask: invalid mode "${args.mode}", expected "standard" or "advanced"`);
+			const mode = rawMode === "standard" ? "standard" : "advanced";
+			let attachedFiles = "";
+			if (args.file_paths !== void 0) {
+				if (!Array.isArray(args.file_paths) || args.file_paths.some((p) => typeof p !== "string")) throw new Error("expert_ask: file_paths must be an array of strings");
+				if (args.file_paths.length > 0) {
+					const cwd = deps.getCwd?.(exec) || process.cwd();
+					attachedFiles = readSandboxedFiles(args.file_paths, cwd);
+				}
+			}
+			const promptParts = [`## Task\n${task}`];
+			if (typeof args.context === "string" && args.context.trim() !== "") promptParts.push(`## Context\n${args.context.trim()}`);
+			if (attachedFiles) promptParts.push(`## Attached Files\n${attachedFiles}`);
+			const assembledPrompt = promptParts.join("\n\n");
+			const systemPrompt = ROLE_SYSTEM_PROMPTS[role];
 			const cfg = deps.cfg();
 			const timeoutMs = cfg.geminiAppTimeoutMs || 12e4;
-			const clientConfig = {
-				endpoint: cfg.geminiAppEndpoint,
-				token: cfg.geminiAppToken,
-				timeoutMs,
-				defaultModel: cfg.geminiAppDefaultModel
-			};
-			const messages = [];
-			if (typeof args.system === "string" && args.system.trim() !== "") messages.push({
-				role: "system",
-				content: args.system.trim()
-			});
-			messages.push({
-				role: "user",
-				content: prompt
-			});
-			const request = buildProcessQueryRequest({
-				model: rawMode === "advanced" ? "gemini-app-advanced" : "gemini-app-default",
-				messages
-			}, clientConfig);
-			const client = new GeminiAppClient(clientConfig, deps.transport, deps.pool);
 			const controller = new AbortController();
 			let timeoutTimer;
 			if (timeoutMs > 0) timeoutTimer = setTimeout(() => {
-				controller.abort(/* @__PURE__ */ new Error(`gemini_app_ask timed out after ${timeoutMs}ms`));
+				controller.abort(/* @__PURE__ */ new Error(`expert_ask timed out after ${timeoutMs}ms`));
 			}, timeoutMs);
 			const combinedSignal = exec?.signal ? AbortSignal.any([exec.signal, controller.signal]) : controller.signal;
 			try {
-				return (await client.processQuery(request, combinedSignal)).text;
+				if (deps.callGeminiApp) return await deps.callGeminiApp({
+					prompt: assembledPrompt,
+					system: systemPrompt,
+					mode,
+					signal: combinedSignal,
+					cfg
+				});
+				const clientConfig = {
+					endpoint: cfg.geminiAppEndpoint,
+					token: cfg.geminiAppToken,
+					timeoutMs,
+					defaultModel: cfg.geminiAppDefaultModel
+				};
+				const request = buildProcessQueryRequest({
+					model: mode === "advanced" ? "gemini-app-advanced" : "gemini-app-default",
+					messages: [{
+						role: "system",
+						content: systemPrompt
+					}, {
+						role: "user",
+						content: assembledPrompt
+					}]
+				}, clientConfig);
+				return (await new GeminiAppClient(clientConfig, deps.transport, deps.pool).processQuery(request, combinedSignal)).text;
 			} catch (err) {
 				if (err instanceof GeminiAppError) {
-					deps.log?.(`[gemini_app_ask] failed [${err.code}]: ${err.message}`);
-					throw new Error(`gemini_app_ask failed [${err.code}]: ${err.message}`);
+					deps.log?.(`[expert_ask] failed [${err.code}]: ${err.message}`);
+					throw new Error(`expert_ask failed [${err.code}]: ${err.message}`);
 				}
 				const message = err instanceof Error ? err.message : String(err);
-				deps.log?.(`[gemini_app_ask] failed: ${message}`);
-				throw new Error(`gemini_app_ask failed: ${message}`);
+				deps.log?.(`[expert_ask] failed: ${message}`);
+				throw new Error(`expert_ask failed: ${message}`);
 			} finally {
 				if (timeoutTimer) clearTimeout(timeoutTimer);
 			}
 		}
 	});
+}
+function syncExpertAskRegistration(params) {
+	const { enabled, toolsSvc, systemPromptSvc, state, deps, order = 500 } = params;
+	if (enabled) {
+		if (state.toolDispose === null && toolsSvc) {
+			const reg = toolsSvc.register(defineExpertAskTool(deps));
+			state.toolDispose = typeof reg === "function" ? reg : null;
+		}
+		if (state.promptDispose === null && systemPromptSvc) {
+			const reg = systemPromptSvc.section({
+				name: "tool:expert_ask",
+				order,
+				text: EXPERT_FIRST_SYSTEM_PROMPT
+			});
+			state.promptDispose = typeof reg === "function" ? reg : null;
+		}
+	} else {
+		if (state.toolDispose !== null) {
+			state.toolDispose();
+			state.toolDispose = null;
+		}
+		if (state.promptDispose !== null) {
+			state.promptDispose();
+			state.promptDispose = null;
+		}
+	}
 }
 //#endregion
 //#region packages/core/src/account-models.ts
@@ -35083,8 +35265,13 @@ function apply(ctx, entryConfig = {}) {
 	ctx.commands.register(cclCommandDefinition(cmdDeps, "ccl"));
 	ctx.commands.register(cclCommandDefinition(cmdDeps, "cloudcode"));
 	const toolsSvcRef = { current: null };
+	const systemPromptSvcRef = { current: null };
+	const workingDirectorySvcRef = { current: null };
 	const askToolDispose = { current: null };
-	const geminiAppAskToolDispose = { current: null };
+	const expertAskState = {
+		toolDispose: null,
+		promptDispose: null
+	};
 	const syncAskTool = () => {
 		const want = getConfig().askTool;
 		if (want && askToolDispose.current === null && toolsSvcRef.current) {
@@ -35100,34 +35287,52 @@ function apply(ctx, entryConfig = {}) {
 			askToolDispose.current = null;
 		}
 	};
-	const syncGeminiAppAskTool = () => {
-		const want = getConfig().geminiAppAskToolEnabled;
-		if (want && geminiAppAskToolDispose.current === null && toolsSvcRef.current) {
-			const reg = toolsSvcRef.current.register(defineGeminiAppAskTool({
+	const syncExpertAsk = () => {
+		syncExpertAskRegistration({
+			enabled: getConfig().geminiAppAskToolEnabled,
+			toolsSvc: toolsSvcRef.current,
+			systemPromptSvc: systemPromptSvcRef.current,
+			state: expertAskState,
+			deps: {
 				cfg: getConfig,
 				log,
-				pool: geminiAppPool
-			}));
-			geminiAppAskToolDispose.current = typeof reg === "function" ? reg : null;
-		} else if (!want && geminiAppAskToolDispose.current !== null) {
-			geminiAppAskToolDispose.current();
-			geminiAppAskToolDispose.current = null;
-		}
+				pool: geminiAppPool,
+				getCwd: (exec) => {
+					const session = exec?.agent?.session;
+					return session !== void 0 ? workingDirectorySvcRef.current?.get(session) : void 0;
+				}
+			}
+		});
 	};
 	onOverrideChanged = () => {
 		syncAskTool();
-		syncGeminiAppAskTool();
+		syncExpertAsk();
 	};
 	ctx.inject(["tools"], (sub) => {
 		toolsSvcRef.current = sub.get("tools");
 		syncAskTool();
-		syncGeminiAppAskTool();
+		syncExpertAsk();
 		return () => {
 			if (askToolDispose.current !== null) askToolDispose.current();
 			askToolDispose.current = null;
-			if (geminiAppAskToolDispose.current !== null) geminiAppAskToolDispose.current();
-			geminiAppAskToolDispose.current = null;
+			if (expertAskState.toolDispose !== null) expertAskState.toolDispose();
+			expertAskState.toolDispose = null;
 			toolsSvcRef.current = null;
+		};
+	});
+	ctx.inject(["systemPrompt"], (sub) => {
+		systemPromptSvcRef.current = sub.get("systemPrompt");
+		syncExpertAsk();
+		return () => {
+			if (expertAskState.promptDispose !== null) expertAskState.promptDispose();
+			expertAskState.promptDispose = null;
+			systemPromptSvcRef.current = null;
+		};
+	});
+	ctx.inject(["workingDirectory"], (sub) => {
+		workingDirectorySvcRef.current = sub.get("workingDirectory");
+		return () => {
+			workingDirectorySvcRef.current = null;
 		};
 	});
 	const registerRoutes = (webServer) => {
@@ -35445,7 +35650,7 @@ function apply(ctx, entryConfig = {}) {
 					if (key === "geminiAppOffloadEnabled" && body.value === true && !getConfig().geminiAppEnabled) setOverride("geminiAppEnabled", true);
 				}
 				syncAskTool();
-				syncGeminiAppAskTool();
+				syncExpertAsk();
 				syncGeminiAppAdapter();
 				sendJson(res, 200, key === "geminiAppToken" ? {
 					ok: true,
@@ -35869,12 +36074,21 @@ function apply(ctx, entryConfig = {}) {
 			clearInterval(timer);
 		};
 	});
-	ctx.effect(() => {
+	ctx.effect(() => () => {
 		auth.cancel();
 		poolAuth.cancel();
-		if (askToolDispose.current !== null) askToolDispose.current();
-		if (geminiAppAskToolDispose.current !== null) geminiAppAskToolDispose.current();
-		return () => void 0;
+		if (askToolDispose.current !== null) {
+			askToolDispose.current();
+			askToolDispose.current = null;
+		}
+		if (expertAskState.toolDispose !== null) {
+			expertAskState.toolDispose();
+			expertAskState.toolDispose = null;
+		}
+		if (expertAskState.promptDispose !== null) {
+			expertAskState.promptDispose();
+			expertAskState.promptDispose = null;
+		}
 	});
 }
 //#endregion

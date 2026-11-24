@@ -96,7 +96,7 @@ export interface PluginConfig {
   geminiAppFreshSessionSingleTurn: boolean
   /** Fall back to AGY pool if Gemini App offload fails before emitting content (default: true). */
   geminiAppOffloadFallbackToAgy: boolean
-  /** Register the dedicated gemini_app_ask tool (defaults to geminiAppOffloadEnabled). */
+  /** Register the dedicated expert_ask tool and brain/hand delegation prompt (defaults to geminiAppOffloadEnabled). */
   geminiAppAskToolEnabled: boolean
 
   // Deprecated configuration options (kept for backwards compatibility, silently ignored):

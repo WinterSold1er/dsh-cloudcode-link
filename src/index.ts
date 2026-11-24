@@ -11,7 +11,12 @@ import { dshHome, overridesPath, readOverrides, resolveConfig, stateDir } from '
 import { PROVIDER_ID, GEMINI_APP_PROVIDER_ID, type PluginConfig } from './common/types.ts'
 import { AgyAdapter } from './host/adapter.ts'
 import { GeminiAppAdapter } from './host/gemini-app-adapter.ts'
-import { defineGeminiAppAskTool } from './host/gemini-app-ask-tool.ts'
+import {
+  syncExpertAskRegistration,
+  type ExpertAskRegistrationState,
+  type SystemPromptServiceLike,
+  type ToolsServiceLike,
+} from './host/expert-ask-tool.ts'
 import {
   GeminiAppPoolManager,
   GMS_EMBEDDED_SETUP_URL,
@@ -324,10 +329,14 @@ export function apply(ctx: Context, entryConfig: Record<string, unknown> = {}): 
   ctx.commands.register(cclCommandDefinition(cmdDeps, 'ccl'))
   ctx.commands.register(cclCommandDefinition(cmdDeps, 'cloudcode'))
 
-  // ---- tool registration (agy_ask & gemini_app_ask) ----
-  const toolsSvcRef: { current: { register: (t: unknown) => unknown } | null } = { current: null }
+  // ---- tool registration (agy_ask & expert_ask) ----
+  const toolsSvcRef: { current: ToolsServiceLike | null } = { current: null }
+  const systemPromptSvcRef: { current: SystemPromptServiceLike | null } = { current: null }
+  const workingDirectorySvcRef: { current: { get: (session: unknown) => string | undefined } | null } = {
+    current: null,
+  }
   const askToolDispose = { current: null as null | (() => void) }
-  const geminiAppAskToolDispose = { current: null as null | (() => void) }
+  const expertAskState: ExpertAskRegistrationState = { toolDispose: null, promptDispose: null }
   const syncAskTool = (): void => {
     const want = getConfig().askTool
     if (want && askToolDispose.current === null && toolsSvcRef.current) {
@@ -340,33 +349,57 @@ export function apply(ctx: Context, entryConfig: Record<string, unknown> = {}): 
       askToolDispose.current = null
     }
   }
-  const syncGeminiAppAskTool = (): void => {
-    const want = getConfig().geminiAppAskToolEnabled
-    if (want && geminiAppAskToolDispose.current === null && toolsSvcRef.current) {
-      const reg = toolsSvcRef.current.register(
-        defineGeminiAppAskTool({ cfg: getConfig, log, pool: geminiAppPool }),
-      ) as unknown as () => void
-      geminiAppAskToolDispose.current = typeof reg === 'function' ? reg : null
-    } else if (!want && geminiAppAskToolDispose.current !== null) {
-      geminiAppAskToolDispose.current()
-      geminiAppAskToolDispose.current = null
-    }
+  const syncExpertAsk = (): void => {
+    syncExpertAskRegistration({
+      enabled: getConfig().geminiAppAskToolEnabled,
+      toolsSvc: toolsSvcRef.current,
+      systemPromptSvc: systemPromptSvcRef.current,
+      state: expertAskState,
+      deps: {
+        cfg: getConfig,
+        log,
+        pool: geminiAppPool,
+        getCwd: (exec) => {
+          const session = (exec as { agent?: { session?: unknown } } | undefined)?.agent?.session
+          return session !== undefined ? workingDirectorySvcRef.current?.get(session) : undefined
+        },
+      },
+    })
   }
   onOverrideChanged = () => {
     syncAskTool()
-    syncGeminiAppAskTool()
+    syncExpertAsk()
   }
 
   ctx.inject(['tools'], (sub) => {
-    toolsSvcRef.current = sub.get('tools') as { register: (t: unknown) => unknown }
+    toolsSvcRef.current = sub.get('tools') as ToolsServiceLike
     syncAskTool()
-    syncGeminiAppAskTool()
+    syncExpertAsk()
     return () => {
       if (askToolDispose.current !== null) askToolDispose.current()
       askToolDispose.current = null
-      if (geminiAppAskToolDispose.current !== null) geminiAppAskToolDispose.current()
-      geminiAppAskToolDispose.current = null
+      if (expertAskState.toolDispose !== null) expertAskState.toolDispose()
+      expertAskState.toolDispose = null
       toolsSvcRef.current = null
+    }
+  })
+
+  ctx.inject(['systemPrompt'], (sub) => {
+    systemPromptSvcRef.current = sub.get('systemPrompt') as SystemPromptServiceLike
+    syncExpertAsk()
+    return () => {
+      if (expertAskState.promptDispose !== null) expertAskState.promptDispose()
+      expertAskState.promptDispose = null
+      systemPromptSvcRef.current = null
+    }
+  })
+
+  ctx.inject(['workingDirectory'], (sub) => {
+    workingDirectorySvcRef.current = sub.get('workingDirectory') as {
+      get: (session: unknown) => string | undefined
+    }
+    return () => {
+      workingDirectorySvcRef.current = null
     }
   })
 
@@ -681,7 +714,7 @@ export function apply(ctx: Context, entryConfig: Record<string, unknown> = {}): 
           }
         }
         syncAskTool()
-        syncGeminiAppAskTool()
+        syncExpertAsk()
         syncGeminiAppAdapter()
         sendJson(
           res as RawRes,
@@ -1140,11 +1173,20 @@ export function apply(ctx: Context, entryConfig: Record<string, unknown> = {}): 
     }
   })
 
-  ctx.effect(() => {
+  ctx.effect(() => () => {
     auth.cancel()
     void poolAuth.cancel()
-    if (askToolDispose.current !== null) askToolDispose.current()
-    if (geminiAppAskToolDispose.current !== null) geminiAppAskToolDispose.current()
-    return () => undefined
+    if (askToolDispose.current !== null) {
+      askToolDispose.current()
+      askToolDispose.current = null
+    }
+    if (expertAskState.toolDispose !== null) {
+      expertAskState.toolDispose()
+      expertAskState.toolDispose = null
+    }
+    if (expertAskState.promptDispose !== null) {
+      expertAskState.promptDispose()
+      expertAskState.promptDispose = null
+    }
   })
 }
